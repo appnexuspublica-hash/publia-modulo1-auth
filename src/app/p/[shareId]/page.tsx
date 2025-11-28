@@ -1,124 +1,149 @@
 // src/app/p/[shareId]/page.tsx
-import { createClient } from "@supabase/supabase-js";
-import Image from "next/image";
-import {
-  ChatMessagesList,
-  ChatMessage,
-} from "@/app/chat/components/ChatMessagesList";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+import { notFound } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
+
+type PageProps = {
+  params: {
+    shareId: string;
+  };
+};
 
 type ConversationRow = {
   id: string;
   title: string | null;
-  is_shared: boolean;
-  share_id: string;
+  created_at: string;
 };
 
-interface SharedChatPageProps {
-  params: {
-    shareId: string;
-  };
-}
+type MessageRow = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
 
-export default async function SharedChatPage({ params }: SharedChatPageProps) {
+export default async function SharedConversationPage({ params }: PageProps) {
   const { shareId } = params;
 
-  const { data: conv, error: convError } = await supabase
-    .from("conversations")
-    .select("id, title, is_shared, share_id")
-    .eq("share_id", shareId)
-    .eq("is_shared", true)
-    .single<ConversationRow>();
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (convError || !conv) {
+  // ⚠️ Não quebra o build se as envs não existirem
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.error("[share page] Supabase envs ausentes", {
+      hasUrl: !!supabaseUrl,
+      hasAnon: !!supabaseAnonKey,
+    });
+
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#2f4f67] text-white">
-        Conversa não encontrada ou não está compartilhada.
-      </div>
+      <main className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
+        <div className="max-w-md rounded-2xl bg-white shadow p-6 text-center text-sm text-slate-700">
+          <h1 className="text-base font-semibold mb-2">
+            Configuração incompleta do servidor
+          </h1>
+          <p>
+            As variáveis <code>NEXT_PUBLIC_SUPABASE_URL</code> e{" "}
+            <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> não estão configuradas
+            corretamente no ambiente de deploy.
+          </p>
+        </div>
+      </main>
     );
   }
 
-  const { data: msgs, error: msgError } = await supabase
+  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+  // 1) Buscar conversa compartilhada
+  const { data: conv, error: convError } = await supabase
+    .from("conversations")
+    .select("id, title, created_at")
+    .eq("is_shared", true)
+    .eq("share_id", shareId)
+    .maybeSingle<ConversationRow>();
+
+  if (convError) {
+    console.error("[share page] Erro ao carregar conversa compartilhada:", convError.message);
+    // Evita derrubar o build; trata como 404
+    return notFound();
+  }
+
+  if (!conv) {
+    return notFound();
+  }
+
+  // 2) Buscar mensagens da conversa
+  const { data: msgs, error: msgsError } = await supabase
     .from("messages")
     .select("id, role, content, created_at")
     .eq("conversation_id", conv.id)
     .order("created_at", { ascending: true });
 
-  if (msgError) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#2f4f67] text-white">
-        Erro ao carregar mensagens compartilhadas.
-      </div>
-    );
+  if (msgsError) {
+    console.error("[share page] Erro ao carregar mensagens:", msgsError.message);
+    return notFound();
   }
 
-  const messages: ChatMessage[] =
-    (msgs ?? []).map((m) => ({
-      id: m.id as string,
-      role: m.role as "user" | "assistant",
-      content: m.content as string,
-      created_at: m.created_at as string,
-    })) || [];
-
-  const title =
-    conv.title && conv.title.trim().length > 0
-      ? conv.title.trim()
-      : "Conversa compartilhada";
+  const messages = (msgs ?? []) as MessageRow[];
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#2f4f67]">
-      {/* Header público */}
-      <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 text-sm">
-        <div className="flex items-center gap-2">
-          {/* Logo igual ao sidebar */}
-          <Image
-            src="/logos/nexus.png"
-            alt="Logo Publ.IA"
-            width={28}
-            height={28}
-            className="rounded-lg"
-          />
-          <div className="flex flex-col leading-tight">
-            <span className="font-semibold">Publ.IA</span>
-            <span className="text-[11px] text-gray-500">
-              Nexus Pública
-            </span>
-          </div>
-        </div>
+    <main className="min-h-screen bg-[#2f4f67] text-slate-50">
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        {/* Cabeçalho simples */}
+        <header className="mb-6 flex flex-col gap-1">
+          <h1 className="text-xl font-semibold">
+            Conversa compartilhada - Publ.IA
+          </h1>
+          <p className="text-xs text-slate-200/80">
+            Esta é uma visualização pública de uma conversa gerada pelo assistente Publ.IA.
+          </p>
+        </header>
 
-        <span className="text-xs text-gray-600">
-          Visualização pública da conversa
-        </span>
-      </header>
-
-      {/* Área principal */}
-      <main className="flex flex-1 flex-col bg-[#2f4f67]">
-        {messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-white">
-            Nenhuma mensagem nesta conversa.
+        {/* Título da conversa */}
+        <section className="mb-4 rounded-2xl bg-[#1f3b4f] px-4 py-3 shadow">
+          <div className="text-[11px] uppercase tracking-wide text-slate-300">
+            Título da conversa
           </div>
-        ) : (
-          <div className="flex-1 overflow-y-auto px-8 py-10">
-            {/* Título da conversa alinhado com a coluna de mensagens */}
-            <div className="mx-auto mb-4 w-full max-w-3xl">
-              <h1 className="text-base font-semibold text-white">
-                {title}
-              </h1>
-              <p className="mt-1 text-xs text-slate-200/70">
-                Esta é uma visualização somente leitura gerada pelo Publ.IA.
-              </p>
+          <div className="mt-1 text-sm font-medium">
+            {conv.title || "Conversa sem título"}
+          </div>
+        </section>
+
+        {/* Mensagens */}
+        <section className="space-y-3">
+          {messages.length === 0 && (
+            <div className="rounded-2xl bg-[#1f3b4f] px-4 py-3 text-sm text-slate-200">
+              Nenhuma mensagem encontrada nesta conversa.
             </div>
+          )}
 
-            <ChatMessagesList
-              messages={messages}
-              isSending={false}
-            />
-          </div>
-        )}
-      </main>
-    </div>
+          {messages.map((m) => {
+            const isUser = m.role === "user";
+            return (
+              <div
+                key={m.id}
+                className={`flex ${
+                  isUser ? "justify-start" : "justify-start"
+                }`}
+              >
+                <div
+                  className={
+                    "max-w-[90%] rounded-2xl px-4 py-2 text-sm leading-relaxed shadow " +
+                    (isUser
+                      ? "bg-[#f5f5f5] text-slate-900"
+                      : "bg-[#224761] text-slate-50 border border-slate-600/40")
+                  }
+                >
+                  {/* Rótulo (Usuário / Publ.IA) */}
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide opacity-70">
+                    {isUser ? "Usuário" : "Publ.IA"}
+                  </div>
+                  <div className="whitespace-pre-wrap">{m.content}</div>
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      </div>
+    </main>
   );
 }
