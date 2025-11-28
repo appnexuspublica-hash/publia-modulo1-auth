@@ -8,20 +8,29 @@ export const runtime = "nodejs";
 
 // ---- Supabase & OpenAI ----
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const openaiApiKey = process.env.OPENAI_API_KEY!;
+// Agora SEM "!" e SEM throw no topo
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
+// Vamos inicializar como null e só criar os clients se as envs existirem
+let supabase: ReturnType<typeof createClient> | null = null;
+let openai: OpenAI | null = null;
 
 if (!supabaseUrl || !serviceRoleKey) {
-  throw new Error("Variáveis de ambiente do Supabase não estão definidas.");
+  console.error("[/api/chat] Variáveis de ambiente do Supabase não estão definidas.", {
+    hasUrl: !!supabaseUrl,
+    hasServiceRoleKey: !!serviceRoleKey,
+  });
+} else {
+  supabase = createClient(supabaseUrl, serviceRoleKey);
 }
 
 if (!openaiApiKey) {
-  throw new Error("OPENAI_API_KEY não está definida.");
+  console.error("[/api/chat] OPENAI_API_KEY não está definida.");
+} else {
+  openai = new OpenAI({ apiKey: openaiApiKey });
 }
-
-const supabase = createClient(supabaseUrl, serviceRoleKey);
-const openai = new OpenAI({ apiKey: openaiApiKey });
 
 // ---- Tipos auxiliares ----
 
@@ -46,7 +55,16 @@ type PdfFileRow = {
 async function getLatestPdfForConversation(
   conversationId: string
 ): Promise<PdfFileRow | null> {
-  const { data, error } = await supabase
+  if (!supabase) {
+    console.error(
+      "[/api/chat] getLatestPdfForConversation chamado sem supabase inicializado."
+    );
+    return null;
+  }
+
+  const client = supabase as any;
+
+  const { data, error } = await client
     .from("pdf_files")
     .select(
       "id, conversation_id, file_name, storage_path, openai_file_id, created_at"
@@ -66,7 +84,16 @@ async function getLatestPdfForConversation(
 
 // Envia o PDF para a OpenAI e devolve o file_id
 async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
-  const { data: fileData, error: downloadError } = await supabase.storage
+  if (!supabase || !openai) {
+    console.error(
+      "[/api/chat] uploadPdfToOpenAI chamado sem supabase/openai inicializados."
+    );
+    return null;
+  }
+
+  const client = supabase as any;
+
+  const { data: fileData, error: downloadError } = await client.storage
     .from("pdf-files")
     .download(pdfRow.storage_path);
 
@@ -108,6 +135,23 @@ function formatAssistantText(text: string): string {
 
 export async function POST(req: Request) {
   try {
+    // Se envs não estiverem configuradas, não quebramos o build,
+    // só retornamos 500 em runtime.
+    if (!supabase || !openai) {
+      console.error(
+        "[/api/chat] supabase ou openai não inicializados. Verifique envs em produção."
+      );
+      return NextResponse.json(
+        {
+          error:
+            "Configuração do servidor incompleta. Verifique as variáveis do Supabase e da OpenAI no ambiente de produção.",
+        },
+        { status: 500 }
+      );
+    }
+
+    const client = supabase as any;
+
     const body = await req.json();
     const { conversationId, message } = body as {
       conversationId: string;
@@ -130,7 +174,7 @@ export async function POST(req: Request) {
 
     // 0) HISTÓRICO: buscar últimas N mensagens dessa conversa (antes da atual)
     const MAX_HISTORY = 8;
-    const { data: historyData, error: historyError } = await supabase
+    const { data: historyData, error: historyError } = await client
       .from("messages")
       .select("id, role, content, created_at")
       .eq("conversation_id", conversationId)
@@ -148,15 +192,15 @@ export async function POST(req: Request) {
       (historyData as MessageRow[] | null) ?? [];
 
     // 1) Salva mensagem do usuário (mensagem atual)
-    const { data: userMessageRow, error: insertUserError } = await supabase
+    const { data: userMessageRow, error: insertUserError } = await client
       .from("messages")
       .insert({
         conversation_id: conversationId,
         role: "user",
         content: message,
-      })
+      } as any)
       .select("*")
-      .single<MessageRow>();
+      .single(); // <-- removido <MessageRow>
 
     if (insertUserError || !userMessageRow) {
       console.error(
@@ -181,9 +225,9 @@ export async function POST(req: Request) {
         if (uploadedId) {
           openaiFileId = uploadedId;
 
-          const { error: updateError } = await supabase
+          const { error: updateError } = await client
             .from("pdf_files")
-            .update({ openai_file_id: uploadedId })
+            .update({ openai_file_id: uploadedId } as any)
             .eq("id", latestPdf.id);
 
           if (updateError) {
@@ -413,8 +457,7 @@ Produzir respostas técnicas, educativas, bem estruturadas e visualmente organiz
     // ----------------------------------------------------
     const modelWithPdf =
       process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
-    const modelNoPdf =
-      process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
+    const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
 
     const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
@@ -462,15 +505,15 @@ Produzir respostas técnicas, educativas, bem estruturadas e visualmente organiz
 
     // 7) Salva mensagem da IA
     const { data: assistantMessageRow, error: insertAssistantError } =
-      await supabase
+      await client
         .from("messages")
         .insert({
           conversation_id: conversationId,
           role: "assistant",
           content: assistantText,
-        })
+        } as any)
         .select("*")
-        .single<MessageRow>();
+        .single(); // <-- removido <MessageRow>
 
     if (insertAssistantError || !assistantMessageRow) {
       console.error(
