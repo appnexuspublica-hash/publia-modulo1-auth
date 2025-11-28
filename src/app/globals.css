@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Garante que a aplicação use 100% da tela, sem bordas externas */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Evita scroll horizontal indesejado */
+html,
+body {
+  overflow-x: hidden;
+}
+
+/* Deixa o fundo neutro (a parte azul do chat vem via Tailwind na página) */
+body {
+  background-color: #ebebeb;
+}
+
+/* Opcional: se você quiser que tudo seja "border-box" */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+/* Estilo básico para o conteúdo Markdown das respostas do Publ.IA */
+.markdown {
+  font-size: 0.875rem; /* 14px */
+  line-height: 1.6;
+}
+
+/* Títulos */
+.markdown h1 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.markdown h2 {
+  font-size: 0.98rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.markdown h3 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin-top: 0.5rem;
+  margin-bottom: 0.2rem;
+}
+
+/* Parágrafos */
+.markdown p {
+  margin-top: 0.15rem;
+  margin-bottom: 0.35rem;
+}
+
+/* Listas */
+.markdown ul {
+  list-style: disc;
+  padding-left: 1.1rem;
+  margin-top: 0.1rem;
+  margin-bottom: 0.35rem;
+}
+
+.markdown ol {
+  list-style: decimal;
+  padding-left: 1.2rem;
+  margin-top: 0.1rem;
+  margin-bottom: 0.35rem;
+}
+
+.markdown li {
+  margin-top: 0.05rem;
+  margin-bottom: 0.05rem;
+}
+
+/* Negrito e links */
+.markdown strong {
+  font-weight: 600;
+}
+
+.markdown a {
+  text-decoration: underline;
+}

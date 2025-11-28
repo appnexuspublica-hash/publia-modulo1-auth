@@ -1,0 +1,24 @@
+# Dependências
+node_modules/
+
+# Build do Next
+.next/
+out/
+dist/
+
+# Ambiente / segredos
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Vercel
+.vercel/
+
+# Sistema
+.DS_Store
+Thumbs.db

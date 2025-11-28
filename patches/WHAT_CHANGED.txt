@@ -1,0 +1,5 @@
+// patches/WHAT_CHANGED.txt
+- Criado src/lib/external/supabase.ts consolidando clients (anon + service) com validação de ENV.
+- Página /debug para inspecionar as variáveis públicas em runtime.
+- Ajuste esperado: trocar import de "@/lib/supabase" para "@/src/lib/external/supabase" nos actions que fazem sign-up/login.
+- Importante: SUPABASE_SERVICE_ROLE_KEY só no servidor. Não disponibilize em NEXT_PUBLIC_*.

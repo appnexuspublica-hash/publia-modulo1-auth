@@ -1,0 +1,19 @@
+﻿/** @type {import('next').NextConfig} */
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "nexuspublica.com.br",
+        pathname: "/**",
+      },
+      {
+        protocol: "https",
+        hostname: "www.nexuspublica.com.br",
+        pathname: "/**",
+      },
+    ],
+  },
+};
+
+module.exports = nextConfig;
