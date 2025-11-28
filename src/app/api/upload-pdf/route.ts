@@ -1,184 +1,105 @@
 // src/app/api/upload-pdf/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// ----------------------------------------------------
-// Variáveis de ambiente
-// ----------------------------------------------------
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+export const runtime = "nodejs";
 
-if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
-  throw new Error(
-    "Verifique NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY no .env.local"
-  );
-}
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Client ADMIN (service role) -> Storage + inserts
-const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
-
-// ----------------------------------------------------
-// Handler
-// ----------------------------------------------------
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    // 1) Recuperar sessão do usuário via cookies (Supabase Auth)
-    const cookieStore = cookies();
+    // 1) Garantir que as envs existem (mas sem quebrar o build)
+    if (!supabaseUrl || !serviceRoleKey) {
+      console.error("[upload-pdf] Variáveis de ambiente do Supabase ausentes.", {
+        hasUrl: !!supabaseUrl,
+        hasServiceRole: !!serviceRoleKey,
+      });
 
-    const supabaseAuth = createServerClient(supabaseUrl, supabaseAnonKey, {
-      cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value;
+      return NextResponse.json(
+        {
+          error:
+            "Configuração do servidor incompleta. Verifique as variáveis NEXT_PUBLIC_SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY.",
         },
-        // Em route handler poderíamos setar cookies,
-        // mas para este fluxo não é necessário atualizar nada:
-        set() {},
-        remove() {},
-      },
-    });
-
-    const {
-      data: { user },
-      error: userError,
-    } = await supabaseAuth.auth.getUser();
-
-    if (userError || !user) {
-      console.error("[upload-pdf] Usuário não autenticado:", userError);
-      return NextResponse.json(
-        { error: "Não autenticado." },
-        { status: 401 }
-      );
-    }
-
-    const userId = user.id;
-
-    // 2) Ler FormData (file + conversationId)
-    const formData = await req.formData();
-    const file = formData.get("file");
-    const conversationId = formData.get("conversationId");
-
-    if (!file || !(file instanceof File)) {
-      console.error("[upload-pdf] Nenhum arquivo válido recebido.");
-      return NextResponse.json(
-        { error: "Arquivo não enviado." },
-        { status: 400 }
-      );
-    }
-
-    if (!file.type || !file.type.toLowerCase().includes("pdf")) {
-      console.error("[upload-pdf] Tipo de arquivo inválido:", file.type);
-      return NextResponse.json(
-        { error: "Apenas arquivos PDF são permitidos." },
-        { status: 400 }
-      );
-    }
-
-    if (!conversationId || typeof conversationId !== "string") {
-      return NextResponse.json(
-        { error: "conversationId é obrigatório." },
-        { status: 400 }
-      );
-    }
-
-    // 3) Garantir que a conversa pertence ao usuário logado
-    const { data: conv, error: convError } = await supabaseAdmin
-      .from("conversations")
-      .select("id, user_id")
-      .eq("id", conversationId)
-      .maybeSingle();
-
-    if (convError) {
-      console.error("[upload-pdf] Erro ao buscar conversa:", convError.message);
-      return NextResponse.json(
-        { error: "Erro ao validar conversa." },
         { status: 500 }
       );
     }
 
-    if (!conv) {
+    const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+    // 2) Ler form-data
+    const formData = await req.formData();
+    const file = formData.get("file") as File | null;
+    const conversationId = formData.get("conversationId") as string | null;
+
+    if (!file || !conversationId) {
       return NextResponse.json(
-        { error: "Conversa não encontrada." },
-        { status: 404 }
+        { error: "Arquivo PDF e conversationId são obrigatórios." },
+        { status: 400 }
       );
     }
 
-    if (conv.user_id !== userId) {
-      console.warn(
-        "[upload-pdf] Usuário tentando anexar PDF em conversa de outro usuário.",
-        { userId, conversationId }
-      );
+    if (file.type && file.type !== "application/pdf") {
       return NextResponse.json(
-        { error: "Você não tem permissão para alterar esta conversa." },
-        { status: 403 }
+        { error: "Somente arquivos PDF são permitidos." },
+        { status: 400 }
       );
     }
 
-    // 4) Montar caminho seguro no bucket "pdf-files"
-    const safeName = file.name.replace(/\s+/g, "-");
-    const pathConversation = conversationId;
-    const filePath = `${pathConversation}/${Date.now()}-${safeName}`;
+    const fileName = file.name || "documento.pdf";
+    const fileSize = file.size;
+    const timestamp = Date.now();
+    const safeName = fileName.replace(/[^\w\-.]+/g, "_");
+    const storagePath = `${conversationId}/${timestamp}-${safeName}`;
 
-    // 5) Upload no Storage
-    const { data: storageData, error: storageError } = await supabaseAdmin.storage
+    // 3) Subir para o Storage (bucket pdf-files)
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const { error: uploadError } = await supabase.storage
       .from("pdf-files")
-      .upload(filePath, file, {
-        contentType: file.type || "application/pdf",
+      .upload(storagePath, buffer, {
+        contentType: "application/pdf",
         upsert: false,
       });
 
-    if (storageError || !storageData) {
-      console.error("[upload-pdf] Erro ao salvar no Storage:", storageError);
+    if (uploadError) {
+      console.error("[upload-pdf] Erro ao enviar para Storage:", uploadError.message);
       return NextResponse.json(
-        { error: "Erro ao salvar PDF no Storage." },
+        { error: "Não foi possível salvar o PDF no storage." },
         { status: 500 }
       );
     }
 
-    // 6) Insert na tabela pdf_files (amarrado ao user_id real)
-    const { data: insertData, error: insertError } = await supabaseAdmin
+    // 4) Registrar em pdf_files
+    const { data: row, error: insertError } = await supabase
       .from("pdf_files")
       .insert({
-        user_id: userId,
         conversation_id: conversationId,
-        storage_path: storageData.path,
-        file_name: file.name,
-        size: file.size,
+        file_name: fileName,
+        storage_path: storagePath,
       })
-      .select("id")
+      .select("id, file_name, storage_path, created_at")
       .single();
 
-    if (insertError || !insertData) {
-      console.error(
-        "[upload-pdf] Erro ao salvar metadados do PDF:",
-        insertError
-      );
+    if (insertError || !row) {
+      console.error("[upload-pdf] Erro ao inserir em pdf_files:", insertError?.message);
       return NextResponse.json(
-        { error: "Erro ao salvar metadados do PDF." },
+        { error: "Não foi possível registrar o PDF no banco." },
         { status: 500 }
       );
     }
 
-    console.log("[upload-pdf] Upload OK:", {
-      pdfFileId: insertData.id,
-      storagePath: storageData.path,
-      userId,
-      conversationId,
-    });
-
-    // 7) Resposta no formato que o front já espera
+    // 5) Resposta esperada pelo front (ChatPageClient)
     return NextResponse.json({
-      id: insertData.id as string,
-      fileName: file.name,
-      fileSize: file.size,
-      storagePath: storageData.path,
+      id: row.id,
+      fileName,
+      fileSize,
     });
   } catch (err) {
     console.error("[upload-pdf] Erro inesperado:", err);
     return NextResponse.json(
-      { error: "Erro inesperado ao enviar o PDF." },
+      { error: "Erro inesperado ao processar o upload do PDF." },
       { status: 500 }
     );
   }
