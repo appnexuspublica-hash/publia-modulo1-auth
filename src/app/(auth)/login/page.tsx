@@ -14,6 +14,10 @@ import { login, type LoginState } from "./loginActions";
 
 const initialState: LoginState = { ok: false };
 
+// 🔑 Token fixo para cadastro (convite Publ.IA)
+const SIGNUP_TOKEN =
+  "publia_nexus_2025_token_A1B2C3PATRIRACH8208";
+
 export default function LoginPage() {
   const router = useRouter();
   const [state, formAction] = useFormState<LoginState, FormData>(
@@ -23,7 +27,6 @@ export default function LoginPage() {
 
   React.useEffect(() => {
     if (state?.ok && state?.redirect) {
-      // redireciona assim que o login der certo
       router.push(state.redirect);
     }
   }, [state, router]);
@@ -69,6 +72,17 @@ export default function LoginPage() {
           <SubmitButton>Entrar</SubmitButton>
         </div>
       </form>
+
+      {/* BLOCO: ainda não é cadastrado? */}
+      <div className="mt-4 text-center text-sm text-slate-700">
+        Ainda não é cadastrado?{" "}
+        <Link
+          href={`/criar-conta?tk=${encodeURIComponent(SIGNUP_TOKEN)}`}
+          className="font-semibold text-blue-600 hover:text-blue-700 underline"
+        >
+          Criar conta agora
+        </Link>
+      </div>
     </AuthShell>
   );
 }
