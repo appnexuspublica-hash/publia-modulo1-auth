@@ -23,12 +23,6 @@ if (!supabaseUrl || !serviceRoleKey) {
   });
 }
 
-type PdfRow = {
-  id: string;
-  file_name: string | null;
-  file_size: number | null;
-};
-
 // ---------------------------------------------------------------------
 // POST /api/upload-pdf
 //  Body JSON: { conversationId, fileName, fileSize, storagePath }
@@ -77,7 +71,7 @@ export async function POST(req: Request) {
 
     const client = supabase as any;
 
-    // (Opcional) tenta buscar o user_id da conversa
+    // (Opcional) tenta buscar o user_id da conversa, se existir
     let userId: string | null = null;
     const { data: conv, error: convError } = await client
       .from("conversations")
@@ -107,25 +101,30 @@ export async function POST(req: Request) {
         } as any
       )
       .select("id, file_name, file_size")
-      .single<PdfRow>();
+      .single(); // <- sem genérico aqui
 
     if (error || !data) {
       console.error("[/api/upload-pdf] Erro ao inserir em pdf_files:", error);
       return NextResponse.json(
         {
           error: "Não foi possível registrar o PDF no banco.",
-          // campo extra só pra debug (vai aparecer no console do navegador)
           detail: error?.message ?? null,
         },
         { status: 500 }
       );
     }
 
-    // Tudo certo -> devolve dados para o front
+    // Faz um cast explícito para acalmar o TS
+    const row = data as {
+      id: string;
+      file_name: string | null;
+      file_size: number | null;
+    };
+
     return NextResponse.json({
-      id: data.id,
-      fileName: data.file_name ?? fileName ?? "",
-      fileSize: data.file_size ?? fileSize ?? 0,
+      id: row.id,
+      fileName: row.file_name ?? fileName ?? "",
+      fileSize: row.file_size ?? fileSize ?? 0,
     });
   } catch (err) {
     console.error("[/api/upload-pdf] Erro inesperado:", err);
