@@ -90,7 +90,11 @@ export async function login(
 
     if (e1) {
       console.error("[login] erro ao consultar cadastro", e1);
-      return { ok: false, error: "Falha ao consultar cadastro." };
+      return {
+        ok: false,
+        // DEBUG TEMPORÁRIO – assim sabemos que veio daqui
+        error: `DEBUG LOGIN v2 – erro Supabase ao consultar profiles: ${e1.message}`,
+      };
     }
 
     if (!prof?.email) {
