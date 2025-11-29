@@ -52,6 +52,9 @@ function markdownToPlainText(markdown: string): string {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
+// Limite de tamanho do PDF (em MB) – ajuste se quiser
+const MAX_PDF_SIZE_MB = 40;
+
 // ------------------------------------------------------
 // Tipos
 // ------------------------------------------------------
@@ -534,7 +537,7 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   // ----------------------------------------------------
-  // Upload de PDF
+  // Upload de PDF (direto no Supabase Storage)
   // ----------------------------------------------------
   function handlePdfButtonClick() {
     fileInputRef.current?.click();
@@ -544,15 +547,14 @@ Organize a resposta em tópicos, com explicações objetivas.
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // 🔹 Limite de tamanho (~3 MB) para não estourar o payload da função na Vercel
-    const MAX_PDF_BYTES = 3 * 1024 * 1024; // ~3 MB
-
-    if (file.size > MAX_PDF_BYTES) {
-      const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+    // Checagem de tamanho antes de qualquer coisa
+    const maxBytes = MAX_PDF_SIZE_MB * 1024 * 1024;
+    if (file.size > maxBytes) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
       alert(
-        `O PDF é muito grande (${sizeMb} MB).\n\n` +
-          `O limite atual é de aproximadamente 3 MB por arquivo.\n` +
-          `Tente enviar um PDF menor ou dividido.`
+        `Este PDF tem ${sizeMb} MB e o limite atual é de ${MAX_PDF_SIZE_MB} MB.\n\n` +
+          "Tente dividir o arquivo em partes menores (por exemplo, um PDF por anexo ou por capítulo) " +
+          "e envie novamente."
       );
       e.target.value = "";
       return;
@@ -569,29 +571,57 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("conversationId", conversationId);
+      // 1) Upload direto pro Supabase Storage (não passa pela Vercel)
+      const safeName = file.name
+        .normalize("NFKD")
+        .replace(/[^\w.-]+/g, "_");
 
+      const storagePath = `${conversationId}/${Date.now()}-${safeName}`;
+
+      const { data: storageData, error: storageError } = await (supabase as any)
+        .storage
+        .from("pdf-files")
+        .upload(storagePath, file, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: "application/pdf",
+        });
+
+      if (storageError || !storageData) {
+        console.error(
+          "[Chat] Erro ao enviar PDF para o Supabase Storage:",
+          storageError
+        );
+        alert(
+          "Não foi possível enviar o PDF para o servidor. Tente novamente em alguns instantes."
+        );
+        return;
+      }
+
+      const finalStoragePath = storageData.path ?? storagePath;
+
+      // 2) Chama a API /api/upload-pdf só para registrar no banco (payload pequeno)
       const res = await fetch("/api/upload-pdf", {
         method: "POST",
-        body: formData,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          conversationId,
+          fileName: file.name,
+          fileSize: file.size,
+          storagePath: finalStoragePath,
+        }),
       });
 
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-
-        console.error("Erro ao enviar PDF:", text || res.statusText);
-
-        if (res.status === 413 || text.includes("PAYLOAD_TOO_LARGE")) {
-          alert(
-            "O PDF é muito grande para o servidor processar.\n\n" +
-              "Tente enviar um arquivo menor (até cerca de 3 MB)."
-          );
-        } else {
-          alert("Não foi possível enviar o PDF.");
-        }
-
+        console.error(
+          "Erro ao registrar PDF no banco:",
+          await res.text()
+        );
+        alert(
+          "O arquivo foi enviado, mas não foi possível registrar o PDF no histórico da conversa."
+        );
         return;
       }
 
