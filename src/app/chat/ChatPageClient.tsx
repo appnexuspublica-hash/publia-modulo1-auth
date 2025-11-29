@@ -53,7 +53,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 // Limite de tamanho do PDF (em MB) – ajuste se quiser
-const MAX_PDF_SIZE_MB = 40;
+const MAX_PDF_SIZE_MB = 48;
 
 // ------------------------------------------------------
 // Tipos
