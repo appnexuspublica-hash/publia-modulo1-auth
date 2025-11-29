@@ -4,102 +4,118 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
+// --------- Supabase (server) ----------
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+let supabase: ReturnType<typeof createClient> | null = null;
+
+if (!supabaseUrl || !serviceRoleKey) {
+  console.error("[/api/upload-pdf] Supabase envs ausentes ou inválidas:", {
+    hasUrl: !!supabaseUrl,
+    hasServiceRoleKey: !!serviceRoleKey,
+  });
+} else {
+  supabase = createClient(supabaseUrl, serviceRoleKey);
+}
+
+// --------- Handler ----------
 export async function POST(req: Request) {
   try {
-    // 1) Garantir que as envs existem (mas sem quebrar o build)
-    if (!supabaseUrl || !serviceRoleKey) {
-      console.error("[upload-pdf] Variáveis de ambiente do Supabase ausentes.", {
-        hasUrl: !!supabaseUrl,
-        hasServiceRole: !!serviceRoleKey,
-      });
-
+    if (!supabase) {
+      console.error("[/api/upload-pdf] Supabase não inicializado.");
       return NextResponse.json(
         {
           error:
-            "Configuração do servidor incompleta. Verifique as variáveis NEXT_PUBLIC_SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY.",
+            "Configuração do servidor incompleta (Supabase). Verifique as variáveis de ambiente.",
         },
         { status: 500 }
       );
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey);
-
-    // 2) Ler form-data
     const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-    const conversationId = formData.get("conversationId") as string | null;
+    const file = formData.get("file");
+    const conversationId = formData.get("conversationId");
 
-    if (!file || !conversationId) {
+    if (!file || !(file instanceof File)) {
       return NextResponse.json(
-        { error: "Arquivo PDF e conversationId são obrigatórios." },
+        { error: "Arquivo PDF não enviado." },
         { status: 400 }
       );
     }
 
-    if (file.type && file.type !== "application/pdf") {
+    if (!conversationId || typeof conversationId !== "string") {
       return NextResponse.json(
-        { error: "Somente arquivos PDF são permitidos." },
+        { error: "conversationId inválido." },
         { status: 400 }
       );
     }
 
-    const fileName = file.name || "documento.pdf";
-    const fileSize = file.size;
-    const timestamp = Date.now();
-    const safeName = fileName.replace(/[^\w\-.]+/g, "_");
-    const storagePath = `${conversationId}/${timestamp}-${safeName}`;
+    const bucket = "pdf-files";
 
-    // 3) Subir para o Storage (bucket pdf-files)
+    // Caminho único no bucket
+    const originalName = file.name || "documento.pdf";
+    const ext =
+      originalName.includes(".") ? originalName.split(".").pop() : "pdf";
+    const path = `${conversationId}/${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2)}.${ext}`;
+
+    // Converter File -> Buffer (Node)
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const { error: uploadError } = await supabase.storage
-      .from("pdf-files")
-      .upload(storagePath, buffer, {
-        contentType: "application/pdf",
+    // 1) Upload no Storage
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from(bucket)
+      .upload(path, buffer, {
+        contentType: file.type || "application/pdf",
         upsert: false,
       });
 
-    if (uploadError) {
-      console.error("[upload-pdf] Erro ao enviar para Storage:", uploadError.message);
+    if (uploadError || !uploadData) {
+      console.error("[/api/upload-pdf] Erro no upload para Storage:", uploadError);
       return NextResponse.json(
-        { error: "Não foi possível salvar o PDF no storage." },
+        {
+          error:
+            "Falha ao enviar arquivo para o Storage do Supabase. Verifique se o bucket 'pdf-files' existe.",
+        },
         { status: 500 }
       );
     }
 
-    // 4) Registrar em pdf_files
+    // 2) Registrar na tabela pdf_files
     const { data: row, error: insertError } = await supabase
       .from("pdf_files")
       .insert({
         conversation_id: conversationId,
-        file_name: fileName,
-        storage_path: storagePath,
-      })
-      .select("id, file_name, storage_path, created_at")
+        file_name: originalName,
+        storage_path: uploadData.path,
+        file_size: file.size,
+      } as any)
+      .select("id, file_name, file_size")
       .single();
 
     if (insertError || !row) {
-      console.error("[upload-pdf] Erro ao inserir em pdf_files:", insertError?.message);
+      console.error("[/api/upload-pdf] Erro ao inserir em pdf_files:", insertError);
       return NextResponse.json(
-        { error: "Não foi possível registrar o PDF no banco." },
+        {
+          error:
+            "PDF enviado, mas não foi possível registrar no banco (tabela pdf_files).",
+        },
         { status: 500 }
       );
     }
 
-    // 5) Resposta esperada pelo front (ChatPageClient)
     return NextResponse.json({
       id: row.id,
-      fileName,
-      fileSize,
+      fileName: row.file_name,
+      fileSize: row.file_size,
     });
   } catch (err) {
-    console.error("[upload-pdf] Erro inesperado:", err);
+    console.error("[/api/upload-pdf] Erro inesperado:", err);
     return NextResponse.json(
-      { error: "Erro inesperado ao processar o upload do PDF." },
+      { error: "Erro inesperado ao enviar o PDF." },
       { status: 500 }
     );
   }
