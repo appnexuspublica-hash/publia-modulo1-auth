@@ -97,15 +97,6 @@ export default function ChatPageClient({
   const justCreatedConversationRef = useRef(false);
 
   // ----------------------------------------------------
-  // (Opcional) Debug rápido de auth no client
-  // ----------------------------------------------------
-  // useEffect(() => {
-  //   supabase.auth.getUser().then(({ data, error }) => {
-  //     console.log("[ChatPageClient] getUser data:", data, "error:", error);
-  //   });
-  // }, [supabase]);
-
-  // ----------------------------------------------------
   // Carregar conversas ao abrir a página
   // ----------------------------------------------------
   useEffect(() => {
@@ -553,6 +544,20 @@ Organize a resposta em tópicos, com explicações objetivas.
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // 🔹 Limite de tamanho (~3 MB) para não estourar o payload da função na Vercel
+    const MAX_PDF_BYTES = 3 * 1024 * 1024; // ~3 MB
+
+    if (file.size > MAX_PDF_BYTES) {
+      const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+      alert(
+        `O PDF é muito grande (${sizeMb} MB).\n\n` +
+          `O limite atual é de aproximadamente 3 MB por arquivo.\n` +
+          `Tente enviar um PDF menor ou dividido.`
+      );
+      e.target.value = "";
+      return;
+    }
+
     setIsUploadingPdf(true);
 
     try {
@@ -574,8 +579,19 @@ Organize a resposta em tópicos, com explicações objetivas.
       });
 
       if (!res.ok) {
-        console.error("Erro ao enviar PDF:", await res.text());
-        alert("Não foi possível enviar o PDF.");
+        const text = await res.text().catch(() => "");
+
+        console.error("Erro ao enviar PDF:", text || res.statusText);
+
+        if (res.status === 413 || text.includes("PAYLOAD_TOO_LARGE")) {
+          alert(
+            "O PDF é muito grande para o servidor processar.\n\n" +
+              "Tente enviar um arquivo menor (até cerca de 3 MB)."
+          );
+        } else {
+          alert("Não foi possível enviar o PDF.");
+        }
+
         return;
       }
 
