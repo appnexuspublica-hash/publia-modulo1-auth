@@ -52,8 +52,8 @@ function markdownToPlainText(markdown: string): string {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-// Limite de tamanho do PDF (em MB) – ajuste se quiser
-const MAX_PDF_SIZE_MB = 48;
+// Limite de tamanho do PDF (em MB) – hoje alinhado ao plano grátis do Supabase (~50 MB)
+const MAX_PDF_SIZE_MB = 50;
 
 // ------------------------------------------------------
 // Tipos
@@ -78,7 +78,7 @@ export default function ChatPageClient({
   userId,
   userLabel,
 }: ChatPageClientProps) {
-  // Criamos o client de browser uma única vez por montagem
+  // Client Supabase no browser
   const [supabase] = useState(() =>
     createBrowserClient(supabaseUrl, supabaseAnonKey)
   );
@@ -98,6 +98,9 @@ export default function ChatPageClient({
 
   // Flag: conversa acabou de ser criada pelo front
   const justCreatedConversationRef = useRef(false);
+
+  // NOVO: controle de sidebar no mobile
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   // ----------------------------------------------------
   // Carregar conversas ao abrir a página
@@ -226,14 +229,17 @@ export default function ChatPageClient({
   }
 
   async function handleNewConversation() {
-    // Clique manual no botão → queremos resetar a tela
     await createConversation(true);
+    // fecha sidebar no mobile
+    setIsMobileSidebarOpen(false);
   }
 
   function handleSelectConversation(id: string) {
     setActiveConversationId(id);
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
+    // fecha sidebar no mobile
+    setIsMobileSidebarOpen(false);
   }
 
   async function handleDeleteConversation(id: string) {
@@ -262,6 +268,9 @@ export default function ChatPageClient({
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
     }
+
+    // fecha sidebar no mobile
+    setIsMobileSidebarOpen(false);
   }
 
   async function ensureConversationId(): Promise<string | null> {
@@ -571,7 +580,7 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      // 1) Upload direto pro Supabase Storage (não passa pela Vercel)
+      // 1) Upload direto pro Supabase Storage
       const safeName = file.name
         .normalize("NFKD")
         .replace(/[^\w.-]+/g, "_");
@@ -589,7 +598,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       if (storageError || !storageData) {
         console.error(
-          "[Chat] Erro ao enviar PDF para o Supabase Storage:",
+          "[chat] Erro ao enviar PDF para o Supabase Storage:",
           storageError
         );
         alert(
@@ -655,18 +664,59 @@ Organize a resposta em tópicos, com explicações objetivas.
   // ----------------------------------------------------
   return (
     <div className="flex h-screen flex-col bg-[#2f4f67] md:flex-row">
-      <ChatSidebar
-        conversations={conversations}
-        activeConversationId={activeConversationId}
-        onNewConversation={handleNewConversation}
-        onSelectConversation={handleSelectConversation}
-        onDeleteConversation={handleDeleteConversation}
-        userLabel={userLabel}
-      />
+      {/* Sidebar fixa no DESKTOP */}
+      <div className="hidden h-full md:block">
+        <ChatSidebar
+          conversations={conversations}
+          activeConversationId={activeConversationId}
+          onNewConversation={handleNewConversation}
+          onSelectConversation={handleSelectConversation}
+          onDeleteConversation={handleDeleteConversation}
+          userLabel={userLabel}
+        />
+      </div>
+
+      {/* Sidebar MOBILE como overlay */}
+      {isMobileSidebarOpen && (
+        <div className="fixed inset-0 z-40 flex md:hidden">
+          {/* fundo escuro */}
+          <button
+            type="button"
+            aria-label="Fechar lista de conversas"
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setIsMobileSidebarOpen(false)}
+          />
+          {/* painel lateral */}
+          <div className="relative z-50 h-full w-72 max-w-[80%] bg-[#1b3a56] shadow-xl">
+            <ChatSidebar
+              conversations={conversations}
+              activeConversationId={activeConversationId}
+              onNewConversation={handleNewConversation}
+              onSelectConversation={handleSelectConversation}
+              onDeleteConversation={handleDeleteConversation}
+              userLabel={userLabel}
+            />
+          </div>
+        </div>
+      )}
 
       <main className="flex flex-1 flex-col bg-[#2f4f67]">
+        {/* Top bar MOBILE com botão de conversas */}
+        <div className="flex items-center justify-between px-4 py-3 md:hidden">
+          <button
+            type="button"
+            onClick={() => setIsMobileSidebarOpen(true)}
+            className="inline-flex items-center rounded-full bg-[#1b3a56] px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-[#223f57]"
+          >
+            ☰ Conversas
+          </button>
+          <span className="ml-3 max-w-[60%] truncate text-xs text-slate-200/80">
+            {userLabel}
+          </span>
+        </div>
+
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto px-8 py-6">
+          <div className="flex-1 overflow-y-auto px-4 py-4 md:px-8 md:py-6">
             {messages.length > 0 ? (
               <ChatMessagesList
                 messages={messages}
@@ -688,7 +738,7 @@ Organize a resposta em tópicos, com explicações objetivas.
             )}
           </div>
 
-          <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
+          <div className="border-t border-slate-700 bg-[#2f4f67] px-4 py-3 md:px-6">
             <div className="mx-auto w-full max-w-3xl">
               <div className="mb-2 flex flex-wrap items-center gap-3">
                 <button
