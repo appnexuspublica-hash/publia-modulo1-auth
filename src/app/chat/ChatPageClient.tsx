@@ -1,4 +1,3 @@
-// src/app/chat/ChatPageClient.tsx
 "use client";
 
 import {
@@ -52,8 +51,8 @@ function markdownToPlainText(markdown: string): string {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-// Limite de tamanho do PDF (em MB) – hoje alinhado ao plano grátis do Supabase (~50 MB)
-const MAX_PDF_SIZE_MB = 50;
+// Limite de tamanho do PDF (em MB)
+const MAX_PDF_SIZE_MB = 48;
 
 // ------------------------------------------------------
 // Tipos
@@ -78,7 +77,7 @@ export default function ChatPageClient({
   userId,
   userLabel,
 }: ChatPageClientProps) {
-  // Client Supabase no browser
+  // Supabase client no browser
   const [supabase] = useState(() =>
     createBrowserClient(supabaseUrl, supabaseAnonKey)
   );
@@ -99,7 +98,7 @@ export default function ChatPageClient({
   // Flag: conversa acabou de ser criada pelo front
   const justCreatedConversationRef = useRef(false);
 
-  // NOVO: controle de sidebar no mobile
+  // Controle do menu lateral no mobile
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   // ----------------------------------------------------
@@ -230,7 +229,6 @@ export default function ChatPageClient({
 
   async function handleNewConversation() {
     await createConversation(true);
-    // fecha sidebar no mobile
     setIsMobileSidebarOpen(false);
   }
 
@@ -238,7 +236,6 @@ export default function ChatPageClient({
     setActiveConversationId(id);
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
-    // fecha sidebar no mobile
     setIsMobileSidebarOpen(false);
   }
 
@@ -268,14 +265,10 @@ export default function ChatPageClient({
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
     }
-
-    // fecha sidebar no mobile
-    setIsMobileSidebarOpen(false);
   }
 
   async function ensureConversationId(): Promise<string | null> {
     if (activeConversationId) return activeConversationId;
-    // Primeira mensagem: cria conversa, mas NÃO limpa o que já está na tela
     return await createConversation(false);
   }
 
@@ -556,7 +549,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Checagem de tamanho antes de qualquer coisa
     const maxBytes = MAX_PDF_SIZE_MB * 1024 * 1024;
     if (file.size > maxBytes) {
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
@@ -572,7 +564,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     setIsUploadingPdf(true);
 
     try {
-      // Garante que existe uma conversa antes de subir o PDF
       const conversationId = await ensureConversationId();
       if (!conversationId) {
         alert("Não foi possível criar uma conversa para vincular o PDF.");
@@ -580,7 +571,6 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      // 1) Upload direto pro Supabase Storage
       const safeName = file.name
         .normalize("NFKD")
         .replace(/[^\w.-]+/g, "_");
@@ -598,7 +588,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       if (storageError || !storageData) {
         console.error(
-          "[chat] Erro ao enviar PDF para o Supabase Storage:",
+          "[Chat] Erro ao enviar PDF para o Supabase Storage:",
           storageError
         );
         alert(
@@ -609,7 +599,6 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       const finalStoragePath = storageData.path ?? storagePath;
 
-      // 2) Chama a API /api/upload-pdf só para registrar no banco (payload pequeno)
       const res = await fetch("/api/upload-pdf", {
         method: "POST",
         headers: {
@@ -660,34 +649,179 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   // ----------------------------------------------------
-  // Render (Sidebar + Área principal)
+  // Render: função para reutilizar o MAIN (desktop + mobile)
   // ----------------------------------------------------
-  return (
-    <div className="flex h-screen flex-col bg-[#2f4f67] md:flex-row">
-      {/* Sidebar fixa no DESKTOP */}
-      <div className="hidden h-full md:block">
-        <ChatSidebar
-          conversations={conversations}
-          activeConversationId={activeConversationId}
-          onNewConversation={handleNewConversation}
-          onSelectConversation={handleSelectConversation}
-          onDeleteConversation={handleDeleteConversation}
-          userLabel={userLabel}
-        />
+  const renderMain = () => (
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex-1 overflow-y-auto px-8 py-6">
+        {messages.length > 0 ? (
+          <ChatMessagesList
+            messages={messages}
+            onCopyAnswer={handleCopyAnswer}
+            onShareConversation={handleShareConversation}
+            isSending={isSending}
+            activePdfName={attachedPdf?.fileName ?? null}
+          />
+        ) : loadingMessages && activeConversationId ? (
+          <div className="flex h-full items-center justify-center text-sm text-white">
+            Processando resposta...
+          </div>
+        ) : isSending ? (
+          <div className="flex h-full items-center justify-center text-sm text-white">
+            Processando resposta...
+          </div>
+        ) : (
+          <ChatEmptyState />
+        )}
       </div>
 
-      {/* Sidebar MOBILE como overlay */}
-      {isMobileSidebarOpen && (
-        <div className="fixed inset-0 z-40 flex md:hidden">
-          {/* fundo escuro */}
-          <button
-            type="button"
-            aria-label="Fechar lista de conversas"
-            className="absolute inset-0 bg-black/60"
-            onClick={() => setIsMobileSidebarOpen(false)}
-          />
-          {/* painel lateral */}
-          <div className="relative z-50 h-full w-72 max-w-[80%] bg-[#1b3a56] shadow-xl">
+      <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
+        <div className="mx-auto w-full max-w-3xl">
+          <div className="mb-2 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handlePdfButtonClick}
+              className="inline-flex items-center justify-center rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
+            >
+              ANEXAR PDF
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf"
+              className="hidden"
+              onChange={handlePdfChange}
+            />
+
+            {attachedPdf && (
+              <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
+                <span className="max-w-[240px] truncate">
+                  {attachedPdf.fileName}
+                </span>
+                <span className="opacity-80">
+                  {Math.round(attachedPdf.fileSize / 1024)} KB
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRemovePdf}
+                  className="ml-1 text-slate-100 hover:text-red-400"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
+            <div className="relative">
+              <button
+                type="button"
+                disabled={!attachedPdf}
+                onClick={() =>
+                  attachedPdf && setShowPdfQuickActions((prev) => !prev)
+                }
+                className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
+                  attachedPdf
+                    ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
+                    : "bg-[#1b3a56] text-slate-400 opacity-60 cursor-not-allowed"
+                }`}
+              >
+                AÇÕES RÁPIDAS COM O PDF ▾
+              </button>
+
+              {showPdfQuickActions && attachedPdf && (
+                <div className="absolute left-0 z-10 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handlePdfQuickAction("resumo");
+                    }}
+                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                  >
+                    Resumir PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handlePdfQuickAction("pontos");
+                    }}
+                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                  >
+                    Pontos de Atenção (obrigações, prazos e riscos)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handlePdfQuickAction("irregularidade");
+                    }}
+                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                  >
+                    Identificar irregularidades
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {isUploadingPdf && (
+            <div className="mb-2 text-[11px] text-slate-100">
+              Enviando PDF...
+            </div>
+          )}
+
+          <ChatInput onSend={handleSend} disabled={isSending} />
+        </div>
+      </div>
+    </div>
+  );
+
+  // ----------------------------------------------------
+  // Render final: mobile e desktop separados
+  // ----------------------------------------------------
+  return (
+    <div className="h-screen bg-[#2f4f67]">
+      {/* MOBILE */}
+      <div className="flex h-full flex-col md:hidden">
+        {/* Header fixo */}
+        <header className="flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
+          <div>
+            <div className="text-sm font-semibold leading-none">Publ.IA</div>
+            <div className="text-[11px] text-slate-500 leading-none">
+              Nexus Pública
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <span className="text-[11px] text-slate-600">
+              Usuário:{" "}
+              <span className="font-semibold break-all">{userLabel}</span>
+            </span>
+
+            {/* Botão hamburguer */}
+            <button
+              type="button"
+              aria-label="Abrir menu"
+              onClick={() => setIsMobileSidebarOpen(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-300 bg-white shadow-sm"
+            >
+              <span className="flex flex-col gap-[3px]">
+                <span className="block h-[2px] w-4 rounded bg-slate-700" />
+                <span className="block h-[2px] w-4 rounded bg-slate-700" />
+                <span className="block h-[2px] w-4 rounded bg-slate-700" />
+              </span>
+            </button>
+          </div>
+        </header>
+
+        <div className="relative flex flex-1">
+          {/* Sidebar como drawer */}
+          <div
+            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duration-200 ${
+              isMobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
+          >
             <ChatSidebar
               conversations={conversations}
               activeConversationId={activeConversationId}
@@ -697,149 +831,37 @@ Organize a resposta em tópicos, com explicações objetivas.
               userLabel={userLabel}
             />
           </div>
+
+          {/* Overlay para fechar */}
+          {isMobileSidebarOpen && (
+            <div
+              className="fixed inset-0 z-30 bg-black/40"
+              onClick={() => setIsMobileSidebarOpen(false)}
+            />
+          )}
+
+          {/* Área principal */}
+          <main className="flex flex-1 flex-col bg-[#2f4f67]">
+            {renderMain()}
+          </main>
         </div>
-      )}
+      </div>
 
-      <main className="flex flex-1 flex-col bg-[#2f4f67]">
-        {/* Top bar MOBILE com botão de conversas */}
-        <div className="flex items-center justify-between px-4 py-3 md:hidden">
-          <button
-            type="button"
-            onClick={() => setIsMobileSidebarOpen(true)}
-            className="inline-flex items-center rounded-full bg-[#1b3a56] px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-[#223f57]"
-          >
-            ☰ Conversas
-          </button>
-          <span className="ml-3 max-w-[60%] truncate text-xs text-slate-200/80">
-            {userLabel}
-          </span>
-        </div>
+      {/* DESKTOP – volta exatamente ao layout antigo */}
+      <div className="hidden h-full flex-row md:flex">
+        <ChatSidebar
+          conversations={conversations}
+          activeConversationId={activeConversationId}
+          onNewConversation={handleNewConversation}
+          onSelectConversation={handleSelectConversation}
+          onDeleteConversation={handleDeleteConversation}
+          userLabel={userLabel}
+        />
 
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto px-4 py-4 md:px-8 md:py-6">
-            {messages.length > 0 ? (
-              <ChatMessagesList
-                messages={messages}
-                onCopyAnswer={handleCopyAnswer}
-                onShareConversation={handleShareConversation}
-                isSending={isSending}
-                activePdfName={attachedPdf?.fileName ?? null}
-              />
-            ) : loadingMessages && activeConversationId ? (
-              <div className="flex h-full items-center justify-center text-sm text-white">
-                Processando resposta...
-              </div>
-            ) : isSending ? (
-              <div className="flex h-full items-center justify-center text-sm text-white">
-                Processando resposta...
-              </div>
-            ) : (
-              <ChatEmptyState />
-            )}
-          </div>
-
-          <div className="border-t border-slate-700 bg-[#2f4f67] px-4 py-3 md:px-6">
-            <div className="mx-auto w-full max-w-3xl">
-              <div className="mb-2 flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handlePdfButtonClick}
-                  className="inline-flex items-center justify-center rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
-                >
-                  ANEXAR PDF
-                </button>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="application/pdf"
-                  className="hidden"
-                  onChange={handlePdfChange}
-                />
-
-                {attachedPdf && (
-                  <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
-                    <span className="max-w-[240px] truncate">
-                      {attachedPdf.fileName}
-                    </span>
-                    <span className="opacity-80">
-                      {Math.round(attachedPdf.fileSize / 1024)} KB
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleRemovePdf}
-                      className="ml-1 text-slate-100 hover:text-red-400"
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
-
-                <div className="relative">
-                  <button
-                    type="button"
-                    disabled={!attachedPdf}
-                    onClick={() =>
-                      attachedPdf &&
-                      setShowPdfQuickActions((prev) => !prev)
-                    }
-                    className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
-                      attachedPdf
-                        ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                        : "bg-[#1b3a56] text-slate-400 opacity-60 cursor-not-allowed"
-                    }`}
-                  >
-                    AÇÕES RÁPIDAS COM O PDF ▾
-                  </button>
-
-                  {showPdfQuickActions && attachedPdf && (
-                    <div className="absolute left-0 z-10 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("resumo");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Resumir PDF
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("pontos");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Pontos de Atenção (obrigações, prazos e riscos)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("irregularidade");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Identificar irregularidades
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {isUploadingPdf && (
-                <div className="mb-2 text-[11px] text-slate-100">
-                  Enviando PDF...
-                </div>
-              )}
-
-              <ChatInput onSend={handleSend} disabled={isSending} />
-            </div>
-          </div>
-        </div>
-      </main>
+        <main className="flex flex-1 flex-col bg-[#2f4f67]">
+          {renderMain()}
+        </main>
+      </div>
     </div>
   );
 }
