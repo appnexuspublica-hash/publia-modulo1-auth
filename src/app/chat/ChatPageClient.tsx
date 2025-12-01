@@ -8,7 +8,7 @@ import {
   ChangeEvent,
 } from "react";
 import { createBrowserClient } from "@supabase/ssr";
-import Image from "next/image";
+import Image from "next/image"; // 👈 ADICIONADO
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
@@ -797,20 +797,14 @@ Organize a resposta em tópicos, com explicações objetivas.
               className="rounded"
             />
             <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA</div>
+              <div className="text-sm font-semibold leading-none">Publ.IA 1.0</div>
               <div className="text-[11px] text-slate-500 leading-none">
                 Nexus Pública
               </div>
             </div>
           </div>
 
-          {/* Lado direito: versão + usuário + menu */}
           <div className="flex items-center gap-4">
-            {/* Versão 1.0 na margem direita */}
-            <span className="text-[11px] font-semibold text-slate-600">
-              1.0
-            </span>
-
             <span className="text-[11px] text-slate-600">
               Usuário:{" "}
               <span className="font-semibold break-all">{userLabel}</span>
