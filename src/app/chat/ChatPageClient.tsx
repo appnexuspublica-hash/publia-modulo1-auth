@@ -1,3 +1,4 @@
+// src/app/chat/ChatPageClient.tsx
 "use client";
 
 import {
@@ -7,6 +8,7 @@ import {
   ChangeEvent,
 } from "react";
 import { createBrowserClient } from "@supabase/ssr";
+import Image from "next/image"; // 👈 ADICIONADO
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
@@ -785,11 +787,20 @@ Organize a resposta em tópicos, com explicações objetivas.
       {/* MOBILE */}
       <div className="flex h-full flex-col md:hidden">
         {/* Header fixo */}
-        <header className="flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
-          <div>
-            <div className="text-sm font-semibold leading-none">Publ.IA</div>
-            <div className="text-[11px] text-slate-500 leading-none">
-              Nexus Pública
+        <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
+          <div className="flex items-center gap-2">
+            <Image
+              src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+              alt="Logo Publ.IA - Nexus Pública"
+              width={28}
+              height={28}
+              className="rounded"
+            />
+            <div>
+              <div className="text-sm font-semibold leading-none">Publ.IA</div>
+              <div className="text-[11px] text-slate-500 leading-none">
+                Nexus Pública
+              </div>
             </div>
           </div>
 
@@ -815,7 +826,8 @@ Organize a resposta em tópicos, com explicações objetivas.
           </div>
         </header>
 
-        <div className="relative flex flex-1">
+        {/* Empurra o conteúdo para baixo do header fixo */}
+        <div className="relative flex flex-1 pt-[64px]">
           {/* Sidebar como drawer */}
           <div
             className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duration-200 ${
