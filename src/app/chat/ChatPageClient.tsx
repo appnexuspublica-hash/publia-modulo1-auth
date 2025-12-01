@@ -797,7 +797,7 @@ Organize a resposta em tópicos, com explicações objetivas.
               className="rounded"
             />
             <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA</div>
+              <div className="text-sm font-semibold leading-none">Publ.IA 1.0</div>
               <div className="text-[11px] text-slate-500 leading-none">
                 Nexus Pública
               </div>
