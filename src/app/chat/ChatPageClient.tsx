@@ -395,6 +395,13 @@ export default function ChatPageClient({
   }
 
   // ----------------------------------------------------
+  // Regenerar última resposta (reusa a mesma pergunta do usuário)
+  // ----------------------------------------------------
+  async function handleRegenerateLast(lastUserMessage: string) {
+    await handleSend(lastUserMessage);
+  }
+
+  // ----------------------------------------------------
   // Ações rápidas com o PDF
   // ----------------------------------------------------
   async function handlePdfQuickAction(kind: QuickActionKind) {
@@ -661,6 +668,7 @@ Organize a resposta em tópicos, com explicações objetivas.
             messages={messages}
             onCopyAnswer={handleCopyAnswer}
             onShareConversation={handleShareConversation}
+            onRegenerateLast={handleRegenerateLast}
             isSending={isSending}
             activePdfName={attachedPdf?.fileName ?? null}
           />
@@ -830,7 +838,7 @@ Organize a resposta em tópicos, com explicações objetivas.
         <div className="relative flex flex-1 pt-[64px]">
           {/* Sidebar como drawer */}
           <div
-            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duration-200 ${
+            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duração-200 ${
               isMobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
             }`}
           >

@@ -219,6 +219,15 @@ export default async function SharedConversationPage({ params }: PageProps) {
                       strong: ({ node, ...props }) => (
                         <strong className="font-semibold" {...props} />
                       ),
+                      // 🔗 links em nova aba na página pública
+                      a: ({ node, ...props }) => (
+                        <a
+                          {...props}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="underline underline-offset-2 hover:opacity-80"
+                        />
+                      ),
                     }}
                   >
                     {m.content}

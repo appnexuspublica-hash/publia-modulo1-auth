@@ -16,6 +16,7 @@ type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
   onShareConversation?: () => void;
+  onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   isSending: boolean;
   activePdfName?: string | null;
 };
@@ -35,10 +36,28 @@ export function ChatMessagesList({
   messages,
   onCopyAnswer,
   onShareConversation,
+  onRegenerateLast,
   isSending,
 }: ChatMessagesListProps) {
   let lastDateLabel: string | null = null;
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // Última mensagem da IA e último texto do usuário (para regenerar)
+  const lastAssistant = [...messages]
+    .slice()
+    .reverse()
+    .find((m) => m.role === "assistant");
+  const lastUser = [...messages]
+    .slice()
+    .reverse()
+    .find((m) => m.role === "user");
+
+  // Verificar se houve regeneração da MESMA pergunta
+  const userMessages = messages.filter((m) => m.role === "user");
+  const lastTwoUsers = userMessages.slice(-2);
+  const isRegeneratedForSameQuestion =
+    lastTwoUsers.length === 2 &&
+    lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
   // Scroll automático para a última mensagem
   useEffect(() => {
@@ -84,15 +103,38 @@ export function ChatMessagesList({
               // Balão da IA
               <div className="flex flex-col items-start">
                 <div className="w-full rounded-3xl border border-slate-600/40 bg-[#224761] px-6 py-4 shadow-md">
+                  {/* Rótulo de resposta regenerada (só na última resposta da IA e quando há mesma pergunta repetida) */}
+                  {onRegenerateLast &&
+                    lastAssistant &&
+                    msg.id === lastAssistant.id &&
+                    isRegeneratedForSameQuestion && (
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200/80">
+                        Resposta regenerada
+                      </div>
+                    )}
+
                   <div className="markdown text-[14px] leading-relaxed text-slate-50">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        // 🔗 links em nova aba no chat principal (lista)
+                        a: ({ node, ...props }) => (
+                          <a
+                            {...props}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="underline underline-offset-2 hover:opacity-80"
+                          />
+                        ),
+                      }}
+                    >
                       {msg.content}
                     </ReactMarkdown>
                   </div>
                 </div>
 
                 {/* Botões abaixo da resposta da IA, se existirem handlers */}
-                {(onCopyAnswer || onShareConversation) && (
+                {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                     {onCopyAnswer && (
                       <button
@@ -103,6 +145,21 @@ export function ChatMessagesList({
                         Copiar
                       </button>
                     )}
+
+                    {/* Regenerar só aparece na ÚLTIMA resposta da IA e se tivermos a última pergunta do usuário */}
+                    {onRegenerateLast &&
+                      lastAssistant &&
+                      lastUser &&
+                      msg.id === lastAssistant.id && (
+                        <button
+                          type="button"
+                          onClick={() => onRegenerateLast(lastUser.content)}
+                          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+                        >
+                          Regenerar
+                        </button>
+                      )}
+
                     {onShareConversation && (
                       <button
                         type="button"

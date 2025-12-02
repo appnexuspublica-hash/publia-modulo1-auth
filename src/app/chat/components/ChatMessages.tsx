@@ -1,5 +1,7 @@
 "use client";
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ChatEmptyState } from "./ChatEmptyState";
 
 export type ChatMessage = {
@@ -56,7 +58,26 @@ export function ChatMessages({
                         : "bg-[#28465b] text-gray-100",
                     ].join(" ")}
                   >
-                    {msg.content}
+                    {isUser ? (
+                      msg.content
+                    ) : (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          // 🔗 links em nova aba no chat principal (layout alternativo)
+                          a: ({ node, ...props }) => (
+                            <a
+                              {...props}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="underline underline-offset-2 hover:opacity-80"
+                            />
+                          ),
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
+                    )}
                   </div>
                 </div>
               );
@@ -98,7 +119,8 @@ export function ChatMessages({
               type="button"
               className="rounded-full border border-white/60 px-3 py-1 text-xs font-medium text-white hover:bg-white/10"
               onClick={() =>
-                onShareLast?.() ?? alert("Compartilhar ainda será implementado.")
+                onShareLast?.() ??
+                alert("Compartilhar ainda será implementado.")
               }
             >
               Compartilhar

@@ -91,7 +91,15 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           IMPORTANTE: O Publ.IA é uma ferramenta de apoio técnico e informativo.
           Não substitui a assessoria jurídica, contábil ou de controle interno.
           As informações são baseadas na legislação vigente e devem ser
-          revisadas antes de uso oficial. Nexus Pública @2025 - Todos os direitos reservados.
+          revisadas antes de uso oficial. Nexus Pública @2025 - Todos os direitos reservados -  
+          <a 
+          href="https://www.nexuspublica.com.br"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline ml-1"
+        >
+          www.nexuspublica.com.br
+      </a>
         </p>
       </div>
     </div>
