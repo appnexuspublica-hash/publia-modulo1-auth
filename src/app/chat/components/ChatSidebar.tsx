@@ -52,7 +52,7 @@ export function ChatSidebar({
 
           <div className="flex flex-col">
             <span className="text-sm font-semibold text-slate-900">
-              Publ.IA 1.1
+              Publ.IA 1.2
             </span>
             <span className="text-[11px] text-slate-500">
               Nexus Pública
