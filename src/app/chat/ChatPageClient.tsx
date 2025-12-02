@@ -796,21 +796,27 @@ Organize a resposta em tópicos, com explicações objetivas.
       <div className="flex h-full flex-col md:hidden">
         {/* Header fixo */}
         <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
-          <div className="flex items-center gap-2">
-            <Image
-              src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
-              alt="Logo Publ.IA - Nexus Pública"
-              width={28}
-              height={28}
-              className="rounded"
-            />
-            <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA 1.2</div>
-              <div className="text-[11px] text-slate-500 leading-none">
-                Nexus Pública
-              </div>
-            </div>
-          </div>
+  <div className="flex items-center gap-2">
+    <a
+      href="https://nexuspublica.com.br/"
+      target="_blank"
+      rel="noreferrer noopener"
+    >
+      <Image
+        src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+        alt="Logo Publ.IA - Nexus Pública"
+        width={28}
+        height={28}
+        className="rounded"
+      />
+    </a>
+    <div>
+      <div className="text-sm font-semibold leading-none">Publ.IA 1.3</div>
+      <div className="text-[11px] text-slate-500 leading-none">
+        Nexus Pública
+      </div>
+    </div>
+  </div>
 
           <div className="flex items-center gap-4">
             <span className="text-[11px] text-slate-600">

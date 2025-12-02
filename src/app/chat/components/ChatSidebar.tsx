@@ -42,17 +42,24 @@ export function ChatSidebar({
       {/* Área 1: topo branco com logo + textos */}
       <div className="bg-white px-4 pt-4 pb-4">
         <div className="flex items-center gap-2">
-          <Image
-            src="/logos/nexus.png"
-            alt="Logo Publ.IA"
-            width={32}
-            height={32}
-            className="rounded-lg"
-          />
+          {/* Logo com link para o site da Nexus Pública */}
+          <a
+            href="https://nexuspublica.com.br/"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            <Image
+              src="/logos/nexus.png"
+              alt="Logo Publ.IA"
+              width={32}
+              height={32}
+              className="rounded-lg"
+            />
+          </a>
 
           <div className="flex flex-col">
             <span className="text-sm font-semibold text-slate-900">
-              Publ.IA 1.2
+              Publ.IA 1.3
             </span>
             <span className="text-[11px] text-slate-500">
               Nexus Pública
