@@ -87,21 +87,39 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
       {/* Rodapé em uma linha só */}
       <div className="w-full bg-[#2b4e67] text-white text-[12px] leading-snug text-center px-4 py-3">
-        <p className="mx-auto">
-          IMPORTANTE: O Publ.IA é uma ferramenta de apoio técnico e informativo.
-          Não substitui a assessoria jurídica, contábil ou de controle interno.
-          As informações são baseadas na legislação vigente e devem ser
-          revisadas antes de uso oficial. Nexus Pública @2025 - Todos os direitos reservados -  
-          <a 
-          href="https://www.nexuspublica.com.br"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline ml-1"
-        >
-          www.nexuspublica.com.br
-      </a>
-        </p>
-      </div>
+  <p className="mx-auto">
+    IMPORTANTE: O Publ.IA é uma ferramenta de apoio técnico e informativo.
+    Não substitui a assessoria jurídica, contábil ou de controle interno.
+    As informações são baseadas na legislação vigente e devem ser
+    revisadas antes de uso oficial - Nexus Pública @2025 - Todos os direitos reservados |  
+    <a 
+      href="https://www.nexuspublica.com.br"
+      target="_blank"
+      rel="noopener nreferrer"
+      className="underline ml-1"
+    >
+      www.nexuspublica.com.br
+    </a>
+    <span className="mx-1">|</span>
+    <a
+      href="https://nexuspublica.com.br/sobre-o-publia/"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline"
+    >
+      Sobre o Publ.IA
+    </a>
+    <span className="mx-1">|</span>
+    <a
+      href="https://nexuspublica.com.br/termo-de-uso/"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline"
+    >
+      Termo de Uso.
+    </a>
+  </p>
+</div>
     </div>
   );
 }
