@@ -73,9 +73,10 @@ export function ChatMessagesList({
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
       {messages.map((msg) => {
         const isUser = msg.role === "user";
+        const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
+
         const dateLabel = getDateLabel(msg.created_at);
-        const showDateDivider =
-          !!dateLabel && dateLabel !== lastDateLabel;
+        const showDateDivider = !!dateLabel && dateLabel !== lastDateLabel;
 
         if (showDateDivider) {
           lastDateLabel = dateLabel!;
@@ -135,40 +136,50 @@ export function ChatMessagesList({
 
                 {/* Botões abaixo da resposta da IA, se existirem handlers */}
                 {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                    {onCopyAnswer && (
-                      <button
-                        type="button"
-                        onClick={() => onCopyAnswer(msg.id)}
-                        className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
-                      >
-                        Copiar
-                      </button>
+                  <div className="mt-2 flex flex-col gap-2 text-xs">
+                    {/* ✅ Indicador agora fica acima dos botões e só na última resposta da IA */}
+                    {isLastAssistant && isSending && (
+                      <div className="flex items-center gap-2 text-xs text-slate-100">
+                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
+                        <span>Gerando resposta...</span>
+                      </div>
                     )}
 
-                    {/* Regenerar só aparece na ÚLTIMA resposta da IA e se tivermos a última pergunta do usuário */}
-                    {onRegenerateLast &&
-                      lastAssistant &&
-                      lastUser &&
-                      msg.id === lastAssistant.id && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {onCopyAnswer && (
                         <button
                           type="button"
-                          onClick={() => onRegenerateLast(lastUser.content)}
+                          onClick={() => onCopyAnswer(msg.id)}
                           className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
                         >
-                          Regenerar
+                          Copiar
                         </button>
                       )}
 
-                    {onShareConversation && (
-                      <button
-                        type="button"
-                        onClick={() => onShareConversation()}
-                        className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
-                      >
-                        Compartilhar
-                      </button>
-                    )}
+                      {/* Regenerar só aparece na ÚLTIMA resposta da IA e se tivermos a última pergunta do usuário */}
+                      {onRegenerateLast &&
+                        lastAssistant &&
+                        lastUser &&
+                        msg.id === lastAssistant.id && (
+                          <button
+                            type="button"
+                            onClick={() => onRegenerateLast(lastUser.content)}
+                            className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+                          >
+                            Regenerar
+                          </button>
+                        )}
+
+                      {onShareConversation && (
+                        <button
+                          type="button"
+                          onClick={() => onShareConversation()}
+                          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+                        >
+                          Compartilhar
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -176,14 +187,6 @@ export function ChatMessagesList({
           </div>
         );
       })}
-
-      {/* Indicador “Processando resposta...” */}
-      {isSending && (
-        <div className="mt-2 flex items-center gap-2 text-xs text-slate-100">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
-          <span>Processando resposta...</span>
-        </div>
-      )}
 
       {/* Âncora para scroll automático */}
       <div ref={bottomRef} />

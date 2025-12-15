@@ -75,6 +75,47 @@ type AttachedPdf = {
 
 type QuickActionKind = "resumo" | "pontos" | "irregularidade";
 
+// ------------------------------------------------------
+// Helpers SSE (para /api/chat streaming)
+// ------------------------------------------------------
+type SSEParsed =
+  | { event: "meta"; data: any }
+  | { event: "delta"; data: { text?: string } }
+  | { event: "done"; data: any }
+  | { event: "error"; data: { error?: string } }
+  | { event: string; data: any };
+
+function parseSSEBlock(block: string): SSEParsed | null {
+  // block é algo como:
+  // event: delta
+  // data: {"text":"..."}
+  const lines = block.split("\n").map((l) => l.trimEnd());
+  let eventName = "";
+  let dataLine = "";
+
+  for (const line of lines) {
+    if (line.startsWith("event:")) {
+      eventName = line.replace("event:", "").trim();
+    } else if (line.startsWith("data:")) {
+      // SSE pode mandar vários data:, mas aqui nosso backend manda 1
+      dataLine = line.replace("data:", "").trim();
+    }
+  }
+
+  if (!eventName) return null;
+
+  let parsedData: any = null;
+  if (dataLine) {
+    try {
+      parsedData = JSON.parse(dataLine);
+    } catch {
+      parsedData = dataLine;
+    }
+  }
+
+  return { event: eventName, data: parsedData } as SSEParsed;
+}
+
 export default function ChatPageClient({
   userId,
   userLabel,
@@ -102,6 +143,16 @@ export default function ChatPageClient({
 
   // Controle do menu lateral no mobile
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  // Abort do streaming (evita “corrida” se enviar 2x)
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      // cleanup ao desmontar
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // ----------------------------------------------------
   // Carregar conversas ao abrir a página
@@ -235,6 +286,10 @@ export default function ChatPageClient({
   }
 
   function handleSelectConversation(id: string) {
+    // Se tiver streaming em andamento, aborta
+    abortRef.current?.abort();
+    abortRef.current = null;
+
     setActiveConversationId(id);
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
@@ -275,86 +330,41 @@ export default function ChatPageClient({
   }
 
   // ----------------------------------------------------
-  // Enviar mensagem para IA
+  // Enviar mensagem para IA (AGORA COM STREAMING SSE)
   // ----------------------------------------------------
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
     if (!trimmed) return;
 
+    // Se já tem uma resposta em andamento, aborta antes de iniciar outra
+    abortRef.current?.abort();
+    abortRef.current = null;
+
     const conversationId = await ensureConversationId();
     if (!conversationId) return;
 
-    const tempId = `temp-${Date.now()}`;
+    // IDs temporários (UI)
+    const tempUserId = `temp-user-${Date.now()}`;
+    const tempAssistantId = `temp-assistant-${Date.now() + 1}`;
 
     const tempUserMessage: ChatMessage = {
-      id: tempId,
+      id: tempUserId,
       role: "user",
       content: trimmed,
     };
 
-    setMessages((prev) => [...prev, tempUserMessage]);
+    const tempAssistantMessage: ChatMessage = {
+      id: tempAssistantId,
+      role: "assistant",
+      content: "", // vai sendo preenchido pelos deltas
+    };
+
+    setMessages((prev) => [...prev, tempUserMessage, tempAssistantMessage]);
     setIsSending(true);
 
+    // Atualiza título (mesma regra anterior), sem depender do retorno do /api/chat
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          conversationId,
-          message: trimmed,
-        }),
-      });
-
-      if (!res.ok) {
-        console.error("Erro ao chamar /api/chat:", await res.text());
-        alert("Erro ao enviar mensagem para a IA.");
-        setMessages((prev) => prev.filter((m) => m.id !== tempId));
-        return;
-      }
-
-      const data = (await res.json()) as {
-        userMessage: {
-          id: string;
-          role: string;
-          content: string;
-          created_at: string;
-        };
-        assistantMessage: {
-          id: string;
-          role: string;
-          content: string;
-          created_at: string;
-        };
-      };
-
-      const conversationIdForTitle = conversationId;
-
-      const userMsg: ChatMessage = {
-        id: data.userMessage.id,
-        role: data.userMessage.role as "user",
-        content: data.userMessage.content,
-        created_at: data.userMessage.created_at,
-      };
-
-      const assistantMsg: ChatMessage = {
-        id: data.assistantMessage.id,
-        role: data.assistantMessage.role as "assistant",
-        content: data.assistantMessage.content,
-        created_at: data.assistantMessage.created_at,
-      };
-
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempId),
-        userMsg,
-        assistantMsg,
-      ]);
-
-      const existingConv = conversations.find(
-        (c) => c.id === conversationIdForTitle
-      );
-
+      const existingConv = conversations.find((c) => c.id === conversationId);
       const isDefaultTitle =
         !existingConv ||
         !existingConv.title ||
@@ -370,26 +380,147 @@ export default function ChatPageClient({
             : base;
 
         setConversations((prev) =>
-          prev.map((c) =>
-            c.id === conversationIdForTitle ? { ...c, title: newTitle } : c
-          )
+          prev.map((c) => (c.id === conversationId ? { ...c, title: newTitle } : c))
         );
 
-        try {
-          await supabase
-            .from("conversations")
-            .update({ title: newTitle })
-            .eq("id", conversationIdForTitle)
-            .eq("user_id", userId);
-        } catch (err) {
-          console.error("Erro ao atualizar título da conversa:", err);
+        supabase
+          .from("conversations")
+          .update({ title: newTitle })
+          .eq("id", conversationId)
+          .eq("user_id", userId)
+          .then(({ error }) => {
+            if (error) console.error("Erro ao atualizar título:", error.message);
+          });
+      }
+    } catch (err) {
+      console.error("Erro ao atualizar título da conversa (pré-stream):", err);
+    }
+
+    try {
+      const ac = new AbortController();
+      abortRef.current = ac;
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        signal: ac.signal,
+        body: JSON.stringify({
+          conversationId,
+          message: trimmed,
+          // Se depois quiser forçar PDF selecionado, dá pra mandar aqui também.
+          // Hoje o backend pega o PDF mais recente da conversa.
+        }),
+      });
+
+      if (!res.ok || !res.body) {
+        console.error("Erro ao chamar /api/chat:", await res.text());
+        alert("Erro ao enviar mensagem para a IA.");
+        setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE delimita eventos por linha em branco (\n\n)
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const block = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 2);
+
+          if (!block) continue;
+
+          const parsed = parseSSEBlock(block);
+          if (!parsed) continue;
+
+          if (parsed.event === "meta") {
+            const userMessage = parsed.data?.userMessage;
+            if (userMessage?.id) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === tempUserId
+                    ? {
+                        id: userMessage.id,
+                        role: "user",
+                        content: userMessage.content ?? trimmed,
+                        created_at: userMessage.created_at,
+                      }
+                    : m
+                )
+              );
+            }
+          }
+
+          if (parsed.event === "delta") {
+            const deltaText = parsed.data?.text ?? "";
+            if (deltaText) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === tempAssistantId
+                    ? { ...m, content: (m.content || "") + deltaText }
+                    : m
+                )
+              );
+            }
+          }
+
+          if (parsed.event === "done") {
+            const assistantMessage = parsed.data?.assistantMessage;
+            if (assistantMessage?.id) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === tempAssistantId
+                    ? {
+                        id: assistantMessage.id,
+                        role: "assistant",
+                        content: assistantMessage.content ?? m.content ?? "",
+                        created_at: assistantMessage.created_at,
+                      }
+                    : m
+                )
+              );
+            }
+          }
+
+          if (parsed.event === "error") {
+            const msg = parsed.data?.error || "Erro ao gerar a resposta.";
+            console.error("[SSE error]", msg);
+
+            // Em vez de sumir com a bolha, você pode exibir a mensagem nela:
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempAssistantId
+                  ? { ...m, content: `Erro: ${msg}` }
+                  : m
+              )
+            );
+
+            // Opcional: alert (se você quiser menos alertas, pode remover)
+            alert(msg);
+          }
         }
       }
-    } catch (error) {
-      console.error("Erro inesperado ao enviar mensagem para IA:", error);
-      alert("Erro ao enviar mensagem para a IA.");
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    } catch (error: any) {
+      // Abort é esperado em algumas situações
+      if (error?.name === "AbortError") {
+        // não faz nada
+      } else {
+        console.error("Erro inesperado ao enviar mensagem para IA:", error);
+        alert("Erro ao enviar mensagem para a IA.");
+        setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
+      }
     } finally {
+      abortRef.current = null;
       setIsSending(false);
     }
   }
@@ -674,11 +805,7 @@ Organize a resposta em tópicos, com explicações objetivas.
           />
         ) : loadingMessages && activeConversationId ? (
           <div className="flex h-full items-center justify-center text-sm text-white">
-            Processando resposta...
-          </div>
-        ) : isSending ? (
-          <div className="flex h-full items-center justify-center text-sm text-white">
-            Processando resposta...
+            Carregando conversa...
           </div>
         ) : (
           <ChatEmptyState />
@@ -796,27 +923,27 @@ Organize a resposta em tópicos, com explicações objetivas.
       <div className="flex h-full flex-col md:hidden">
         {/* Header fixo */}
         <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
-  <div className="flex items-center gap-2">
-    <a
-      href="https://nexuspublica.com.br/"
-      target="_blank"
-      rel="noreferrer noopener"
-    >
-      <Image
-        src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
-        alt="Logo Publ.IA - Nexus Pública"
-        width={28}
-        height={28}
-        className="rounded"
-      />
-    </a>
-    <div>
-      <div className="text-sm font-semibold leading-none">Publ.IA 1.3</div>
-      <div className="text-[11px] text-slate-500 leading-none">
-        Nexus Pública
-      </div>
-    </div>
-  </div>
+          <div className="flex items-center gap-2">
+            <a
+              href="https://nexuspublica.com.br/"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <Image
+                src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+                alt="Logo Publ.IA - Nexus Pública"
+                width={28}
+                height={28}
+                className="rounded"
+              />
+            </a>
+            <div>
+              <div className="text-sm font-semibold leading-none">Publ.IA 1.4</div>
+              <div className="text-[11px] text-slate-500 leading-none">
+                Nexus Pública
+              </div>
+            </div>
+          </div>
 
           <div className="flex items-center gap-4">
             <span className="text-[11px] text-slate-600">
