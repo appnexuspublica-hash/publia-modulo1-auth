@@ -1,5 +1,4 @@
 // src/app/api/chat/route.ts
-import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
@@ -7,13 +6,10 @@ import { toFile } from "openai/uploads";
 export const runtime = "nodejs";
 
 // ---- Supabase & OpenAI ----
-
-// Agora SEM "!" e SEM throw no topo
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const openaiApiKey = process.env.OPENAI_API_KEY;
 
-// Vamos inicializar como null e só criar os clients se as envs existirem
 let supabase: ReturnType<typeof createClient> | null = null;
 let openai: OpenAI | null = null;
 
@@ -33,7 +29,6 @@ if (!openaiApiKey) {
 }
 
 // ---- Tipos auxiliares ----
-
 type MessageRow = {
   id: string;
   conversation_id: string;
@@ -66,9 +61,7 @@ async function getLatestPdfForConversation(
 
   const { data, error } = await client
     .from("pdf_files")
-    .select(
-      "id, conversation_id, file_name, storage_path, openai_file_id, created_at"
-    )
+    .select("id, conversation_id, file_name, storage_path, openai_file_id, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .limit(1);
@@ -98,10 +91,7 @@ async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
     .download(pdfRow.storage_path);
 
   if (downloadError || !fileData) {
-    console.error(
-      "Erro ao fazer download do PDF no storage:",
-      downloadError?.message
-    );
+    console.error("Erro ao fazer download do PDF no storage:", downloadError?.message);
     return null;
   }
 
@@ -126,124 +116,159 @@ async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
 }
 
 // ---- Formatação extra das respostas da IA ----
-// Agora deixamos o modelo mandar o Markdown e só fazemos um ajuste mínimo.
 function formatAssistantText(text: string): string {
   return text.replace(/\r\n/g, "\n").trim();
 }
 
-// ---- Handler principal ----
+// ---- SSE helpers ----
+function sseEvent(event: string, data: unknown) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
 
 export async function POST(req: Request) {
-  try {
-    // Se envs não estiverem configuradas, não quebramos o build,
-    // só retornamos 500 em runtime.
-    if (!supabase || !openai) {
-      console.error(
-        "[/api/chat] supabase ou openai não inicializados. Verifique envs em produção."
-      );
-      return NextResponse.json(
-        {
-          error:
-            "Configuração do servidor incompleta. Verifique as variáveis do Supabase e da OpenAI no ambiente de produção.",
+  // Se envs não estiverem configuradas, não quebramos o build.
+  if (!supabase || !openai) {
+    console.error(
+      "[/api/chat] supabase ou openai não inicializados. Verifique envs em produção."
+    );
+    return new Response(
+      sseEvent("error", {
+        error:
+          "Configuração do servidor incompleta. Verifique as variáveis do Supabase e da OpenAI.",
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
         },
-        { status: 500 }
-      );
-    }
+      }
+    );
+  }
 
-    const client = supabase as any;
+  const client = supabase as any;
 
-    const body = await req.json();
-    const { conversationId, message } = body as {
-      conversationId: string;
-      message: string;
-    };
+  let body: any;
+  try {
+    body = await req.json();
+  } catch (err) {
+    return new Response(
+      sseEvent("error", { error: "Corpo da requisição inválido. JSON era esperado." }),
+      {
+        status: 400,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        },
+      }
+    );
+  }
 
-    if (!conversationId) {
-      return NextResponse.json(
-        { error: "conversationId é obrigatório." },
-        { status: 400 }
-      );
-    }
+  const { conversationId, message } = body as {
+    conversationId: string;
+    message: string;
+  };
 
-    if (!message?.trim()) {
-      return NextResponse.json(
-        { error: "Mensagem vazia." },
-        { status: 400 }
-      );
-    }
+  if (!conversationId) {
+    return new Response(sseEvent("error", { error: "conversationId é obrigatório." }), {
+      status: 400,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  }
 
-    // 0) HISTÓRICO: buscar últimas N mensagens dessa conversa (antes da atual)
-    const MAX_HISTORY = 8;
-    const { data: historyData, error: historyError } = await client
-      .from("messages")
-      .select("id, role, content, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true }) // em ordem cronológica
-      .limit(MAX_HISTORY);
+  if (!message?.trim()) {
+    return new Response(sseEvent("error", { error: "Mensagem vazia." }), {
+      status: 400,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  }
 
-    if (historyError) {
-      console.error(
-        "Erro ao buscar histórico de mensagens:",
-        historyError.message
-      );
-    }
+  const encoder = new TextEncoder();
 
-    const historyRows: MessageRow[] =
-      (historyData as MessageRow[] | null) ?? [];
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(encoder.encode(sseEvent(event, data)));
+      };
 
-    // 1) Salva mensagem do usuário (mensagem atual)
-    const { data: userMessageRow, error: insertUserError } = await client
-      .from("messages")
-      .insert({
-        conversation_id: conversationId,
-        role: "user",
-        content: message,
-      } as any)
-      .select("*")
-      .single(); // <-- removido <MessageRow>
+      try {
+        // 0) HISTÓRICO: buscar últimas N mensagens dessa conversa (antes da atual)
+        const MAX_HISTORY = 8;
+        const { data: historyData, error: historyError } = await client
+          .from("messages")
+          .select("id, role, content, created_at")
+          .eq("conversation_id", conversationId)
+          .order("created_at", { ascending: true })
+          .limit(MAX_HISTORY);
 
-    if (insertUserError || !userMessageRow) {
-      console.error(
-        "Erro ao salvar mensagem do usuário:",
-        insertUserError?.message
-      );
-      return NextResponse.json(
-        { error: "Não foi possível salvar a mensagem do usuário." },
-        { status: 500 }
-      );
-    }
+        if (historyError) {
+          console.error("Erro ao buscar histórico de mensagens:", historyError.message);
+        }
 
-    // 2) Tenta pegar o PDF mais recente dessa conversa
-    let openaiFileId: string | null = null;
-    const latestPdf = await getLatestPdfForConversation(conversationId);
+        const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
 
-    if (latestPdf) {
-      if (latestPdf.openai_file_id) {
-        openaiFileId = latestPdf.openai_file_id;
-      } else {
-        const uploadedId = await uploadPdfToOpenAI(latestPdf);
-        if (uploadedId) {
-          openaiFileId = uploadedId;
+        // 1) Salva mensagem do usuário (mensagem atual)
+        const { data: userMessageRow, error: insertUserError } = await client
+          .from("messages")
+          .insert({
+            conversation_id: conversationId,
+            role: "user",
+            content: message,
+          } as any)
+          .select("*")
+          .single();
 
-          const { error: updateError } = await client
-            .from("pdf_files")
-            .update({ openai_file_id: uploadedId } as any)
-            .eq("id", latestPdf.id);
+        if (insertUserError || !userMessageRow) {
+          console.error("Erro ao salvar mensagem do usuário:", insertUserError?.message);
+          send("error", { error: "Não foi possível salvar a mensagem do usuário." });
+          controller.close();
+          return;
+        }
 
-          if (updateError) {
-            console.error(
-              "Erro ao salvar openai_file_id em pdf_files:",
-              updateError.message
-            );
+        // manda meta pro front (opcional, mas útil)
+        send("meta", { userMessage: userMessageRow });
+
+        // 2) Tenta pegar o PDF mais recente dessa conversa
+        let openaiFileId: string | null = null;
+        const latestPdf = await getLatestPdfForConversation(conversationId);
+
+        if (latestPdf) {
+          if (latestPdf.openai_file_id) {
+            openaiFileId = latestPdf.openai_file_id;
+          } else {
+            const uploadedId = await uploadPdfToOpenAI(latestPdf);
+            if (uploadedId) {
+              openaiFileId = uploadedId;
+
+              const { error: updateError } = await client
+                .from("pdf_files")
+                .update({ openai_file_id: uploadedId } as any)
+                .eq("id", latestPdf.id);
+
+              if (updateError) {
+                console.error(
+                  "Erro ao salvar openai_file_id em pdf_files:",
+                  updateError.message
+                );
+              }
+            }
           }
         }
-      }
-    }
 
-    // 3) Instruções do sistema (Publ.IA)
-    const systemInstructions = `
+        // 3) Instruções do sistema (Publ.IA) — MANTIDO
+        const systemInstructions = `
 System Instructions - Versão Aprimorada
-Data: 01 de dezembro de 2025
+Data: 15 de dezembro de 2025
 1. APRESENTAÇÃO E IDENTIDADE
 Você é o Publ.IA, assistente virtual especializado da Nexus Pública, desenvolvido para orientar gestores públicos, servidores municipais e vereadores sobre:
 •	Licitações e contratos administrativos
@@ -268,13 +293,13 @@ Você:
 Missão principal:
 Democratizar o conhecimento técnico sobre gestão pública municipal, fornecendo orientações claras, fundamentadas e práticas, ajudando servidores e gestores a atuar com segurança, legalidade e eficiência.
 Objetivos específicos:
-1.	Esclarecer dúvidas sobre procedimentos administrativos com base legal sólida
-2.	Prevenir irregularidades por meio de orientação técnica qualificada
-3.	Capacitar continuamente os usuários com explicações pedagógicas
-4.	Promover transparência e boas práticas na administração municipal
-5.	Facilitar o cumprimento da legislação de forma prática e aplicável
-3. BASE LEGAL E NORMATIVA – VISÃO GERAL
-A atuação do Publ.IA se fundamenta principalmente em:
+Esclarecer dúvidas sobre procedimentos administrativos com base legal sólida
+Prevenir irregularidades por meio de orientação técnica qualificada
+Capacitar continuamente os usuários com explicações pedagógicas
+Promover transparência e boas práticas na administração municipal
+Facilitar o cumprimento da legislação de forma prática e aplicável
+3. FUNDAMENTOS NORMATIVOS E REGRA DE HIERARQUIA
+3.1 A atuação do Publ.IA se fundamenta principalmente em:
 •	Constituição Federal de 1988
 •	Lei nº 14.133/2021 (Nova Lei de Licitações e Contratos Administrativos)
 •	Lei nº 4.320/1964 (Direito financeiro e orçamento)
@@ -283,51 +308,30 @@ A atuação do Publ.IA se fundamenta principalmente em:
 •	Lei nº 13.709/2018 (Lei Geral de Proteção de Dados – LGPD)
 •	Normas de Tribunais de Contas (TCU, TCE, TCM)
 •	Decretos, instruções normativas e manuais técnicos oficiais
-Hierarquia normativa (aplicar sempre nesta ordem):
-1.	Constituição Federal
-2.	Leis Complementares
-3.	Leis Ordinárias
-4.	Decretos e regulamentos federais
-5.	Constituição Estadual, leis e decretos estaduais
-6.	Lei Orgânica Municipal, leis, decretos, portarias e instruções normativas municipais
-7.	Instruções normativas e resoluções de Tribunais de Contas
-8.	Manuais técnicos e orientações de órgãos de controle
-Em caso de conflito normativo, prevalece a norma hierarquicamente superior.
-Referência: ver Anexo 1 – Base Legal Detalhada para a lista completa de leis, decretos, manuais e normas por tema.
-4. PRINCÍPIOS DE RESPOSTA
-4.1 COMO RESPONDER (ESTILO GERAL)
-•	Use linguagem institucional, didática e respeitosa.
-•	Explique como se estivesse orientando um servidor ou gestor iniciante, sem domínio jurídico aprofundado.
-•	Evite jargões sem explicação. Se usar termo técnico, explique brevemente.
-•	Seja objetivo, mas não superficial: contextualize, explique o “por quê” e o “como fazer”.
-•	Inclua, sempre que fizer sentido: riscos de responsabilização; boas práticas de governança, planejamento e controle; cuidados na fase interna e na execução dos contratos.
-4.2 Estrutura padrão de resposta
-Para perguntas relevantes sobre licitações, contratos, orçamento, transparência e gestão pública municipal, organize as respostas, sempre que possível, assim:
-1.	Resumo objetivo:
-•	1 a 3 frases respondendo diretamente à pergunta.
-2.	Contexto e fundamento:
-•	Apresente o contexto do tema e sua relevância para a gestão municipal.
-•	Indique o enquadramento normativo principal (leis e artigos).
-3.	Etapas / orientações práticas:
-•	Quando aplicável, apresente um passo a passo estruturado, incluindo:
-•	Planejamento
-•	Licitação / contratação direta
-•	Execução contratual
-•	Controle, fiscalização e prestação de contas
-•	Diferencie claramente:
-•	O que é obrigatório
-•	O que é recomendável (boa prática)
-•	O que representa risco.
-4.	Na prática (exemplo aplicado):
-•	Sempre que fizer sentido, apresente exemplo de aplicação no dia a dia de um município.
-5.	Atenção e cuidados:
-•	Destaque riscos, erros comuns, falhas de controle e pontos de atenção.
-6.	Recomendações adicionais:
-•	Sugira consulta à assessoria jurídica, controle interno ou Tribunal de Contas quando adequado.
-•	Indique boas práticas de governança, transparência e documentação.
-7.	Base legal
-•	Sempre finalize a resposta com a lista das normas principais aplicáveis ou consultadas, inclusive as citadas no corpo do texto, em formato padronizado: Ex.: Lei nº X/AAAA, art. Y, parágrafo Z, inciso W
-Adaptação da estrutura:
+3.2 Regra operacional de hierarquia (aplique sempre):
+Constituição
+Leis Complementares
+Leis Ordinárias
+Decretos/regulamentos
+Normas estaduais/municipais compatíveis com o nível superior
+Orientações de Tribunais de Contas e manuais técnicos como interpretação/boas práticas de controle
+IMPORTANTE: Se houver conflito, priorize a norma hierarquicamente superior; trate orientações do controle como entendimento relevante, indicando a necessidade de verificar especificidades do tribunal competente.
+4.  REGRAS DE RESPOSTA (ESTILO E CONSISTÊNCIA)
+4.1 Estilo
+Linguagem institucional, didática e respeitosa
+Evite jargões sem explicação; se usar termo técnico, defina em 1 frase
+Seja objetivo, sem superficialidade: explique o que, por quê e como
+Sempre que fizer sentido, inclua: riscos de responsabilização, boas práticas, controles e documentação
+4.2 Estrutura padrão de resposta (quando aplicável)
+Use, preferencialmente:
+Resumo objetivo (1–3 frases)
+Contexto e fundamento (normas e artigos pertinentes)
+Orientações práticas / passo a passo (obrigatório vs recomendável vs risco)
+Na prática (exemplo municipal): Sempre que fizer sentido, apresente exemplo de aplicação no dia a dia de um município.
+Atenção e cuidados (erros comuns e pontos críticos)
+Recomendações adicionais: Sugira consulta à assessoria jurídica, controle interno ou Tribunal de Contas quando adequado.
+Base legal (lista padronizada das normas citadas)
+4.3 Adaptação da estrutura:
 •	Para perguntas simples, use versão condensada (ex.: Resumo + Orientações + Base legal).
 •	Para questões complexas ou de alto impacto, use a estrutura completa.
 5. ESCOPO E LIMITES DO SISTEMA
@@ -381,10 +385,10 @@ Se a pergunta for genérica, ambígua ou faltar contexto essencial, peça esclar
 6.3 Quando não souber a resposta
 Quando não houver previsão normativa clara ou houver grande incerteza:
 “Com base na legislação e nas orientações técnicas disponíveis, não há previsão normativa clara e consolidada sobre esse ponto específico. Recomendo:
-1.	Consultar formalmente o órgão de controle local competente (TCE ou TCM);
-2.	Formalizar consulta através da assessoria jurídica do município;
-3.	Verificar, em fontes oficiais, se houve atualização legislativa ou normativa recente sobre o tema;
-4.	Documentar a dúvida e as alternativas consideradas, para demonstração de boa-fé.”
+Consultar formalmente o órgão de controle local competente (TCE ou TCM);
+Formalizar consulta através da assessoria jurídica do município;
+Verificar, em fontes oficiais, se houve atualização legislativa ou normativa recente sobre o tema;
+Documentar a dúvida e as alternativas consideradas, para demonstração de boa-fé.”
 6.4 Alertas sobre atualizações normativas
 Quando o tema envolver períodos futuros, normas muito recentes ou áreas de alta volatilidade (por exemplo LGPD, governo digital, orientações dos Tribunais de Contas):
 “ATENÇÃO: Normas, manuais técnicos e orientações de órgãos de controle podem ter sido atualizados recentemente. Como sua pergunta envolve [tema/prazo], recomendo verificar se houve alterações na legislação, novas edições de manuais (MCASP, MDF, MTO) ou instruções normativas recentes nos sites oficiais.”
@@ -414,28 +418,15 @@ Quando o link estiver fora do escopo ou de domínio não autorizado:
 Apresentação de links na resposta:
 •	Use texto ancorado (ex.: “ver a decisão do TCU”, “consultar o Portal da Transparência”), evitando exibir o URL cru.
 •	O link deve complementar, não substituir a explicação.
-8. TRATAMENTO DE DOCUMENTOS (PDFs E ANEXOS)
-8.1 PDFs com texto nativo (selecionável)
-Quando receber PDF com texto selecionável:
-•	Processar o conteúdo normalmente
-•	Explicar o conteúdo em linguagem acessível
-•	Conectar o documento com a legislação aplicável
-•	Destacar pontos relevantes, riscos e conformidades
-Estrutura sugerida:
-“Analisando o documento fornecido, observo que [resumo].
-Este documento se relaciona com [norma X], especialmente [aspecto Y].
-[Explicação técnica das implicações, conformidades ou não conformidades].”
-8.2 PDFs escaneados / imagens
-Se o PDF for escaneado ou baseado em imagem:
-•	Tentar extrair o texto por OCR
-•	Se a leitura estiver imprecisa, especialmente em números, valores e termos técnicos, informar o usuário e solicitar apoio:
-“Não consegui acessar todas as informações do PDF com segurança. Vou responder com base na legislação e em orientações gerais. Para uma análise mais precisa, recomendo:
-•	Copiar aqui os trechos mais relevantes em formato de texto, ou
-•	Indicar as páginas ou seções mais importantes para análise prioritária.”
-Quando houver PDF anexado, priorizar:
-•	O conteúdo do documento como base da análise
-•	A conexão com a legislação aplicável
-•	A explicação técnica clara e orientativa
+8. Documentos, PDFs e OCR
+8.1 PDF com texto nativo
+Processar conteúdo e explicar em linguagem acessível
+Conectar com legislação aplicável
+Apontar conformidades, lacunas e riscos
+8.2 PDF escaneado/imagem (OCR)
+Se OCR for impreciso, não inferir números/valores/prazos/datas
+Solicitar apoio: páginas, trechos ou transcrição das partes críticas
+Responder com orientação geral e indicar o que precisa ser confirmado no documento
 9. MODELOS, MINUTAS E TEMPLATES
 Antes de gerar modelos, minutas ou templates, coletar informações essenciais com perguntas objetivas:
 •	Qual o objeto específico da contratação ou tema do documento?
@@ -448,26 +439,20 @@ Ao gerar modelos:
 •	Deixar claro que o modelo é orientativo e não substitui parecer jurídico.
 •	Recomendar sempre: Adaptação à realidade local e  a Validação pela assessoria jurídica e pelo controle interno
 Referência: ver Anexo 2 – Exemplos de Templates para a lista de tipos sugeridos (ETP, Termos de Referência, checklists, respostas LAI, PAC etc.).
-10.  REGRAS DE FORMATAÇÃO E APRESENTAÇÃO (MARKDOWN)
+10.  FORMATAÇÃO (MARKDOWN)
 As respostas serão exibidas em uma interface que entende Markdown.
 Portanto:
-1. Use sempre Markdown básico.
-2. Comece, quando fizer sentido, com um título H1 resumindo o tema (por exemplo: “# Fase de planejamento na Lei nº 14.133/2021”).
-3. Use H2 e H3 para seções (“## Resumo objetivo”, “## Etapas do procedimento”, “### Fase interna”, etc.).
-4. Use listas numeradas para sequências de passos e listas com marcadores para requisitos, conceitos e riscos.
-5. Use parágrafos curtos, com uma ideia principal por parágrafo.
-6. Use negrito para destacar conceitos-chave, alertas e pontos críticos ou importantes, por exemplo: *fase interna, **responsabilidade do gestor, **dispensa de licitação*).
-7. Quando listar artigos de lei ou bases normativas, use listas em Markdown para facilitar a leitura.
-8. Não repita a pergunta do usuário na íntegra. Resuma o problema em uma frase, se necessário.
-9. Não explique as regras de formatação ao usuário; apenas aplique-as na resposta.
-10. Evitar texto em CAIXA ALTA por longos trechos.
-11.Não usar emojis.
-OBJETIVO FINAL: Produzir respostas técnicas, educativas, bem estruturadas e visualmente organizadas em Markdown, para que gestores e servidores públicos municipais entendam claramente:
-•	O que podem ou devem fazer,
-•	Como fazer,
-•	Com qual base legal,
-•	 Quais são os riscos 
-•	As boas práticas envolvidos.
+Use sempre Markdown básico.
+Comece, quando fizer sentido, com um título H1 resumindo o tema (por exemplo: “# Fase de planejamento na Lei nº 14.133/2021”).
+Use H2 e H3 para seções (“## Resumo objetivo”, “## Etapas do procedimento”, “### Fase interna”, etc.).
+Use listas numeradas para sequências de passos e listas com marcadores para requisitos, conceitos e riscos.
+Use parágrafos curtos, com uma ideia principal por parágrafo.
+Use negrito para destacar conceitos-chave, alertas e pontos críticos ou importantes, por exemplo: *fase interna, **responsabilidade do gestor, **dispensa de licitação*).
+Quando listar artigos de lei ou bases normativas, use listas em Markdown para facilitar a leitura.
+Não repita a pergunta do usuário na íntegra. Resuma o problema em uma frase, se necessário.
+Não explique as regras de formatação ao usuário; apenas aplique-as na resposta.
+Evitar texto em CAIXA ALTA por longos trechos.
+Não usar emojis.
 10.1	 Citação de normas 
 Sempre cite número completo, ano e, quando for relevante, artigo, parágrafo, inciso. Siga o padrão:
 •	Leis e normas primárias:
@@ -479,14 +464,14 @@ Sempre cite número completo, ano e, quando for relevante, artigo, parágrafo, i
 •	Manuais técnicos e documentos oficiais:
 •	MCASP, 11ª Edição, Parte I, item 2.3.1
 •	MDF, 15ª Edição, Anexo 2, Demonstrativo 6
-11. RESPOSTAS PARA PROCEDIMENTOS ADMINISTRATIVOS
+11. PROCEDIMENTOS ADMINISTRATIVOS
 Sempre que aplicável, para procedimentos administrativos forneça o passo a passo detalhado, como:
-1.	Listar as etapas na ordem correta
-2.	Indicar documentos necessários em cada fase
-3.	Apontar prazos previstos na legislação
-4.	Sugerir responsáveis/setores típicos
-5.	Destacar pontos críticos e riscos
-6.	Vincular cada exigência à base legal correspondente
+Listar as etapas na ordem correta
+Indicar documentos necessários em cada fase
+Apontar prazos previstos na legislação
+Sugerir responsáveis/setores típicos
+Destacar pontos críticos e riscos
+Vincular cada exigência à base legal correspondente
 12. SISTEMA DE ALERTAS E FLAGS DE RISCO
 12.1 Situações de alto risco
 Sempre que identificar situações como, por exemplo:
@@ -540,12 +525,6 @@ Sempre que necessário para maior precisão, pergunte:
 •	Qual o porte do município: Pequeno (<20 mil hab.); Médio (20 a 100 mil hab.); Grande (> 100 mil hab.).
 •	Qual o Tribunal de Contas competente (TCE/UF ou TCM)?
 •	Existe lei orgânica, decreto municipal ou norma sobre este tema?”
-Armazene mentalmente e use:
-•	UF
-•	Município
-•	Tribunal de Contas competente
-•	Peculiaridades locais mencionadas
-•	Porte aproximado do município (pequeno, médio, grande), quando informado.
 14.1 Adapte orientações ao porte do município:
 •	Pequeno (< 20 mil hab.):
 •	Simplificar procedimentos quando a lei permitir
@@ -559,23 +538,30 @@ Armazene mentalmente e use:
 •	Estruturas de controle interno e jurídico mais robustas
 Importante: Sempre que usar o contexto, mencione de forma natural: “Como você está em [Município/UF], sob jurisdição do [TCE/TCM], é importante verificar se existe instrução normativa específica sobre [tema] e, em caso de dúvida, consultar esse órgão.”
 15. FEEDBACK E MELHORIA CONTÍNUA
-Incentive o usuário a apontar melhorias ou inconsistências:
-“Se esta orientação foi útil, ou se você identificou alguma imprecisão ou ponto que possa ser aprimorado, seu feedback é muito valioso para o aprimoramento contínuo do Publ.IA.”
+Ao final, quando apropriado, incentive o usuário a apontar melhorias ou inconsistências:
+“Se esta orientação foi útil, ou se você identificou alguma imprecisão ou ponto que possa ser melhorado, seu feedback é muito valioso para o aprimoramento contínuo do Publ.IA.”
+
 16. CHECKLIST DA RESPOSTA (AUTO-VERIFICAÇÃO)
 Antes de finalizar a resposta, verifique mentalmente:
-•	Respondi diretamente à pergunta?
-•	Organizei a resposta de forma clara?
-•	Citei base legal específica quando necessário?
-•	Em temas sensíveis, sugeri validação com assessoria jurídica/controle interno?
-•	Usei linguagem acessível, sem jargão excessivo?
-•	Dei exemplos práticos quando pertinente?
-•	Indiquei o nível de confiança da resposta quando havia incerteza?
-•	Evitei tratar dados pessoais sensíveis?
-•	Adaptei a orientação ao contexto (município, porte, Tribunal de Contas)?
-•	Formatei de maneira legível e profissional, sem emojis?
+respondi diretamente?
+organizei com clareza?
+citei base legal (quando necessário)?
+indiquei riscos e boas práticas?
+solicitei contexto essencial (se faltou)?
+declarei incerteza e nível de confiança (se relevante)?
+respeitei LGPD e evitei dados sensíveis?
+escolhi o modo (Rápido/Padrão/Crítico) correto?
+formatei bem em Markdown?
 17. CONSIDERAÇÕES FINAIS
-Objetivo final do Publ.IA:
-•	Ser um instrumento efetivo de democratização do conhecimento técnico sobre gestão pública municipal, contribuindo para:
+Objetivo final do Publ.IA: 
+
+17.1. Produzir respostas técnicas, educativas, bem estruturadas e visualmente organizadas em Markdown, para que gestores e servidores públicos municipais entendam claramente:
+•	O que podem ou devem fazer,
+•	Como fazer,
+•	Com qual base legal,
+•	 Quais são os riscos 
+•	As boas práticas envolvidos.
+17.2. Ser um instrumento efetivo de democratização do conhecimento técnico sobre gestão pública municipal, contribuindo para:
 •	Legalidade e conformidade
 •	Transparência e accountability
 •	Eficiência no uso dos recursos públicos
@@ -731,138 +717,130 @@ Estes modelos servem como catálogo de tipos. Ao gerar um template, o Publ.IA de
 - Uso: Cronograma consolidado de licitações do exercício.
 - Quando usar: Planejamento temporal das contratações.
 - Estrutura: Lista de processos, modalidades, valores estimados, prazos.
-    `.trim();
+        `.trim();
 
-    // 4) Monta o texto de contexto (histórico + pergunta atual)
-    let combinedText = message.trim();
+        // 4) Monta o texto de contexto (histórico + pergunta atual)
+        let combinedText = message.trim();
 
-    if (historyRows.length > 0) {
-      const historyText = historyRows
-        .map((m) => {
-          const prefix = m.role === "user" ? "Usuário" : "Publ.IA";
-          return `${prefix}: ${m.content}`;
-        })
-        .join("\n\n");
+        if (historyRows.length > 0) {
+          const historyText = historyRows
+            .map((m) => {
+              const prefix = m.role === "user" ? "Usuário" : "Publ.IA";
+              return `${prefix}: ${m.content}`;
+            })
+            .join("\n\n");
 
-      combinedText =
-        "Histórico recente da conversa (não repita literalmente, use apenas como contexto):\n\n" +
-        historyText +
-        "\n\nNova pergunta do usuário:\n" +
-        message.trim();
-    }
+          combinedText =
+            "Histórico recente da conversa (não repita literalmente, use apenas como contexto):\n\n" +
+            historyText +
+            "\n\nNova pergunta do usuário:\n" +
+            message.trim();
+        }
 
-    // Limitar tamanho do texto de contexto para evitar estouro de tokens
-    const MAX_CHARS = 12000; // ~3k tokens
-    if (combinedText.length > MAX_CHARS) {
-      combinedText = combinedText.slice(-MAX_CHARS);
-    }
+        // Limitar tamanho do texto de contexto para evitar estouro de tokens
+        const MAX_CHARS = 12000;
+        if (combinedText.length > MAX_CHARS) {
+          combinedText = combinedText.slice(-MAX_CHARS);
+        }
 
-    // 5) Monta o input para a Responses API
-    const userContent: any[] = [
-      {
-        type: "input_text",
-        text: combinedText,
-      },
-    ];
+        // 5) Monta o input para a Responses API (MANTIDO)
+        const userContent: any[] = [
+          {
+            type: "input_text",
+            text: combinedText,
+          },
+        ];
 
-    if (openaiFileId) {
-      userContent.push({
-        type: "input_file",
-        file_id: openaiFileId,
-      });
-    }
+        if (openaiFileId) {
+          userContent.push({
+            type: "input_file",
+            file_id: openaiFileId,
+          });
+        }
 
-    const input = [
-      {
-        role: "user",
-        content: userContent,
-      },
-    ];
+        const input = [
+          {
+            role: "user",
+            content: userContent,
+          },
+        ];
 
-    // ----------------------------------------------------
-    // ESCOLHA DO MODELO (agora configurável por .env)
-    // ----------------------------------------------------
-    const modelWithPdf =
-      process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
-    const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
+        // ----------------------------------------------------
+        // ESCOLHA DO MODELO (MANTIDO)
+        // ----------------------------------------------------
+        const modelWithPdf = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
+        const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
+        const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
-    const model = openaiFileId ? modelWithPdf : modelNoPdf;
+        // 6) STREAM da OpenAI
+        const responseStream = await openai.responses.create({
+          model,
+          instructions: systemInstructions,
+          tools: [{ type: "web_search" }],
+          input,
+          stream: true,
+        } as any);
 
-    const response = await openai.responses.create({
-      model,
-      instructions: systemInstructions,
-      tools: [{ type: "web_search" }],
-      input,
-    } as any);
+        let assistantText = "";
 
-    // 6) Extrair texto da resposta
-    let assistantText: string | null = null;
-
-    // Se a API já devolver output_text pronto
-    if (
-      (response as any).output_text &&
-      typeof (response as any).output_text === "string"
-    ) {
-      assistantText = (response as any).output_text;
-    } else if (Array.isArray((response as any).output)) {
-      const chunks: string[] = [];
-      for (const item of (response as any).output) {
-        if (item.type === "message" && Array.isArray(item.content)) {
-          for (const c of item.content) {
-            if (c.type === "output_text" && typeof c.text === "string") {
-              chunks.push(c.text);
+        // Envia chunks pro front
+        for await (const event of responseStream as any) {
+          if (event?.type === "response.output_text.delta") {
+            const delta = event.delta as string;
+            if (delta) {
+              assistantText += delta;
+              send("delta", { text: delta });
             }
           }
         }
+
+        if (!assistantText.trim()) {
+          send("error", { error: "Não foi possível obter uma resposta da IA." });
+          controller.close();
+          return;
+        }
+
+        // Formatação extra mínima
+        assistantText = formatAssistantText(assistantText);
+
+        // 7) Salva mensagem da IA
+        const { data: assistantMessageRow, error: insertAssistantError } = await client
+          .from("messages")
+          .insert({
+            conversation_id: conversationId,
+            role: "assistant",
+            content: assistantText,
+          } as any)
+          .select("*")
+          .single();
+
+        if (insertAssistantError || !assistantMessageRow) {
+          console.error("Erro ao salvar mensagem da IA:", insertAssistantError?.message);
+          send("error", { error: "Não foi possível salvar a resposta da IA." });
+          controller.close();
+          return;
+        }
+
+        // 8) Evento final
+        send("done", { assistantMessage: assistantMessageRow });
+        controller.close();
+      } catch (err) {
+        console.error("Erro inesperado em /api/chat:", err);
+        controller.enqueue(
+          encoder.encode(
+            sseEvent("error", { error: "Erro inesperado ao processar a requisição." })
+          )
+        );
+        controller.close();
       }
-      assistantText =
-        chunks.join("\n\n") || "Não foi possível gerar uma resposta.";
-    }
+    },
+  });
 
-    if (!assistantText) {
-      console.error("Resposta inesperada da API de Responses:", response);
-      return NextResponse.json(
-        { error: "Não foi possível obter uma resposta da IA." },
-        { status: 500 }
-      );
-    }
-
-    // Formatação extra mínima
-    assistantText = formatAssistantText(assistantText);
-
-    // 7) Salva mensagem da IA
-    const { data: assistantMessageRow, error: insertAssistantError } =
-      await client
-        .from("messages")
-        .insert({
-          conversation_id: conversationId,
-          role: "assistant",
-          content: assistantText,
-        } as any)
-        .select("*")
-        .single(); // <-- removido <MessageRow>
-
-    if (insertAssistantError || !assistantMessageRow) {
-      console.error(
-        "Erro ao salvar mensagem da IA:",
-        insertAssistantError?.message
-      );
-      return NextResponse.json(
-        { error: "Não foi possível salvar a resposta da IA." },
-        { status: 500 }
-      );
-    }
-
-    // 8) Devolve no formato esperado pelo front
-    return NextResponse.json({
-      userMessage: userMessageRow,
-      assistantMessage: assistantMessageRow,
-    });
-  } catch (err) {
-    console.error("Erro inesperado em /api/chat:", err);
-    return NextResponse.json(
-      { error: "Erro inesperado ao processar a requisição." },
-      { status: 500 }
-    );
-  }
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }
