@@ -13,11 +13,7 @@ import Image from "next/image"; // 👈 ADICIONADO
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
 import { ChatInput } from "./components/ChatInput";
-import {
-  ChatMessage,
-  ChatMessagesList,
-} from "./components/ChatMessagesList";
-
+import { ChatMessage, ChatMessagesList } from "./components/ChatMessagesList";
 // ------------------------------------------------------
 // Tipos de props
 // ------------------------------------------------------
@@ -938,7 +934,7 @@ Organize a resposta em tópicos, com explicações objetivas.
               />
             </a>
             <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA 1.4</div>
+              <div className="text-sm font-semibold leading-none">Publ.IA 1.5</div>
               <div className="text-[11px] text-slate-500 leading-none">
                 Nexus Pública
               </div>

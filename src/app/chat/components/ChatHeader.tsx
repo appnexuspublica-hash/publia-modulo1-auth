@@ -25,7 +25,7 @@ export function ChatHeader({ userLabel }: ChatHeaderProps) {
 
         {/* Texto ao lado da logo */}
         <div className="flex flex-col leading-tight">
-          <span className="text-sm font-semibold text-slate-900">Publ.IA 1.1</span>
+          <span className="text-sm font-semibold text-slate-900">Publ.IA 1.5</span>
           <span className="text-xs text-slate-500">Nexus Pública</span>
         </div>
       </div>

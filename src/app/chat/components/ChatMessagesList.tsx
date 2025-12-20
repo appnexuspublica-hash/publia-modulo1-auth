@@ -1,7 +1,6 @@
-// src/app/chat/components/ChatMessagesList.tsx
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -32,6 +31,257 @@ function getDateLabel(created_at?: string): string | null {
   return dateFormatter.format(d);
 }
 
+// ----------------------------------------------------
+// Helpers: CSV / Downloads
+// ----------------------------------------------------
+function downloadTextFile(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+function toCsvFromMatrix(data: string[][], delimiter = ";") {
+  const esc = (v: string) => {
+    const s = (v ?? "").toString();
+    if (s.includes('"') || s.includes("\n") || s.includes(delimiter)) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+  return data.map((row) => row.map(esc).join(delimiter)).join("\n");
+}
+
+// Parser simples de CSV com aspas (para manter fidelidade do bloco ```csv```)
+// Suporta delimitador ; ou , (auto)
+function parseCsv(csvTextRaw: string): { delimiter: string; rows: string[][] } {
+  const csvText = csvTextRaw.replace(/\r\n/g, "\n").trim();
+  const delimiter = csvText.includes(";") ? ";" : ",";
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < csvText.length; i++) {
+    const ch = csvText[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = csvText[i + 1];
+        if (next === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+
+    if (ch === delimiter) {
+      row.push(field);
+      field = "";
+      continue;
+    }
+
+    if (ch === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+      continue;
+    }
+
+    field += ch;
+  }
+
+  row.push(field);
+  rows.push(row);
+
+  const cleaned = rows.filter((r) => r.some((c) => (c ?? "").trim() !== ""));
+  return { delimiter, rows: cleaned };
+}
+
+function sanitizeFilenameBase(name: string) {
+  return (name || "planilha")
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+// ✅ Excel agora é gerado no BACKEND (Node) e baixado como blob
+async function downloadXlsxFromRows(rows: string[][], filename: string) {
+  const res = await fetch("/api/export-xlsx", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename, rows }),
+  });
+
+  if (!res.ok) {
+    const msg = await res.text();
+    throw new Error(msg || "Falha ao gerar Excel.");
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.toLowerCase().endsWith(".xlsx")
+    ? filename
+    : `${filename}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+function tableElementToMatrix(tableEl: HTMLTableElement): string[][] {
+  const trs = Array.from(tableEl.querySelectorAll("tr"));
+  return trs.map((tr) =>
+    Array.from(tr.querySelectorAll("th,td")).map((cell) =>
+      (cell.textContent ?? "").trim()
+    )
+  );
+}
+
+// ----------------------------------------------------
+// UI: Downloads abaixo de CADA tabela
+// ----------------------------------------------------
+function TableWithDownloads({
+  index,
+  children,
+  tableProps,
+}: {
+  index: number;
+  children: React.ReactNode;
+  tableProps: React.TableHTMLAttributes<HTMLTableElement>;
+}) {
+  const tableRef = useRef<HTMLTableElement | null>(null);
+
+  return (
+    <div className="my-3 w-full rounded-xl border border-white/10">
+      <div className="w-full overflow-x-auto">
+        <table
+          {...tableProps}
+          ref={tableRef}
+          className="w-full border-collapse text-[13px]"
+        >
+          {children}
+        </table>
+      </div>
+
+      {/* ✅ Sem “Tabela X:” — só botões e alinhado à esquerda */}
+      <div className="flex flex-wrap items-center justify-start gap-2 px-3 py-2 text-[11px] text-slate-100/90">
+              <button
+          type="button"
+          onClick={() => {
+            const el = tableRef.current;
+            if (!el) return;
+            const matrix = tableElementToMatrix(el);
+            const csv = toCsvFromMatrix(matrix, ";");
+            downloadTextFile(
+              `tabela-${index}.csv`,
+              csv,
+              "text/csv;charset=utf-8"
+            );
+          }}
+          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+        >
+          Baixar CSV
+        </button>
+
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              const el = tableRef.current;
+              if (!el) return;
+              const matrix = tableElementToMatrix(el);
+              await downloadXlsxFromRows(matrix, `tabela-${index}.xlsx`);
+            } catch (e: any) {
+              alert(e?.message || "Erro ao gerar Excel.");
+            }
+          }}
+          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+        >
+          Baixar Excel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------
+// UI: Downloads abaixo de CADA bloco ```csv``` (100% fiel)
+// ----------------------------------------------------
+function CsvBlockWithDownloads({
+  index,
+  csvText,
+}: {
+  index: number;
+  csvText: string;
+}) {
+  const { rows } = useMemo(() => parseCsv(csvText), [csvText]);
+  const baseName = sanitizeFilenameBase(`planilha-${index}`);
+
+  return (
+    <div className="my-3 w-full rounded-xl border border-white/10">
+      <pre className="overflow-x-auto rounded-xl bg-black/20 p-3 text-[12px] leading-relaxed">
+        <code>{csvText}</code>
+      </pre>
+
+      {/* ✅ Sem “CSV X:” — só botões e alinhado à esquerda */}
+     <div className="flex flex-wrap items-center justify-start gap-2 px-3 py-2 text-[11px] text-slate-100/90">
+        <button
+          type="button"
+          onClick={() =>
+            downloadTextFile(
+              `${baseName}.csv`,
+              csvText.trim(),
+              "text/csv;charset=utf-8"
+            )
+          }
+          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+        >
+          Baixar CSV
+        </button>
+
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              await downloadXlsxFromRows(rows, `${baseName}.xlsx`);
+            } catch (e: any) {
+              alert(e?.message || "Erro ao gerar Excel.");
+            }
+          }}
+          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+        >
+          Baixar Excel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ChatMessagesList({
   messages,
   onCopyAnswer,
@@ -42,7 +292,6 @@ export function ChatMessagesList({
   let lastDateLabel: string | null = null;
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Última mensagem da IA e último texto do usuário (para regenerar)
   const lastAssistant = [...messages]
     .slice()
     .reverse()
@@ -52,14 +301,12 @@ export function ChatMessagesList({
     .reverse()
     .find((m) => m.role === "user");
 
-  // Verificar se houve regeneração da MESMA pergunta
   const userMessages = messages.filter((m) => m.role === "user");
   const lastTwoUsers = userMessages.slice(-2);
   const isRegeneratedForSameQuestion =
     lastTwoUsers.length === 2 &&
     lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
-  // Scroll automático para a última mensagem
   useEffect(() => {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({
@@ -78,20 +325,19 @@ export function ChatMessagesList({
         const dateLabel = getDateLabel(msg.created_at);
         const showDateDivider = !!dateLabel && dateLabel !== lastDateLabel;
 
-        if (showDateDivider) {
-          lastDateLabel = dateLabel!;
-        }
+        if (showDateDivider) lastDateLabel = dateLabel!;
+
+        let tableIndex = 0;
+        let csvIndex = 0;
 
         return (
           <div key={msg.id}>
-            {/* Divisor de data simples, alinhado à esquerda */}
             {showDateDivider && (
               <div className="my-4 text-[11px] font-semibold text-slate-300">
                 {dateLabel}
               </div>
             )}
 
-            {/* Balão do usuário */}
             {isUser ? (
               <div className="flex justify-start">
                 <div className="inline-block max-w-[80%] rounded-2xl bg-[#f5f5f5] px-4 py-2 shadow-sm">
@@ -101,10 +347,8 @@ export function ChatMessagesList({
                 </div>
               </div>
             ) : (
-              // Balão da IA
               <div className="flex flex-col items-start">
                 <div className="w-full rounded-3xl border border-slate-600/40 bg-[#224761] px-6 py-4 shadow-md">
-                  {/* Rótulo de resposta regenerada (só na última resposta da IA e quando há mesma pergunta repetida) */}
                   {onRegenerateLast &&
                     lastAssistant &&
                     msg.id === lastAssistant.id &&
@@ -118,13 +362,73 @@ export function ChatMessagesList({
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
-                        // 🔗 links em nova aba no chat principal (lista)
                         a: ({ node, ...props }) => (
                           <a
                             {...props}
                             target="_blank"
                             rel="noreferrer noopener"
                             className="underline underline-offset-2 hover:opacity-80"
+                          />
+                        ),
+
+                        // ✅ Tabela: quebra linha nas células + downloads embaixo
+                        table: ({ node, ...props }) => {
+                          tableIndex += 1;
+                          return (
+                            <TableWithDownloads
+                              index={tableIndex}
+                              tableProps={props}
+                            >
+                              {props.children}
+                            </TableWithDownloads>
+                          );
+                        },
+                        thead: ({ node, ...props }) => (
+                          <thead {...props} className="bg-white/5" />
+                        ),
+                        th: ({ node, ...props }) => (
+                          <th
+                            {...props}
+                            className="whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold"
+                          />
+                        ),
+                        td: ({ node, ...props }) => (
+                          <td
+                            {...props}
+                            className="whitespace-normal break-words border border-white/10 px-3 py-2 align-top"
+                          />
+                        ),
+
+                        // ✅ Bloco ```csv``` do modelo: downloads 100% fiéis
+                        code: (p: any) => {
+                          const { inline, className, children, ...props } =
+                            p as any;
+
+                          const text = String(children ?? "");
+                          const match = /language-(\w+)/.exec(className ?? "");
+                          const lang = match?.[1]?.toLowerCase();
+
+                          if (!inline && lang === "csv") {
+                            csvIndex += 1;
+                            return (
+                              <CsvBlockWithDownloads
+                                index={csvIndex}
+                                csvText={text}
+                              />
+                            );
+                          }
+
+                          return (
+                            <code {...props} className="text-[12px]">
+                              {children}
+                            </code>
+                          );
+                        },
+
+                        pre: ({ node, ...props }) => (
+                          <pre
+                            {...props}
+                            className="my-3 overflow-x-auto rounded-xl bg-black/20 p-3"
                           />
                         ),
                       }}
@@ -134,10 +438,8 @@ export function ChatMessagesList({
                   </div>
                 </div>
 
-                {/* Botões abaixo da resposta da IA, se existirem handlers */}
                 {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
                   <div className="mt-2 flex flex-col gap-2 text-xs">
-                    {/* ✅ Indicador agora fica acima dos botões e só na última resposta da IA */}
                     {isLastAssistant && isSending && (
                       <div className="flex items-center gap-2 text-xs text-slate-100">
                         <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
@@ -156,7 +458,6 @@ export function ChatMessagesList({
                         </button>
                       )}
 
-                      {/* Regenerar só aparece na ÚLTIMA resposta da IA e se tivermos a última pergunta do usuário */}
                       {onRegenerateLast &&
                         lastAssistant &&
                         lastUser &&
@@ -188,7 +489,6 @@ export function ChatMessagesList({
         );
       })}
 
-      {/* Âncora para scroll automático */}
       <div ref={bottomRef} />
     </div>
   );
