@@ -257,14 +257,16 @@ function TableWithDownloads({
   return (
     <TableLayoutContext.Provider value={{ isWide }}>
       <div className="my-3 w-full rounded-xl border border-white/10">
-        <div className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}>
+        <div
+          className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}
+        >
           <table
             {...tableProps}
             ref={tableRef}
             className={
               isWide
                 ? "min-w-max w-full border-collapse text-[13px]"
-                : "w-full table-fixed border-collapse text-[13px]"
+                : "w-full table-auto border-collapse text-[13px]" // ✅ era table-fixed
             }
           >
             {children}
@@ -280,7 +282,11 @@ function TableWithDownloads({
               if (!el) return;
               const matrix = tableElementToMatrix(el);
               const csv = toCsvFromRows(matrix, ";");
-              downloadTextFile(`tabela-${index}.csv`, csv, "text/csv;charset=utf-8");
+              downloadTextFile(
+                `tabela-${index}.csv`,
+                csv,
+                "text/csv;charset=utf-8"
+              );
             }}
             className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
           >
@@ -339,7 +345,7 @@ function CsvPreviewTable({
         className={
           isWide
             ? "min-w-max w-full border-collapse text-[13px]"
-            : "w-full table-fixed border-collapse text-[13px]"
+            : "w-full table-auto border-collapse text-[13px]" // ✅ era table-fixed
         }
       >
         <thead className="bg-white/5">
@@ -389,7 +395,13 @@ function CsvPreviewTable({
   );
 }
 
-function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: string }) {
+function CsvBlockWithDownloads({
+  index,
+  csvText,
+}: {
+  index: number;
+  csvText: string;
+}) {
   const { delimiter, rows } = useMemo(() => parseCsv(csvText), [csvText]);
 
   if (!rows || rows.length === 0) return null;
@@ -480,7 +492,9 @@ export function ChatMessagesList({
         return (
           <div key={msg.id}>
             {showDateDivider && (
-              <div className="my-4 text-[11px] font-semibold text-slate-300">{dateLabel}</div>
+              <div className="my-4 text-[11px] font-semibold text-slate-300">
+                {dateLabel}
+              </div>
             )}
 
             {isUser ? (
@@ -535,7 +549,9 @@ export function ChatMessagesList({
                           );
                         },
 
-                        thead: ({ node, ...props }) => <thead {...props} className="bg-white/5" />,
+                        thead: ({ node, ...props }) => (
+                          <thead {...props} className="bg-white/5" />
+                        ),
 
                         th: ({ node, ...props }) => {
                           const { isWide } = useTableLayout();
