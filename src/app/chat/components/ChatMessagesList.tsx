@@ -256,25 +256,31 @@ function TableWithDownloads({
 
   return (
     <TableLayoutContext.Provider value={{ isWide }}>
-      <div className="my-3 w-full rounded-xl border border-white/10">
-        <div
-          className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}
-        >
-          <table
-            {...tableProps}
-            ref={tableRef}
+      {/* ✅ Sem cantos arredondados no “box” da tabela */}
+      <div className="my-3 w-full">
+        {/* ✅ Tabela em um box com borda RETA */}
+        <div className="w-full border border-white/10">
+          <div
             className={
-              isWide
-                ? "min-w-max w-full border-collapse text-[13px]"
-                : "w-full table-auto border-collapse text-[13px]" // ✅ era table-fixed
+              isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"
             }
           >
-            {children}
-          </table>
+            <table
+              {...tableProps}
+              ref={tableRef}
+              className={
+                isWide
+                  ? "min-w-max w-full border-collapse text-[13px]"
+                  : "w-full table-auto border-collapse text-[13px]"
+              }
+            >
+              {children}
+            </table>
+          </div>
         </div>
 
-        {/* ✅ Barra solta: só botões */}
-        <div className="flex flex-wrap items-center justify-start gap-2 px-3 py-2 text-[11px] text-slate-100/90">
+        {/* ✅ Botões FORA do box da tabela, alinhados à esquerda */}
+        <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
           <button
             type="button"
             onClick={() => {
@@ -345,7 +351,7 @@ function CsvPreviewTable({
         className={
           isWide
             ? "min-w-max w-full border-collapse text-[13px]"
-            : "w-full table-auto border-collapse text-[13px]" // ✅ era table-fixed
+            : "w-full table-auto border-collapse text-[13px]"
         }
       >
         <thead className="bg-white/5">
@@ -410,12 +416,16 @@ function CsvBlockWithDownloads({
   const csvForDownload = (csvText || "").trim();
 
   return (
-    <div className="my-3 w-full rounded-xl border border-white/10">
-      <div className="px-3 pt-3">
-        <CsvPreviewTable rows={rows} />
+    <div className="my-3 w-full">
+      {/* ✅ Preview com box reto */}
+      <div className="w-full border border-white/10">
+        <div className="px-3 py-3">
+          <CsvPreviewTable rows={rows} />
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-start gap-2 px-3 pb-3 pt-2 text-[11px] text-slate-100/90">
+      {/* ✅ Botões fora do box */}
+      <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
         <button
           type="button"
           onClick={() =>
@@ -499,15 +509,15 @@ export function ChatMessagesList({
 
             {isUser ? (
               <div className="flex justify-start">
-                <div className="inline-block max-w-[80%] rounded-2xl bg-[#f5f5f5] px-4 py-2 shadow-sm">
-                  <p className="whitespace-pre-line text-[14px] leading-relaxed text-slate-900">
+                <div className="inline-block max-w-[80%] rounded-xl bg-[#1c4561] px-5 py-2">
+                  <p className="whitespace-pre-line text-[14px] leading-relaxed text-white">
                     {msg.content}
                   </p>
                 </div>
               </div>
             ) : (
               <div className="flex flex-col items-start">
-                <div className="w-full rounded-3xl border border-slate-600/40 bg-[#224761] px-6 py-4 shadow-md">
+                <div className="w-full rounded-3xl bg-[#2b4e67] px-6 py-4">
                   {onRegenerateLast &&
                     lastAssistant &&
                     msg.id === lastAssistant.id &&
@@ -645,7 +655,7 @@ export function ChatMessagesList({
                 </div>
 
                 {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
-                  <div className="mt-2 flex flex-col gap-2 text-xs">
+                  <div className="mt-2 flex w-full flex-col gap-2 text-xs">
                     {isLastAssistant && isSending && (
                       <div className="flex items-center gap-2 text-xs text-slate-100">
                         <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
@@ -653,7 +663,7 @@ export function ChatMessagesList({
                       </div>
                     )}
 
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-center gap-2">
                       {onCopyAnswer && (
                         <button
                           type="button"
