@@ -5,18 +5,14 @@ import Link from "next/link";
 import { useFormState } from "react-dom";
 import { useRouter } from "next/navigation";
 
-import AuthShell from "../../../components/auth/AuthShell";
-import AuthInput from "../../../components/auth/AuthInput";
-import SubmitButton from "../../../components/auth/SubmitButton";
-import Alert from "../../../components/auth/Alert";
-import AuthPasswordInput from "../../../components/auth/AuthPasswordInput";
+import AuthShell from "@/components/auth/AuthShell";
+import AuthInput from "@/components/auth/AuthInput";
+import SubmitButton from "@/components/auth/SubmitButton";
+import Alert from "@/components/auth/Alert";
+import AuthPasswordInput from "@/components/auth/AuthPasswordInput";
 import { login, type LoginState } from "./loginActions";
 
 const initialState: LoginState = { ok: false };
-
-// 🔑 Token fixo para cadastro (convite Publ.IA)
-const SIGNUP_TOKEN =
-  "publia_nexus_2025_token_A1B2C3PATRIRACH8208";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -25,11 +21,33 @@ export default function LoginPage() {
     initialState
   );
 
+  const [creating, setCreating] = React.useState(false);
+
   React.useEffect(() => {
     if (state?.ok && state?.redirect) {
       router.push(state.redirect);
     }
   }, [state, router]);
+
+  async function handleCreateAccount() {
+    try {
+      setCreating(true);
+
+      const r = await fetch("/api/signup-token", { method: "POST" });
+      const j = await r.json();
+
+      if (!j?.ok || !j?.token) {
+        alert("Falha ao abrir cadastro. Tente novamente.");
+        return;
+      }
+
+      router.push(`/criar-conta?tk=${encodeURIComponent(j.token)}`);
+    } catch (e) {
+      alert("Falha ao abrir cadastro. Tente novamente.");
+    } finally {
+      setCreating(false);
+    }
+  }
 
   return (
     <AuthShell
@@ -76,12 +94,14 @@ export default function LoginPage() {
       {/* BLOCO: ainda não é cadastrado? */}
       <div className="mt-4 text-center text-sm text-slate-700">
         Ainda não é cadastrado?{" "}
-        <Link
-          href={`/criar-conta?tk=${encodeURIComponent(SIGNUP_TOKEN)}`}
-          className="font-semibold text-blue-600 hover:text-blue-700 underline"
+        <button
+          type="button"
+          onClick={handleCreateAccount}
+          disabled={creating}
+          className="font-semibold text-blue-600 hover:text-blue-700 underline disabled:opacity-60"
         >
-          Criar conta agora
-        </Link>
+          {creating ? "Abrindo cadastro..." : "Criar conta agora"}
+        </button>
       </div>
     </AuthShell>
   );

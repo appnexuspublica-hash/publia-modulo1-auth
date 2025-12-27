@@ -1,8 +1,8 @@
-﻿"use server";
+"use server";
 
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
-import { isValidCpfCnpj, onlyDigits } from "../../../lib/validators";
+import { isValidCpfCnpj, onlyDigits } from "@/lib/validators";
 
 export type SignUpState = {
   ok: boolean;
@@ -48,80 +48,123 @@ export async function criarConta(
   prevState: SignUpState,
   formData: FormData
 ): Promise<SignUpState> {
+  const supa = admin();
+
+  // rollback best-effort do token temporário
+  async function unconsumeSignupToken(token: string, usedAtIso: string) {
+    try {
+      await supa
+        .from("signup_tokens")
+        .update({ used_at: null })
+        .eq("token", token)
+        .eq("used_at", usedAtIso);
+    } catch {
+      // best-effort
+    }
+  }
+
   try {
     const raw = Object.fromEntries(formData.entries());
     const { nome, cpf_cnpj, email, telefone, cidade_uf, senha, tk } =
       schema.parse(raw);
 
-    const tokenEnv = process.env.SIGNUP_TOKEN;
-    const tokenOk = !!tokenEnv && tk === tokenEnv;
+    const emailNorm = email.trim().toLowerCase();
+    const token = (tk ?? "").trim();
 
-    if (!tokenOk) {
-      return { ok: false, error: "Cadastro bloqueado. Token inválido." };
+    // Agora o cadastro é "aberto", porém exige tk temporário
+    if (!token) {
+      return {
+        ok: false,
+        error: "Link de cadastro inválido. Volte e clique em “Criar conta” novamente.",
+      };
     }
 
-    const supa = admin();
-
-    // 1) Verifica se já existe perfil com o mesmo CPF/CNPJ
-    const { data: existing, error: existsErr } = await supa
+    // 1) Duplicidade no profiles (não gasta token à toa)
+    const { data: existingCpf, error: existsCpfErr } = await supa
       .from("profiles")
       .select("user_id")
       .eq("cpf_cnpj", cpf_cnpj)
       .maybeSingle();
 
-    if (existsErr) {
-      console.error("[signup] erro ao verificar CPF/CNPJ", existsErr);
+    if (existsCpfErr) {
+      console.error("[signup] erro ao verificar CPF/CNPJ", existsCpfErr);
       return {
         ok: false,
         error: "Falha ao verificar CPF/CNPJ. Tente novamente.",
       };
     }
+    if (existingCpf) {
+      return { ok: false, error: "Já existe um cadastro com este CPF/CNPJ." };
+    }
 
-    if (existing) {
+    const { data: existingEmail, error: existsEmailErr } = await supa
+      .from("profiles")
+      .select("user_id")
+      .eq("email", emailNorm)
+      .maybeSingle();
+
+    if (existsEmailErr) {
+      console.error("[signup] erro ao verificar e-mail", existsEmailErr);
+      return { ok: false, error: "Falha ao verificar e-mail. Tente novamente." };
+    }
+    if (existingEmail) {
+      return { ok: false, error: "Já existe um cadastro com este e-mail." };
+    }
+
+    // 2) Consome token temporário (uso único + expiração)
+    //    - se não existir, já tiver sido usado, ou estiver expirado -> bloqueia
+    const usedAtIso = new Date().toISOString();
+
+    const { data: tokenRow, error: tokenErr } = await supa
+      .from("signup_tokens")
+      .update({ used_at: usedAtIso })
+      .eq("token", token)
+      .is("used_at", null)
+      .gt("expires_at", usedAtIso)
+      .select("id")
+      .maybeSingle();
+
+    if (tokenErr || !tokenRow) {
       return {
         ok: false,
-        error: "Já existe um cadastro com este CPF/CNPJ.",
+        error:
+          "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
       };
     }
 
-    // 2) Cria usuário de autenticação
+    // 3) Cria usuário Auth
     const { data: created, error: authErr } = await supa.auth.admin.createUser({
-      email,
+      email: emailNorm,
       password: senha,
       email_confirm: true,
     });
 
     if (authErr || !created?.user) {
       console.error("[signup] erro ao criar user", authErr);
-      return {
-        ok: false,
-        error: "Não foi possível criar o usuário. Tente novamente.",
-      };
+      await unconsumeSignupToken(token, usedAtIso);
+      return { ok: false, error: "Não foi possível criar o usuário. Tente novamente." };
     }
 
     const userId = created.user.id;
 
-    // 3) Cria registro em profiles
+    // 4) Cria profile
     const { error: profileErr } = await supa.from("profiles").insert({
       user_id: userId,
       nome,
       cpf_cnpj,
-      email,
+      email: emailNorm,
       telefone,
       cidade_uf,
     });
 
     if (profileErr) {
       console.error("[signup] erro ao criar profile", profileErr);
-      // rollback simples: remove o user criado
       await supa.auth.admin.deleteUser(userId).catch(() => {});
-      return {
-        ok: false,
-        error: "Falha ao salvar perfil. Tente novamente.",
-      };
+      await unconsumeSignupToken(token, usedAtIso);
+      return { ok: false, error: "Falha ao salvar perfil. Tente novamente." };
     }
 
-    // 4) Sucesso
+    // 5) Sucesso
     return {
       ok: true,
       redirect: process.env.NEXT_PUBLIC_AFTER_SIGNUP_LOGIN || "/login",
@@ -131,11 +174,7 @@ export async function criarConta(
     const zIssue = e?.issues?.[0]?.message;
     return {
       ok: false,
-      error:
-        zIssue ||
-        e?.message ||
-        "Não foi possível concluir o cadastro agora.",
+      error: zIssue || e?.message || "Não foi possível concluir o cadastro agora.",
     };
   }
 }
-

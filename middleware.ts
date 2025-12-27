@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
-  // remove cookies do Supabase (varia por projeto, mas quase sempre começa com "sb-")
   for (const c of req.cookies.getAll()) {
     if (c.name.startsWith("sb-")) {
       res.cookies.set({
@@ -20,29 +19,23 @@ export async function middleware(req: NextRequest) {
   const url = req.nextUrl;
   const res = NextResponse.next();
 
-  // ----------------------------------------------------
-  // 1) Mantém sua regra de bloqueio do /criar-conta
-  // ----------------------------------------------------
-  if (url.pathname === "/criar-conta") {
-    const expected = (process.env.SIGNUP_TOKEN || "").trim();
-    if (expected) {
+  // 1) Bloqueio do /criar-conta (modo convites)
+  if (url.pathname.startsWith("/criar-conta")) {
+    const enabled = (process.env.INVITES_ENABLED ?? "1").trim() !== "0";
+    if (enabled) {
       const tk = (url.searchParams.get("tk") || "").trim();
-      const isValid = tk === expected;
 
-      if (!isValid) {
+      if (!tk) {
         const redirectTo = (
-          process.env.REDIRECT_BLOCKED_SIGNUP || "https://nexuspublica.com.br/"
+          process.env.REDIRECT_BLOCKED_SIGNUP || "/login"
         ).trim();
 
-        return NextResponse.redirect(redirectTo);
+        return NextResponse.redirect(new URL(redirectTo, req.url));
       }
     }
   }
 
-  // ----------------------------------------------------
   // 2) Supabase SSR: tenta ler usuário e atualizar cookies
-  //    - se não existir refresh token, limpa cookies e segue
-  // ----------------------------------------------------
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
@@ -62,13 +55,11 @@ export async function middleware(req: NextRequest) {
 
   const { error } = await supabase.auth.getUser();
 
-  // ✅ este é o erro que você está vendo no Vercel
   if (error?.code === "refresh_token_not_found") {
     clearSupabaseCookies(req, res);
     return res;
   }
 
-  // (opcional) logar outros erros (sem quebrar)
   if (error) {
     console.error("[middleware] supabase auth error:", error);
   }
@@ -77,6 +68,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // roda em /login, /chat e /criar-conta (sem afetar assets do Next)
-  matcher: ["/login", "/chat/:path*", "/criar-conta"],
+  matcher: ["/login", "/chat/:path*", "/criar-conta/:path*"],
 };

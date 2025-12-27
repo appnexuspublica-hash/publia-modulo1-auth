@@ -4,7 +4,7 @@ import { z } from "zod";
 import { cookies } from "next/headers";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
-import { onlyDigits } from "../../../lib/validators";
+import { onlyDigits } from "@/lib/validators";
 
 export type LoginState = {
   ok: boolean;

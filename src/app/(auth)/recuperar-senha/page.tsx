@@ -1,12 +1,12 @@
-ï»¿"use client";
+"use client";
 
 import * as React from "react";
 import { useFormState } from "react-dom";
-import AuthShell from "../../../components/auth/AuthShell";
-import AuthInput from "../../../components/auth/AuthInput";
-import SubmitButton from "../../../components/auth/SubmitButton";
-import Alert from "../../../components/auth/Alert";
-import AuthPasswordInput from "../../../components/auth/AuthPasswordInput";
+import AuthShell from "@/components/auth/AuthShell";
+import AuthInput from "@/components/auth/AuthInput";
+import SubmitButton from "@/components/auth/SubmitButton";
+import Alert from "@/components/auth/Alert";
+import AuthPasswordInput from "@/components/auth/AuthPasswordInput";
 import { resetAction } from "./resetActions";
 
 type State = { ok?: boolean; error?: string; message?: string };
@@ -32,8 +32,8 @@ export default function RecuperarSenhaPage() {
 
         <AuthPasswordInput
           name="senha"
-          label="Nova senha (mÃ­nimo 8)"
-          placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+          label="Nova senha (mínimo 8)"
+          placeholder="••••••••"
           required
           minLength={8}
         />
@@ -41,7 +41,7 @@ export default function RecuperarSenhaPage() {
         <AuthPasswordInput
           name="confirm"
           label="Confirmar nova senha"
-          placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+          placeholder="••••••••"
           required
           minLength={8}
         />

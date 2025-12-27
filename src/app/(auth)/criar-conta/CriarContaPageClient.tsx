@@ -6,11 +6,11 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useFormState } from "react-dom";
 
-import AuthShell from "../../../components/auth/AuthShell";
-import AuthInput from "../../../components/auth/AuthInput";
-import SubmitButton from "../../../components/auth/SubmitButton";
-import Alert from "../../../components/auth/Alert";
-import AuthPasswordInput from "../../../components/auth/AuthPasswordInput";
+import AuthShell from "@/components/auth/AuthShell";
+import AuthInput from "@/components/auth/AuthInput";
+import SubmitButton from "@/components/auth/SubmitButton";
+import Alert from "@/components/auth/Alert";
+import AuthPasswordInput from "@/components/auth/AuthPasswordInput";
 import { criarConta } from "./formActions";
 
 type State = {

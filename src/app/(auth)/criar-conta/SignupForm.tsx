@@ -1,13 +1,13 @@
-Ôªø"use client";
+"use client";
 
 import { useEffect } from "react";
 import { useFormState } from "react-dom";
 import { criarConta, type SignUpState } from "./formActions";
 
-import AuthInput from "../../../components/auth/AuthInput";
-import AuthPasswordInput from "../../../components/auth/AuthPasswordInput";
-import SubmitButton from "../../../components/auth/SubmitButton";
-import Alert from "../../../components/auth/Alert";
+import AuthInput from "@/components/auth/AuthInput";
+import AuthPasswordInput from "@/components/auth/AuthPasswordInput";
+import SubmitButton from "@/components/auth/SubmitButton";
+import Alert from "@/components/auth/Alert";
 
 const initialState: SignUpState = { ok: false };
 
@@ -33,19 +33,19 @@ export default function SignupForm({ token, tokenOk }: Props) {
 
   return (
     <form action={formAction} className="space-y-4">
-      {/* Token vem da URL e √© enviado escondido para a server action */}
+      {/* Token vem da URL e È enviado escondido para a server action */}
       <input type="hidden" name="tk" value={token} />
 
-      {/* Token inv√°lido (verificado no server e no client) */}
+      {/* Token inv·lido (verificado no server e no client) */}
       {!tokenOk && (
         <Alert
           variant="error"
-          title="Cadastro bloqueado. Token inv√°lido."
-          message="Use o link oficial enviado pela Nexus P√∫blica para criar sua conta."
+          title="Cadastro bloqueado. Token inv·lido."
+          message="Use o link oficial enviado pela Nexus P˙blica para criar sua conta."
         />
       )}
 
-      {/* Erro retornado pela server action (quando o token √© v√°lido) */}
+      {/* Erro retornado pela server action (quando o token È v·lido) */}
       {state?.error && tokenOk && (
         <Alert variant="error" title={state.error ?? "Erro ao cadastrar."} />
       )}
@@ -59,10 +59,10 @@ export default function SignupForm({ token, tokenOk }: Props) {
         disabled={blocked}
       />
 
-      {/* Nome / Raz√£o Social */}
+      {/* Nome / Raz„o Social */}
       <AuthInput
         name="nome"
-        label="Nome / Raz√£o Social"
+        label="Nome / Raz„o Social"
         placeholder="Seu nome completo"
         required
         disabled={blocked}
@@ -91,7 +91,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
       <AuthInput
         name="cidade_uf"
         label="Cidade/UF"
-        placeholder="Santana do Itarar√©/PR"
+        placeholder="Santana do ItararÈ/PR"
         required
         disabled={blocked}
       />
@@ -99,7 +99,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
       {/* Senha */}
       <AuthPasswordInput
         name="senha"
-        label="Senha (m√≠nimo 8)"
+        label="Senha (mÌnimo 8)"
         placeholder="Digite uma senha segura"
         required
         disabled={blocked}
