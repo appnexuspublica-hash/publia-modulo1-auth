@@ -1,5 +1,6 @@
 // src/app/api/chat/route.ts
 import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 
@@ -8,6 +9,7 @@ export const runtime = "nodejs";
 // ---- Supabase & OpenAI ----
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const openaiApiKey = process.env.OPENAI_API_KEY;
 
 let supabase: ReturnType<typeof createClient> | null = null;
@@ -19,13 +21,50 @@ if (!supabaseUrl || !serviceRoleKey) {
     hasServiceRoleKey: !!serviceRoleKey,
   });
 } else {
-  supabase = createClient(supabaseUrl, serviceRoleKey);
+  // service role: não persiste sessão
+  supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 }
 
 if (!openaiApiKey) {
   console.error("[/api/chat] OPENAI_API_KEY não está definida.");
 } else {
   openai = new OpenAI({ apiKey: openaiApiKey });
+}
+
+// ---- Auth helpers (cookie -> user) ----
+function parseCookieHeader(cookieHeader: string | null) {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+
+  for (const part of cookieHeader.split(";")) {
+    const p = part.trim();
+    if (!p) continue;
+    const eq = p.indexOf("=");
+    if (eq === -1) continue;
+    const k = p.slice(0, eq).trim();
+    const v = p.slice(eq + 1).trim();
+    out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function createAuthClient(req: Request) {
+  if (!supabaseUrl || !supabaseAnonKey) throw new Error("Supabase anon envs faltando");
+
+  const jar = parseCookieHeader(req.headers.get("cookie"));
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name) {
+        return jar[name];
+      },
+      // nesta rota, só precisamos ler sessão
+      set() {},
+      remove() {},
+    },
+  });
 }
 
 // ---- Tipos auxiliares ----
@@ -46,14 +85,13 @@ type PdfFileRow = {
   created_at: string;
 };
 
-// Busca o PDF mais recente dessa conversa
+// Busca o PDF mais recente dessa conversa (do usuário)
 async function getLatestPdfForConversation(
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<PdfFileRow | null> {
   if (!supabase) {
-    console.error(
-      "[/api/chat] getLatestPdfForConversation chamado sem supabase inicializado."
-    );
+    console.error("[/api/chat] getLatestPdfForConversation chamado sem supabase inicializado.");
     return null;
   }
 
@@ -63,6 +101,7 @@ async function getLatestPdfForConversation(
     .from("pdf_files")
     .select("id, conversation_id, file_name, storage_path, openai_file_id, created_at")
     .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(1);
 
@@ -72,15 +111,17 @@ async function getLatestPdfForConversation(
   }
 
   if (!data || data.length === 0) return null;
+
+  // sanity check contra path suspeito
+  if (!data[0].storage_path || data[0].storage_path.includes("..")) return null;
+
   return data[0] as PdfFileRow;
 }
 
 // Envia o PDF para a OpenAI e devolve o file_id
 async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
   if (!supabase || !openai) {
-    console.error(
-      "[/api/chat] uploadPdfToOpenAI chamado sem supabase/openai inicializados."
-    );
+    console.error("[/api/chat] uploadPdfToOpenAI chamado sem supabase/openai inicializados.");
     return null;
   }
 
@@ -128,9 +169,7 @@ function sseEvent(event: string, data: unknown) {
 export async function POST(req: Request) {
   // Se envs não estiverem configuradas, não quebramos o build.
   if (!supabase || !openai) {
-    console.error(
-      "[/api/chat] supabase ou openai não inicializados. Verifique envs em produção."
-    );
+    console.error("[/api/chat] supabase ou openai não inicializados. Verifique envs em produção.");
     return new Response(
       sseEvent("error", {
         error:
@@ -193,6 +232,65 @@ export async function POST(req: Request) {
     });
   }
 
+  // ✅ Autenticação (cookie do Supabase) + ownership (conversa pertence ao usuário)
+  let userId: string | null = null;
+  try {
+    const auth = createAuthClient(req);
+    const { data, error } = await auth.auth.getUser();
+    if (error || !data?.user) {
+      return new Response(sseEvent("error", { error: "Não autenticado." }), {
+        status: 401,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        },
+      });
+    }
+    userId = data.user.id;
+  } catch (e) {
+    console.error("[/api/chat] erro ao autenticar:", e);
+    return new Response(sseEvent("error", { error: "Não autenticado." }), {
+      status: 401,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  }
+
+  // ✅ Valida que a conversa pertence ao usuário logado
+  const { data: conv, error: convError } = await client
+    .from("conversations")
+    .select("id")
+    .eq("id", conversationId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (convError) {
+    console.error("[/api/chat] erro ao validar conversa:", convError);
+    return new Response(sseEvent("error", { error: "Falha ao validar conversa." }), {
+      status: 500,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  }
+
+  if (!conv) {
+    return new Response(sseEvent("error", { error: "Conversa inválida ou sem permissão." }), {
+      status: 403,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  }
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -235,12 +333,11 @@ export async function POST(req: Request) {
           return;
         }
 
-        // manda meta pro front (opcional, mas útil)
         send("meta", { userMessage: userMessageRow });
 
-        // 2) Tenta pegar o PDF mais recente dessa conversa
+        // 2) Tenta pegar o PDF mais recente dessa conversa (do usuário)
         let openaiFileId: string | null = null;
-        const latestPdf = await getLatestPdfForConversation(conversationId);
+        const latestPdf = await getLatestPdfForConversation(conversationId, userId!);
 
         if (latestPdf) {
           if (latestPdf.openai_file_id) {
@@ -253,7 +350,8 @@ export async function POST(req: Request) {
               const { error: updateError } = await client
                 .from("pdf_files")
                 .update({ openai_file_id: uploadedId } as any)
-                .eq("id", latestPdf.id);
+                .eq("id", latestPdf.id)
+                .eq("user_id", userId!);
 
               if (updateError) {
                 console.error(
@@ -265,6 +363,7 @@ export async function POST(req: Request) {
           }
         }
 
+       
         // 3) Instruções do sistema (Publ.IA) — MANTIDO
         const systemInstructions = `
 System Instructions - Versão Aprimorada
@@ -771,13 +870,12 @@ Estes modelos servem como catálogo de tipos. Ao gerar um template, o Publ.IA de
             message.trim();
         }
 
-        // Limitar tamanho do texto de contexto para evitar estouro de tokens
         const MAX_CHARS = 12000;
         if (combinedText.length > MAX_CHARS) {
           combinedText = combinedText.slice(-MAX_CHARS);
         }
 
-        // 5) Monta o input para a Responses API (MANTIDO)
+        // 5) Monta o input para a Responses API
         const userContent: any[] = [
           {
             type: "input_text",
@@ -800,7 +898,7 @@ Estes modelos servem como catálogo de tipos. Ao gerar um template, o Publ.IA de
         ];
 
         // ----------------------------------------------------
-        // ESCOLHA DO MODELO (MANTIDO)
+        // ESCOLHA DO MODELO
         // ----------------------------------------------------
         const modelWithPdf = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
         const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
@@ -817,7 +915,6 @@ Estes modelos servem como catálogo de tipos. Ao gerar um template, o Publ.IA de
 
         let assistantText = "";
 
-        // Envia chunks pro front
         for await (const event of responseStream as any) {
           if (event?.type === "response.output_text.delta") {
             const delta = event.delta as string;
@@ -834,7 +931,6 @@ Estes modelos servem como catálogo de tipos. Ao gerar um template, o Publ.IA de
           return;
         }
 
-        // Formatação extra mínima
         assistantText = formatAssistantText(assistantText);
 
         // 7) Salva mensagem da IA

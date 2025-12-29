@@ -17,19 +17,30 @@ type State = {
   ok: boolean;
   error?: string;
   redirect?: string;
+  code?: string; // ✅ novo (combina com o formActions)
 };
 
 const initialState: State = { ok: false };
 
 export default function CriarContaPageClient() {
-  const router = useRouter();
   const sp = useSearchParams();
   const tk = sp.get("tk") ?? "";
+
+  // ✅ quando tk mudar, remonta o "form" e reseta state do useFormState
+  return <CriarContaInner key={tk} tk={tk} />;
+}
+
+function CriarContaInner({ tk }: { tk: string }) {
+  const router = useRouter();
+
+  const ts = React.useMemo(() => String(Date.now()), []);
 
   const [state, formAction] = useFormState<State, FormData>(
     criarConta as any,
     initialState
   );
+
+  const [regenLoading, setRegenLoading] = React.useState(false);
 
   // Redireciona automaticamente depois do sucesso (opcional)
   React.useEffect(() => {
@@ -41,6 +52,34 @@ export default function CriarContaPageClient() {
 
   const disabled = !!state?.ok;
 
+  const showRegen =
+    state?.code === "signup_token_missing" || state?.code === "signup_token_invalid";
+
+  async function handleGenerateNewLink() {
+    try {
+      setRegenLoading(true);
+
+      const r = await fetch("/api/signup-token", { method: "POST" });
+      const j = await r.json();
+
+      if (!r.ok) {
+        alert(j?.error || "Falha ao gerar novo link. Tente novamente.");
+        return;
+      }
+
+      if (!j?.ok || !j?.token) {
+        alert("Falha ao gerar novo link. Tente novamente.");
+        return;
+      }
+
+      router.replace(`/criar-conta?tk=${encodeURIComponent(j.token)}`);
+    } catch {
+      alert("Falha ao gerar novo link. Tente novamente.");
+    } finally {
+      setRegenLoading(false);
+    }
+  }
+
   return (
     <AuthShell
       title="Publ.IA - Nexus Pública"
@@ -48,14 +87,50 @@ export default function CriarContaPageClient() {
     >
       {/* Erro geral do cadastro */}
       {state.error && !state.ok && (
-        <Alert type="error">{state.error}</Alert>
+        <div className="space-y-2">
+          <Alert type="error">{state.error}</Alert>
+
+          {showRegen && (
+            <button
+              type="button"
+              onClick={handleGenerateNewLink}
+              disabled={regenLoading}
+              className="w-full rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
+            >
+              {regenLoading ? "Gerando novo link..." : "Gerar novo link de cadastro"}
+            </button>
+          )}
+        </div>
       )}
 
       <form action={formAction} className="mt-2 space-y-4">
         {/* token vindo da URL */}
         <input type="hidden" name="tk" value={tk} />
 
-        {/* ORDEM E TEXTOS EXATOS */}
+        {/* Timestamp anti-bot */}
+        <input type="hidden" name="ts" value={ts} />
+
+        {/* Honeypot */}
+        <div
+          style={{
+            position: "absolute",
+            left: "-5000px",
+            top: "auto",
+            width: "1px",
+            height: "1px",
+            overflow: "hidden",
+          }}
+          aria-hidden="true"
+        >
+          <label htmlFor="company">Company</label>
+          <input
+            id="company"
+            name="company"
+            type="text"
+            tabIndex={-1}
+            autoComplete="off"
+          />
+        </div>
 
         <AuthInput
           name="cpf_cnpj"

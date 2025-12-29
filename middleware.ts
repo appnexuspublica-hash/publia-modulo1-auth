@@ -16,26 +16,9 @@ function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
 }
 
 export async function middleware(req: NextRequest) {
-  const url = req.nextUrl;
   const res = NextResponse.next();
 
-  // 1) Bloqueio do /criar-conta (modo convites)
-  if (url.pathname.startsWith("/criar-conta")) {
-    const enabled = (process.env.INVITES_ENABLED ?? "1").trim() !== "0";
-    if (enabled) {
-      const tk = (url.searchParams.get("tk") || "").trim();
-
-      if (!tk) {
-        const redirectTo = (
-          process.env.REDIRECT_BLOCKED_SIGNUP || "/login"
-        ).trim();
-
-        return NextResponse.redirect(new URL(redirectTo, req.url));
-      }
-    }
-  }
-
-  // 2) Supabase SSR: tenta ler usuário e atualizar cookies
+  // Supabase SSR: tenta ler usuário e atualizar cookies
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
@@ -55,6 +38,7 @@ export async function middleware(req: NextRequest) {
 
   const { error } = await supabase.auth.getUser();
 
+  // evita erro chato no deploy quando refresh token some
   if (error?.code === "refresh_token_not_found") {
     clearSupabaseCookies(req, res);
     return res;
@@ -68,5 +52,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/login", "/chat/:path*", "/criar-conta/:path*"],
+  matcher: ["/login", "/chat/:path*"],
 };
