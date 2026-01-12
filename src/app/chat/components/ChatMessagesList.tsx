@@ -34,7 +34,7 @@ type ChatMessagesListProps = {
 
   variant?: Variant;
 
-  // ✅ NOVO: o container REAL que faz scroll (resolve Vercel)
+  // ✅ container REAL de scroll (passado pelo ChatPageClient)
   scrollContainerRef?: React.RefObject<HTMLElement | null>;
 };
 
@@ -480,7 +480,7 @@ function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: str
 }
 
 // ----------------------------------------------------
-// ✅ Fallback (caso não passem ref)
+// ✅ Fallback (se não passarem ref)
 // ----------------------------------------------------
 function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   if (!el) return null;
@@ -492,9 +492,7 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
     const isCandidate =
       overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
 
-    // ✅ importante: NÃO exigir scrollHeight > clientHeight (no Vercel pode ser igual no início)
     if (isCandidate) return p;
-
     p = p.parentElement;
   }
 
@@ -520,6 +518,10 @@ export function ChatMessagesList({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [unread, setUnread] = useState(0);
 
+  // ✅ refs para evitar “briga” durante streaming
+  const isAtBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+
   const lastAssistant = [...messages].slice().reverse().find((m) => m.role === "assistant");
   const lastUser = [...messages].slice().reverse().find((m) => m.role === "user");
 
@@ -529,10 +531,10 @@ export function ChatMessagesList({
     lastTwoUsers.length === 2 &&
     lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
-  const BOTTOM_THRESHOLD_PX = 140;
+  // ✅ aqui estava o problema: threshold grande + streaming rápido
+  const BOTTOM_THRESHOLD_PX = 120;
 
-  const computeAtBottom = useCallback(() => {
-    const sp = scrollParentRef.current;
+  const computeAtBottom = useCallback((sp: HTMLElement | null) => {
     if (!sp) return true;
     const dist = sp.scrollHeight - sp.scrollTop - sp.clientHeight;
     return dist <= BOTTOM_THRESHOLD_PX;
@@ -540,44 +542,62 @@ export function ChatMessagesList({
 
   // 1) Define o container rolável e monitora scroll do usuário
   useEffect(() => {
-    // ✅ prioridade: ref passado pelo pai (ChatPageClient)
     const forced = scrollContainerRef?.current ?? null;
     const sp = forced ?? getScrollParent(bottomRef.current);
     scrollParentRef.current = sp;
 
     if (!sp) return;
 
-    const onScroll = () => {
-      const atBottomNow = computeAtBottom();
-      setIsAtBottom(atBottomNow);
-      if (atBottomNow) setUnread(0);
-    };
+    // init refs
+    lastScrollTopRef.current = sp.scrollTop;
+    const initialAtBottom = computeAtBottom(sp);
+    isAtBottomRef.current = initialAtBottom;
+    setIsAtBottom(initialAtBottom);
+    if (initialAtBottom) setUnread(0);
 
-    onScroll();
+    const onScroll = () => {
+      const top = sp.scrollTop;
+      const prevTop = lastScrollTopRef.current;
+      lastScrollTopRef.current = top;
+
+      // ✅ se o usuário rolou para CIMA, desliga o stick IMEDIATAMENTE
+      const userScrolledUp = top < prevTop - 2;
+
+      const atBottomNow = userScrolledUp ? false : computeAtBottom(sp);
+
+      isAtBottomRef.current = atBottomNow;
+      setIsAtBottom(atBottomNow);
+
+      if (atBottomNow) {
+        setUnread(0);
+      }
+    };
 
     sp.addEventListener("scroll", onScroll, { passive: true });
     return () => sp.removeEventListener("scroll", onScroll);
   }, [computeAtBottom, scrollContainerRef]);
 
   // 2) Quando chega conteúdo novo:
-  //    - se usuário está no fim -> acompanha
-  //    - se usuário rolou pra cima -> NÃO puxa, só mostra botão
+  //    - se está no fim -> acompanha
+  //    - se usuário rolou para cima -> NÃO puxa
   useEffect(() => {
-    const atBottomNow = computeAtBottom();
-
-    if (!atBottomNow) {
+    if (!isAtBottomRef.current) {
       setIsAtBottom(false);
-      setUnread((u) => u + 1);
+      setUnread((u) => Math.min(u + 1, 99)); // evita explodir no streaming
       return;
     }
 
     bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [messages, isSending, computeAtBottom]);
+  }, [messages, isSending]);
 
   const jumpToBottom = () => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    isAtBottomRef.current = true;
     setUnread(0);
     setIsAtBottom(true);
+
+    const sp = scrollParentRef.current;
+    if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
   return (
@@ -594,6 +614,7 @@ export function ChatMessagesList({
           let tableIndex = 0;
           let csvIndex = 0;
 
+          // bolhas por variante (✅ sem borda)
           const userBubble =
             variant === "share"
               ? "bg-[#0d4161] text-white"
@@ -614,7 +635,6 @@ export function ChatMessagesList({
 
               {isUser ? (
                 <div className="flex justify-start">
-                  {/* ✅ sem borda */}
                   <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
                     <p className="whitespace-pre-line text-[14px] leading-relaxed">
                       {msg.content}
@@ -623,7 +643,6 @@ export function ChatMessagesList({
                 </div>
               ) : (
                 <div className="flex flex-col items-start">
-                  {/* ✅ sem borda */}
                   <div className={"w-full rounded-3xl px-6 py-4 shadow-md " + assistantBubble}>
                     {onRegenerateLast &&
                       lastAssistant &&
@@ -670,12 +689,22 @@ export function ChatMessagesList({
 
                           th: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
+                            return (
+                              <th
+                                {...props}
+                                className={isWide ? theme.thWide : theme.thNormal}
+                              />
+                            );
                           },
 
                           td: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
+                            return (
+                              <td
+                                {...props}
+                                className={isWide ? theme.tdWide : theme.tdNormal}
+                              />
+                            );
                           },
 
                           code: (p: any) => {
