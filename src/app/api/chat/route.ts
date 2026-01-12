@@ -588,15 +588,6 @@ index 1111111..2222222 100644
 +  "Texto com ;";"Texto com ""aspas""";"Texto
 +  com quebra de linha"
 +  ~~~
- 
-   11. PROCEDIMENTOS ADMINISTRATIVOS
-   Sempre que aplicável, para procedimentos administrativos forneça o passo a passo detalhado, como:
-   Listar as etapas na ordem correta
-   Indicar documentos necessários em cada fase
-   Apontar prazos previstos na legislação
-   Sugerir responsáveis/setores típicos
-   Destacar pontos críticos e riscos
-   Vincular cada exigência à base legal correspondente
 11. PROCEDIMENTOS ADMINISTRATIVOS
 Sempre que aplicável, para procedimentos administrativos forneça o passo a passo detalhado, como:
 Listar as etapas na ordem correta
