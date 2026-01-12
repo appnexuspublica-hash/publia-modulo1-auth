@@ -125,6 +125,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
   const abortRef = useRef<AbortController | null>(null);
 
+  // ✅ Ref do container que realmente rola (resolve o problema no Vercel)
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -294,7 +297,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   }
 
   // ----------------------------------------------------
-  // Enviar mensagem para IA (AGORA COM STREAMING SSE)
+  // Enviar mensagem para IA (streaming SSE)
   // ----------------------------------------------------
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
@@ -530,7 +533,6 @@ Organize a resposta em tópicos, com explicações objetivas.
   // ----------------------------------------------------
   async function handleCopyAnswer(messageId: string) {
     try {
-      // 1) Preferência: copia HTML do DOM (preserva tabelas e formatação)
       await copyMessageToClipboard(messageId);
       return;
     } catch (err) {
@@ -538,7 +540,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
 
     try {
-      // 2) Fallback: texto simples (não preserva tabelas, mas não falha)
       const msg = messages.find((m) => m.id === messageId && m.role === "assistant");
       if (!msg) throw new Error("Mensagem não encontrada para copiar.");
 
@@ -691,7 +692,8 @@ Organize a resposta em tópicos, com explicações objetivas.
 
   const renderMain = () => (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto px-8 py-6">
+      {/* ✅ aqui é o container rolável REAL */}
+      <div ref={messagesScrollRef} className="flex-1 overflow-y-auto px-8 py-6">
         {messages.length > 0 ? (
           <ChatMessagesList
             messages={messages}
@@ -700,6 +702,8 @@ Organize a resposta em tópicos, com explicações objetivas.
             onRegenerateLast={handleRegenerateLast}
             isSending={isSending}
             activePdfName={attachedPdf?.fileName ?? null}
+            // ✅ passa o ref do scroll container (corrige Vercel)
+            scrollContainerRef={messagesScrollRef}
           />
         ) : loadingMessages && activeConversationId ? (
           <div className="flex h-full items-center justify-center text-sm text-white">

@@ -32,8 +32,10 @@ type ChatMessagesListProps = {
   isSending: boolean;
   activePdfName?: string | null;
 
-  // ✅ tema visual para reutilizar o mesmo componente no /chat e no /p/[shareId]
   variant?: Variant;
+
+  // ✅ NOVO: o container REAL que faz scroll (resolve Vercel)
+  scrollContainerRef?: React.RefObject<HTMLElement | null>;
 };
 
 const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -47,7 +49,6 @@ function getDateLabel(created_at?: string): string | null {
   return dateFormatter.format(d);
 }
 
-// ✅ Helper: extrair texto real de children (para detectar <pre>/<p> “vazio”)
 function extractText(node: any): string {
   if (node == null) return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -81,7 +82,6 @@ function sanitizeFilenameBase(name: string) {
     .replace(/^_+|_+$/g, "");
 }
 
-// Backend gera o XLSX (Node) e o browser só baixa
 async function downloadXlsxFromRows(rows: string[][], filename: string) {
   const res = await fetch("/api/export-xlsx", {
     method: "POST",
@@ -244,7 +244,6 @@ const THEME_CHAT: MdTheme = {
 };
 
 const THEME_SHARE: MdTheme = {
-  // bordas mais suaves para tabelas no share
   tableOuterBorder: "w-full border border-slate-200/20",
   tableClassWide: "min-w-max w-full border-collapse text-[13px]",
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
@@ -300,7 +299,6 @@ function TableWithDownloads({
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [isWide, setIsWide] = useState(false);
 
-  // ✅ híbrido: até 7 colunas -> quebra linha / 8+ -> scroll
   const COL_THRESHOLD = 8;
 
   useEffect(() => {
@@ -324,11 +322,7 @@ function TableWithDownloads({
     <TableLayoutContext.Provider value={{ isWide }}>
       <div className="my-3 w-full">
         <div className={theme.tableOuterBorder}>
-          <div
-            className={
-              isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"
-            }
-          >
+          <div className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}>
             <table
               {...tableProps}
               ref={tableRef}
@@ -347,11 +341,7 @@ function TableWithDownloads({
               if (!el) return;
               const matrix = tableElementToMatrix(el);
               const csv = toCsvFromRows(matrix, ";");
-              downloadTextFile(
-                `tabela-${index}.csv`,
-                csv,
-                "text/csv;charset=utf-8"
-              );
+              downloadTextFile(`tabela-${index}.csv`, csv, "text/csv;charset=utf-8");
             }}
             className={theme.btn}
           >
@@ -399,9 +389,7 @@ function CsvPreviewTable({
   const body = rows.slice(1);
 
   const clippedHead = head.slice(0, maxCols);
-  const clippedBody = body
-    .slice(0, maxRows)
-    .map((r) => (r ?? []).slice(0, maxCols));
+  const clippedBody = body.slice(0, maxRows).map((r) => (r ?? []).slice(0, maxCols));
 
   const isWide = (head?.length ?? 0) >= 8;
 
@@ -441,13 +429,7 @@ function CsvPreviewTable({
   );
 }
 
-function CsvBlockWithDownloads({
-  index,
-  csvText,
-}: {
-  index: number;
-  csvText: string;
-}) {
+function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: string }) {
   const theme = useMdTheme();
   const { delimiter, rows } = useMemo(() => parseCsv(csvText), [csvText]);
 
@@ -498,7 +480,7 @@ function CsvBlockWithDownloads({
 }
 
 // ----------------------------------------------------
-// ✅ Scroll “modo ChatGPT”
+// ✅ Fallback (caso não passem ref)
 // ----------------------------------------------------
 function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   if (!el) return null;
@@ -507,11 +489,12 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   while (p) {
     const style = window.getComputedStyle(p);
     const overflowY = style.overflowY;
-    const isScrollable =
-      (overflowY === "auto" || overflowY === "scroll") &&
-      p.scrollHeight > p.clientHeight;
+    const isCandidate =
+      overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
 
-    if (isScrollable) return p;
+    // ✅ importante: NÃO exigir scrollHeight > clientHeight (no Vercel pode ser igual no início)
+    if (isCandidate) return p;
+
     p = p.parentElement;
   }
 
@@ -525,6 +508,7 @@ export function ChatMessagesList({
   onRegenerateLast,
   isSending,
   variant = "chat",
+  scrollContainerRef,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -554,8 +538,11 @@ export function ChatMessagesList({
     return dist <= BOTTOM_THRESHOLD_PX;
   }, []);
 
+  // 1) Define o container rolável e monitora scroll do usuário
   useEffect(() => {
-    const sp = getScrollParent(bottomRef.current);
+    // ✅ prioridade: ref passado pelo pai (ChatPageClient)
+    const forced = scrollContainerRef?.current ?? null;
+    const sp = forced ?? getScrollParent(bottomRef.current);
     scrollParentRef.current = sp;
 
     if (!sp) return;
@@ -570,8 +557,11 @@ export function ChatMessagesList({
 
     sp.addEventListener("scroll", onScroll, { passive: true });
     return () => sp.removeEventListener("scroll", onScroll);
-  }, [computeAtBottom]);
+  }, [computeAtBottom, scrollContainerRef]);
 
+  // 2) Quando chega conteúdo novo:
+  //    - se usuário está no fim -> acompanha
+  //    - se usuário rolou pra cima -> NÃO puxa, só mostra botão
   useEffect(() => {
     const atBottomNow = computeAtBottom();
 
@@ -604,7 +594,6 @@ export function ChatMessagesList({
           let tableIndex = 0;
           let csvIndex = 0;
 
-          // ✅ bolhas SEM borda (chat e share)
           const userBubble =
             variant === "share"
               ? "bg-[#0d4161] text-white"
@@ -625,6 +614,7 @@ export function ChatMessagesList({
 
               {isUser ? (
                 <div className="flex justify-start">
+                  {/* ✅ sem borda */}
                   <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
                     <p className="whitespace-pre-line text-[14px] leading-relaxed">
                       {msg.content}
@@ -633,6 +623,7 @@ export function ChatMessagesList({
                 </div>
               ) : (
                 <div className="flex flex-col items-start">
+                  {/* ✅ sem borda */}
                   <div className={"w-full rounded-3xl px-6 py-4 shadow-md " + assistantBubble}>
                     {onRegenerateLast &&
                       lastAssistant &&
@@ -697,7 +688,6 @@ export function ChatMessagesList({
                             const disguisedCsv =
                               !inline && (!lang || lang === "text") && looksLikeCsvText(text);
 
-                            // se vier ```csv``` a gente renderiza via preview
                             if (!inline && lang === "csv") {
                               csvIndex += 1;
                               return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
@@ -760,11 +750,7 @@ export function ChatMessagesList({
                         )}
 
                         {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
-                          <button
-                            type="button"
-                            onClick={() => onRegenerateLast(lastUser.content)}
-                            className={theme.btn}
-                          >
+                          <button type="button" onClick={() => onRegenerateLast(lastUser.content)} className={theme.btn}>
                             Regenerar
                           </button>
                         )}
@@ -798,5 +784,3 @@ export function ChatMessagesList({
     </MarkdownThemeContext.Provider>
   );
 }
-
-
