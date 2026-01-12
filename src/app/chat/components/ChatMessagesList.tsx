@@ -10,6 +10,7 @@ import {
   createContext,
   useContext,
   Children,
+  useCallback,
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,6 +22,8 @@ export type ChatMessage = {
   created_at?: string;
 };
 
+type Variant = "chat" | "share";
+
 type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
@@ -28,6 +31,9 @@ type ChatMessagesListProps = {
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   isSending: boolean;
   activePdfName?: string | null;
+
+  // ✅ tema visual para reutilizar o mesmo componente no /chat e no /p/[shareId]
+  variant?: Variant;
 };
 
 const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -203,6 +209,65 @@ function toCsvFromRows(rows: string[][], delimiter = ";") {
 }
 
 // ----------------------------------------------------
+// Tema visual (chat vs share) + context
+// ----------------------------------------------------
+type MdTheme = {
+  tableOuterBorder: string;
+  tableClassWide: string;
+  tableClassNormal: string;
+  theadBg: string;
+  thWide: string;
+  thNormal: string;
+  tdWide: string;
+  tdNormal: string;
+  btn: string;
+  pre: string;
+  link: string;
+};
+
+const THEME_CHAT: MdTheme = {
+  tableOuterBorder: "w-full border border-white/10",
+  tableClassWide: "min-w-max w-full border-collapse text-[13px]",
+  tableClassNormal: "w-full table-auto border-collapse text-[13px]",
+  theadBg: "bg-white/5",
+  thWide:
+    "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold",
+  thNormal:
+    "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
+  tdWide: "whitespace-nowrap border border-white/10 px-3 py-2 align-top",
+  tdNormal:
+    "whitespace-normal break-words border border-white/10 px-3 py-2 align-top",
+  btn:
+    "rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
+  pre: "my-3 overflow-x-auto rounded-xl bg-black/20 p-3",
+  link: "text-inherit underline underline-offset-2 hover:opacity-80",
+};
+
+const THEME_SHARE: MdTheme = {
+  // bordas mais suaves para tabelas no share
+  tableOuterBorder: "w-full border border-slate-200/20",
+  tableClassWide: "min-w-max w-full border-collapse text-[13px]",
+  tableClassNormal: "w-full table-auto border-collapse text-[13px]",
+  theadBg: "bg-slate-200/10",
+  thWide:
+    "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  thNormal:
+    "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  tdWide: "whitespace-nowrap border border-slate-200/15 px-3 py-2 align-top",
+  tdNormal:
+    "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
+  btn:
+    "rounded-full border border-slate-200/50 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
+  pre: "my-3 overflow-x-auto rounded-xl bg-black/25 p-3",
+  link: "text-inherit underline underline-offset-2 hover:opacity-80",
+};
+
+const MarkdownThemeContext = createContext<MdTheme>(THEME_CHAT);
+function useMdTheme() {
+  return useContext(MarkdownThemeContext);
+}
+
+// ----------------------------------------------------
 // Contexto por tabela (pra alternar wrap/scroll por colunas)
 // ----------------------------------------------------
 const TableLayoutContext = createContext<{ isWide: boolean }>({ isWide: false });
@@ -231,6 +296,7 @@ function TableWithDownloads({
   children: React.ReactNode;
   tableProps: React.TableHTMLAttributes<HTMLTableElement>;
 }) {
+  const theme = useMdTheme();
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [isWide, setIsWide] = useState(false);
 
@@ -256,10 +322,8 @@ function TableWithDownloads({
 
   return (
     <TableLayoutContext.Provider value={{ isWide }}>
-      {/* ✅ Sem cantos arredondados no “box” da tabela */}
       <div className="my-3 w-full">
-        {/* ✅ Tabela em um box com borda RETA */}
-        <div className="w-full border border-white/10">
+        <div className={theme.tableOuterBorder}>
           <div
             className={
               isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"
@@ -268,18 +332,13 @@ function TableWithDownloads({
             <table
               {...tableProps}
               ref={tableRef}
-              className={
-                isWide
-                  ? "min-w-max w-full border-collapse text-[13px]"
-                  : "w-full table-auto border-collapse text-[13px]"
-              }
+              className={isWide ? theme.tableClassWide : theme.tableClassNormal}
             >
               {children}
             </table>
           </div>
         </div>
 
-        {/* ✅ Botões FORA do box da tabela, alinhados à esquerda */}
         <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
           <button
             type="button"
@@ -294,7 +353,7 @@ function TableWithDownloads({
                 "text/csv;charset=utf-8"
               );
             }}
-            className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+            className={theme.btn}
           >
             Baixar CSV
           </button>
@@ -311,7 +370,7 @@ function TableWithDownloads({
                 alert(e?.message || "Erro ao gerar Excel.");
               }
             }}
-            className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+            className={theme.btn}
           >
             Baixar Excel
           </button>
@@ -333,6 +392,7 @@ function CsvPreviewTable({
   maxRows?: number;
   maxCols?: number;
 }) {
+  const theme = useMdTheme();
   if (!rows || rows.length === 0) return null;
 
   const head = rows[0] ?? [];
@@ -347,24 +407,11 @@ function CsvPreviewTable({
 
   return (
     <div className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}>
-      <table
-        className={
-          isWide
-            ? "min-w-max w-full border-collapse text-[13px]"
-            : "w-full table-auto border-collapse text-[13px]"
-        }
-      >
-        <thead className="bg-white/5">
+      <table className={isWide ? theme.tableClassWide : theme.tableClassNormal}>
+        <thead className={theme.theadBg}>
           <tr>
             {clippedHead.map((h, i) => (
-              <th
-                key={i}
-                className={
-                  isWide
-                    ? "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold"
-                    : "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold"
-                }
-              >
+              <th key={i} className={isWide ? theme.thWide : theme.thNormal}>
                 {h}
               </th>
             ))}
@@ -375,14 +422,7 @@ function CsvPreviewTable({
           {clippedBody.map((r, ri) => (
             <tr key={ri}>
               {r.map((c, ci) => (
-                <td
-                  key={ci}
-                  className={
-                    isWide
-                      ? "whitespace-nowrap border border-white/10 px-3 py-2 align-top"
-                      : "whitespace-normal break-words border border-white/10 px-3 py-2 align-top"
-                  }
-                >
+                <td key={ci} className={isWide ? theme.tdWide : theme.tdNormal}>
                   {c}
                 </td>
               ))}
@@ -408,6 +448,7 @@ function CsvBlockWithDownloads({
   index: number;
   csvText: string;
 }) {
+  const theme = useMdTheme();
   const { delimiter, rows } = useMemo(() => parseCsv(csvText), [csvText]);
 
   if (!rows || rows.length === 0) return null;
@@ -417,14 +458,12 @@ function CsvBlockWithDownloads({
 
   return (
     <div className="my-3 w-full">
-      {/* ✅ Preview com box reto */}
-      <div className="w-full border border-white/10">
+      <div className={theme.tableOuterBorder}>
         <div className="px-3 py-3">
           <CsvPreviewTable rows={rows} />
         </div>
       </div>
 
-      {/* ✅ Botões fora do box */}
       <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
         <button
           type="button"
@@ -435,7 +474,7 @@ function CsvBlockWithDownloads({
               "text/csv;charset=utf-8"
             )
           }
-          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+          className={theme.btn}
         >
           Baixar CSV
         </button>
@@ -449,7 +488,7 @@ function CsvBlockWithDownloads({
               alert(e?.message || "Erro ao gerar Excel.");
             }
           }}
-          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+          className={theme.btn}
         >
           Baixar Excel
         </button>
@@ -458,20 +497,46 @@ function CsvBlockWithDownloads({
   );
 }
 
+// ----------------------------------------------------
+// ✅ Scroll “modo ChatGPT”
+// ----------------------------------------------------
+function getScrollParent(el: HTMLElement | null): HTMLElement | null {
+  if (!el) return null;
+
+  let p: HTMLElement | null = el.parentElement;
+  while (p) {
+    const style = window.getComputedStyle(p);
+    const overflowY = style.overflowY;
+    const isScrollable =
+      (overflowY === "auto" || overflowY === "scroll") &&
+      p.scrollHeight > p.clientHeight;
+
+    if (isScrollable) return p;
+    p = p.parentElement;
+  }
+
+  return (document.scrollingElement as HTMLElement | null) ?? null;
+}
+
 export function ChatMessagesList({
   messages,
   onCopyAnswer,
   onShareConversation,
   onRegenerateLast,
   isSending,
+  variant = "chat",
 }: ChatMessagesListProps) {
-  let lastDateLabel: string | null = null;
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
-  const lastAssistant = [...messages]
-    .slice()
-    .reverse()
-    .find((m) => m.role === "assistant");
+  let lastDateLabel: string | null = null;
+
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollParentRef = useRef<HTMLElement | null>(null);
+
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [unread, setUnread] = useState(0);
+
+  const lastAssistant = [...messages].slice().reverse().find((m) => m.role === "assistant");
   const lastUser = [...messages].slice().reverse().find((m) => m.role === "user");
 
   const userMessages = messages.filter((m) => m.role === "user");
@@ -480,232 +545,258 @@ export function ChatMessagesList({
     lastTwoUsers.length === 2 &&
     lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
+  const BOTTOM_THRESHOLD_PX = 140;
+
+  const computeAtBottom = useCallback(() => {
+    const sp = scrollParentRef.current;
+    if (!sp) return true;
+    const dist = sp.scrollHeight - sp.scrollTop - sp.clientHeight;
+    return dist <= BOTTOM_THRESHOLD_PX;
+  }, []);
+
   useEffect(() => {
-    if (bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    const sp = getScrollParent(bottomRef.current);
+    scrollParentRef.current = sp;
+
+    if (!sp) return;
+
+    const onScroll = () => {
+      const atBottomNow = computeAtBottom();
+      setIsAtBottom(atBottomNow);
+      if (atBottomNow) setUnread(0);
+    };
+
+    onScroll();
+
+    sp.addEventListener("scroll", onScroll, { passive: true });
+    return () => sp.removeEventListener("scroll", onScroll);
+  }, [computeAtBottom]);
+
+  useEffect(() => {
+    const atBottomNow = computeAtBottom();
+
+    if (!atBottomNow) {
+      setIsAtBottom(false);
+      setUnread((u) => u + 1);
+      return;
     }
-  }, [messages.length, isSending]);
+
+    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [messages, isSending, computeAtBottom]);
+
+  const jumpToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    setUnread(0);
+    setIsAtBottom(true);
+  };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-      {messages.map((msg) => {
-        const isUser = msg.role === "user";
-        const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
+    <MarkdownThemeContext.Provider value={theme}>
+      <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
+        {messages.map((msg) => {
+          const isUser = msg.role === "user";
+          const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
-        const dateLabel = getDateLabel(msg.created_at);
-        const showDateDivider = !!dateLabel && dateLabel !== lastDateLabel;
-        if (showDateDivider) lastDateLabel = dateLabel!;
+          const dateLabel = getDateLabel(msg.created_at);
+          const showDateDivider = !!dateLabel && dateLabel !== lastDateLabel;
+          if (showDateDivider) lastDateLabel = dateLabel!;
 
-        let tableIndex = 0;
-        let csvIndex = 0;
+          let tableIndex = 0;
+          let csvIndex = 0;
 
-        return (
-          <div key={msg.id}>
-            {showDateDivider && (
-              <div className="my-4 text-[11px] font-semibold text-slate-300">
-                {dateLabel}
-              </div>
-            )}
+          // ✅ bolhas SEM borda (chat e share)
+          const userBubble =
+            variant === "share"
+              ? "bg-[#0d4161] text-white"
+              : "bg-[#1c4561] text-white";
 
-            {isUser ? (
-              <div className="flex justify-start">
-                <div className="inline-block max-w-[80%] rounded-xl bg-[#1c4561] px-5 py-2">
-                  <p className="whitespace-pre-line text-[14px] leading-relaxed text-white">
-                    {msg.content}
-                  </p>
+          const assistantBubble =
+            variant === "share"
+              ? "bg-[#274d69] text-slate-50"
+              : "bg-[#2b4e67] text-slate-50";
+
+          return (
+            <div key={msg.id}>
+              {showDateDivider && (
+                <div className="my-4 text-[11px] font-semibold text-slate-300">
+                  {dateLabel}
                 </div>
-              </div>
-            ) : (
-              <div className="flex flex-col items-start">
-                <div className="w-full rounded-3xl bg-[#2b4e67] px-6 py-4">
-                  {onRegenerateLast &&
-                    lastAssistant &&
-                    msg.id === lastAssistant.id &&
-                    isRegeneratedForSameQuestion && (
-                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200/80">
-                        Resposta regenerada
-                      </div>
-                    )}
+              )}
 
-                  <div className="markdown text-[14px] leading-relaxed text-slate-50">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        a: ({ node, ...props }) => (
-                          <a
-                            {...props}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="underline underline-offset-2 hover:opacity-80"
-                          />
-                        ),
-
-                        // ✅ Corrige “barra/balão fantasma” vindo de `---` (hr)
-                        hr: () => <div className="my-4 h-px w-full bg-white/20" />,
-
-                        // ✅ Remove parágrafos vazios
-                        p: ({ node, ...props }) => {
-                          const txt = extractText((props as any).children);
-                          if (!txt.trim()) return null;
-                          return <p {...props} />;
-                        },
-
-                        table: ({ node, ...props }) => {
-                          tableIndex += 1;
-                          return (
-                            <TableWithDownloads index={tableIndex} tableProps={props}>
-                              {props.children}
-                            </TableWithDownloads>
-                          );
-                        },
-
-                        thead: ({ node, ...props }) => (
-                          <thead {...props} className="bg-white/5" />
-                        ),
-
-                        th: ({ node, ...props }) => {
-                          const { isWide } = useTableLayout();
-                          return (
-                            <th
-                              {...props}
-                              className={
-                                isWide
-                                  ? "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold"
-                                  : "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold"
-                              }
-                            />
-                          );
-                        },
-
-                        td: ({ node, ...props }) => {
-                          const { isWide } = useTableLayout();
-                          return (
-                            <td
-                              {...props}
-                              className={
-                                isWide
-                                  ? "whitespace-nowrap border border-white/10 px-3 py-2 align-top"
-                                  : "whitespace-normal break-words border border-white/10 px-3 py-2 align-top"
-                              }
-                            />
-                          );
-                        },
-
-                        code: (p: any) => {
-                          const { inline, className, children, ...props } = p as any;
-
-                          const text = String(children ?? "");
-                          const match = /language-(\w+)/.exec(className ?? "");
-                          const lang = match?.[1]?.toLowerCase();
-
-                          const disguisedCsv =
-                            !inline && (!lang || lang === "text") && looksLikeCsvText(text);
-
-                          // ✅ CSV explícito: não renderiza (evita duplicar)
-                          if (!inline && lang === "csv") return null;
-
-                          // ✅ CSV “disfarçado”: renderiza como tabela preview + botões
-                          if (!inline && disguisedCsv) {
-                            csvIndex += 1;
-                            return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
-                          }
-
-                          return (
-                            <code {...props} className="text-[12px]">
-                              {children}
-                            </code>
-                          );
-                        },
-
-                        // ✅ CORREÇÃO DO “FANTASMA”:
-                        // - não renderiza <pre> vazio
-                        // - e não envolve componentes custom dentro de <pre>
-                        pre: ({ node, children, ...props }) => {
-                          const arr = Children.toArray(children);
-
-                          if (arr.length === 0) return null;
-
-                          // Se for um componente React custom (ex: CsvBlockWithDownloads),
-                          // não deve ficar dentro de <pre>.
-                          if (arr.length === 1 && isValidElement(arr[0])) {
-                            const el: any = arr[0];
-                            if (typeof el.type !== "string") {
-                              return <>{children}</>;
-                            }
-                          }
-
-                          // Pre vazio? some com ele.
-                          const txt = extractText(children);
-                          if (!txt.trim()) return null;
-
-                          return (
-                            <pre
-                              {...props}
-                              className="my-3 overflow-x-auto rounded-xl bg-black/20 p-3"
-                            >
-                              {children}
-                            </pre>
-                          );
-                        },
-                      }}
-                    >
+              {isUser ? (
+                <div className="flex justify-start">
+                  <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
+                    <p className="whitespace-pre-line text-[14px] leading-relaxed">
                       {msg.content}
-                    </ReactMarkdown>
+                    </p>
                   </div>
                 </div>
-
-                {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
-                  <div className="mt-2 flex w-full flex-col gap-2 text-xs">
-                    {isLastAssistant && isSending && (
-                      <div className="flex items-center gap-2 text-xs text-slate-100">
-                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
-                        <span>Gerando resposta...</span>
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap items-center justify-center gap-2">
-                      {onCopyAnswer && (
-                        <button
-                          type="button"
-                          onClick={() => onCopyAnswer(msg.id)}
-                          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
-                        >
-                          Copiar
-                        </button>
+              ) : (
+                <div className="flex flex-col items-start">
+                  <div className={"w-full rounded-3xl px-6 py-4 shadow-md " + assistantBubble}>
+                    {onRegenerateLast &&
+                      lastAssistant &&
+                      msg.id === lastAssistant.id &&
+                      isRegeneratedForSameQuestion && (
+                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200/80">
+                          Resposta regenerada
+                        </div>
                       )}
 
-                      {onRegenerateLast &&
-                        lastAssistant &&
-                        lastUser &&
-                        msg.id === lastAssistant.id && (
+                    <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ node, ...props }) => (
+                            <a
+                              {...props}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className={theme.link}
+                            />
+                          ),
+
+                          hr: () => <div className="my-4 h-px w-full bg-white/20" />,
+
+                          p: ({ node, ...props }) => {
+                            const txt = extractText((props as any).children);
+                            if (!txt.trim()) return null;
+                            return <p {...props} />;
+                          },
+
+                          table: ({ node, ...props }) => {
+                            tableIndex += 1;
+                            return (
+                              <TableWithDownloads index={tableIndex} tableProps={props}>
+                                {props.children}
+                              </TableWithDownloads>
+                            );
+                          },
+
+                          thead: ({ node, ...props }) => (
+                            <thead {...props} className={theme.theadBg} />
+                          ),
+
+                          th: ({ node, ...props }) => {
+                            const { isWide } = useTableLayout();
+                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
+                          },
+
+                          td: ({ node, ...props }) => {
+                            const { isWide } = useTableLayout();
+                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
+                          },
+
+                          code: (p: any) => {
+                            const { inline, className, children, ...props } = p as any;
+
+                            const text = String(children ?? "");
+                            const match = /language-(\w+)/.exec(className ?? "");
+                            const lang = match?.[1]?.toLowerCase();
+
+                            const disguisedCsv =
+                              !inline && (!lang || lang === "text") && looksLikeCsvText(text);
+
+                            // se vier ```csv``` a gente renderiza via preview
+                            if (!inline && lang === "csv") {
+                              csvIndex += 1;
+                              return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
+                            }
+
+                            if (!inline && disguisedCsv) {
+                              csvIndex += 1;
+                              return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
+                            }
+
+                            return (
+                              <code {...props} className="text-[12px]">
+                                {children}
+                              </code>
+                            );
+                          },
+
+                          pre: ({ node, children, ...props }) => {
+                            const arr = Children.toArray(children);
+
+                            if (arr.length === 0) return null;
+
+                            if (arr.length === 1 && isValidElement(arr[0])) {
+                              const el: any = arr[0];
+                              if (typeof el.type !== "string") {
+                                return <>{children}</>;
+                              }
+                            }
+
+                            const txt = extractText(children);
+                            if (!txt.trim()) return null;
+
+                            return (
+                              <pre {...props} className={theme.pre}>
+                                {children}
+                              </pre>
+                            );
+                          },
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
+                  </div>
+
+                  {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
+                    <div className="mt-2 flex w-full flex-col gap-2 text-xs">
+                      {isLastAssistant && isSending && (
+                        <div className="flex items-center gap-2 text-xs text-slate-100">
+                          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
+                          <span>Gerando resposta...</span>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        {onCopyAnswer && (
+                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
+                            Copiar
+                          </button>
+                        )}
+
+                        {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
                           <button
                             type="button"
                             onClick={() => onRegenerateLast(lastUser.content)}
-                            className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
+                            className={theme.btn}
                           >
                             Regenerar
                           </button>
                         )}
 
-                      {onShareConversation && (
-                        <button
-                          type="button"
-                          onClick={() => onShareConversation()}
-                          className="rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10"
-                        >
-                          Compartilhar
-                        </button>
-                      )}
+                        {onShareConversation && (
+                          <button type="button" onClick={() => onShareConversation()} className={theme.btn}>
+                            Compartilhar
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
 
-      <div ref={bottomRef} />
-    </div>
+        <div ref={bottomRef} />
+
+        {!isAtBottom && unread > 0 && (
+          <button
+            type="button"
+            onClick={jumpToBottom}
+            className="fixed bottom-6 right-6 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-blue-700"
+          >
+            Ir para o final ({unread})
+          </button>
+        )}
+      </div>
+    </MarkdownThemeContext.Provider>
   );
 }
+
+

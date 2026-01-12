@@ -1,19 +1,16 @@
 // src/app/chat/ChatPageClient.tsx
 "use client";
 
-import {
-  useEffect,
-  useState,
-  useRef,
-  ChangeEvent,
-} from "react";
+import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
+import { useEffect, useState, useRef, ChangeEvent } from "react";
 import { createBrowserClient } from "@supabase/ssr";
-import Image from "next/image"; // 👈 ADICIONADO
+import Image from "next/image";
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage, ChatMessagesList } from "./components/ChatMessagesList";
+
 // ------------------------------------------------------
 // Tipos de props
 // ------------------------------------------------------
@@ -23,7 +20,7 @@ type ChatPageClientProps = {
 };
 
 // ------------------------------------------------------
-// Helper: converter markdown em texto simples (para copiar)
+// Helper: converter markdown em texto simples (fallback)
 // ------------------------------------------------------
 function markdownToPlainText(markdown: string): string {
   let text = markdown;
@@ -82,9 +79,6 @@ type SSEParsed =
   | { event: string; data: any };
 
 function parseSSEBlock(block: string): SSEParsed | null {
-  // block é algo como:
-  // event: delta
-  // data: {"text":"..."}
   const lines = block.split("\n").map((l) => l.trimEnd());
   let eventName = "";
   let dataLine = "";
@@ -93,7 +87,6 @@ function parseSSEBlock(block: string): SSEParsed | null {
     if (line.startsWith("event:")) {
       eventName = line.replace("event:", "").trim();
     } else if (line.startsWith("data:")) {
-      // SSE pode mandar vários data:, mas aqui nosso backend manda 1
       dataLine = line.replace("data:", "").trim();
     }
   }
@@ -112,18 +105,11 @@ function parseSSEBlock(block: string): SSEParsed | null {
   return { event: eventName, data: parsedData } as SSEParsed;
 }
 
-export default function ChatPageClient({
-  userId,
-  userLabel,
-}: ChatPageClientProps) {
-  // Supabase client no browser
-  const [supabase] = useState(() =>
-    createBrowserClient(supabaseUrl, supabaseAnonKey)
-  );
+export default function ChatPageClient({ userId, userLabel }: ChatPageClientProps) {
+  const [supabase] = useState(() => createBrowserClient(supabaseUrl, supabaseAnonKey));
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversationId, setActiveConversationId] =
-    useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -134,18 +120,13 @@ export default function ChatPageClient({
   const [showPdfQuickActions, setShowPdfQuickActions] = useState(false);
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
 
-  // Flag: conversa acabou de ser criada pelo front
   const justCreatedConversationRef = useRef(false);
-
-  // Controle do menu lateral no mobile
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  // Abort do streaming (evita “corrida” se enviar 2x)
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => {
-      // cleanup ao desmontar
       abortRef.current?.abort();
     };
   }, []);
@@ -194,8 +175,6 @@ export default function ChatPageClient({
       return;
     }
 
-    // Se a conversa acabou de ser criada no cliente (primeira pergunta),
-    // pulamos o carregamento para não apagar a bolha temporária.
     if (justCreatedConversationRef.current) {
       justCreatedConversationRef.current = false;
       return;
@@ -235,9 +214,7 @@ export default function ChatPageClient({
   // ----------------------------------------------------
   // Conversas
   // ----------------------------------------------------
-  async function createConversation(
-    shouldResetState: boolean = false
-  ): Promise<string | null> {
+  async function createConversation(shouldResetState: boolean = false): Promise<string | null> {
     try {
       const { data, error } = await supabase
         .from("conversations")
@@ -258,10 +235,8 @@ export default function ChatPageClient({
       setConversations((prev) => [newConv, ...prev]);
       setActiveConversationId(newConv.id);
 
-      // Marca que essa conversa acabou de ser criada no cliente
       justCreatedConversationRef.current = true;
 
-      // Só limpamos mensagens/PDF quando for clique manual em "NOVA CONVERSA"
       if (shouldResetState) {
         setMessages([]);
         setAttachedPdf(null);
@@ -282,7 +257,6 @@ export default function ChatPageClient({
   }
 
   function handleSelectConversation(id: string) {
-    // Se tiver streaming em andamento, aborta
     abortRef.current?.abort();
     abortRef.current = null;
 
@@ -293,16 +267,10 @@ export default function ChatPageClient({
   }
 
   async function handleDeleteConversation(id: string) {
-    const confirmDelete = window.confirm(
-      "Tem certeza que deseja excluir esta conversa?"
-    );
+    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta conversa?");
     if (!confirmDelete) return;
 
-    const { error } = await supabase
-      .from("conversations")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", userId);
+    const { error } = await supabase.from("conversations").delete().eq("id", id).eq("user_id", userId);
 
     if (error) {
       console.error("Erro ao excluir conversa:", error.message);
@@ -332,14 +300,12 @@ export default function ChatPageClient({
     const trimmed = messageText.trim();
     if (!trimmed) return;
 
-    // Se já tem uma resposta em andamento, aborta antes de iniciar outra
     abortRef.current?.abort();
     abortRef.current = null;
 
     const conversationId = await ensureConversationId();
     if (!conversationId) return;
 
-    // IDs temporários (UI)
     const tempUserId = `temp-user-${Date.now()}`;
     const tempAssistantId = `temp-assistant-${Date.now() + 1}`;
 
@@ -352,13 +318,13 @@ export default function ChatPageClient({
     const tempAssistantMessage: ChatMessage = {
       id: tempAssistantId,
       role: "assistant",
-      content: "", // vai sendo preenchido pelos deltas
+      content: "",
     };
 
     setMessages((prev) => [...prev, tempUserMessage, tempAssistantMessage]);
     setIsSending(true);
 
-    // Atualiza título (mesma regra anterior), sem depender do retorno do /api/chat
+    // Atualiza título
     try {
       const existingConv = conversations.find((c) => c.id === conversationId);
       const isDefaultTitle =
@@ -370,10 +336,7 @@ export default function ChatPageClient({
       if (isDefaultTitle) {
         const base = trimmed.replace(/\s+/g, " ");
         const maxLen = 60;
-        const newTitle =
-          base.length > maxLen
-            ? base.slice(0, maxLen).trimEnd() + "..."
-            : base;
+        const newTitle = base.length > maxLen ? base.slice(0, maxLen).trimEnd() + "..." : base;
 
         setConversations((prev) =>
           prev.map((c) => (c.id === conversationId ? { ...c, title: newTitle } : c))
@@ -398,15 +361,11 @@ export default function ChatPageClient({
 
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         signal: ac.signal,
         body: JSON.stringify({
           conversationId,
           message: trimmed,
-          // Se depois quiser forçar PDF selecionado, dá pra mandar aqui também.
-          // Hoje o backend pega o PDF mais recente da conversa.
         }),
       });
 
@@ -419,7 +378,6 @@ export default function ChatPageClient({
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder("utf-8");
-
       let buffer = "";
 
       while (true) {
@@ -428,7 +386,6 @@ export default function ChatPageClient({
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE delimita eventos por linha em branco (\n\n)
         let idx: number;
         while ((idx = buffer.indexOf("\n\n")) !== -1) {
           const block = buffer.slice(0, idx).trim();
@@ -462,9 +419,7 @@ export default function ChatPageClient({
             if (deltaText) {
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === tempAssistantId
-                    ? { ...m, content: (m.content || "") + deltaText }
-                    : m
+                  m.id === tempAssistantId ? { ...m, content: (m.content || "") + deltaText } : m
                 )
               );
             }
@@ -492,25 +447,16 @@ export default function ChatPageClient({
             const msg = parsed.data?.error || "Erro ao gerar a resposta.";
             console.error("[SSE error]", msg);
 
-            // Em vez de sumir com a bolha, você pode exibir a mensagem nela:
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === tempAssistantId
-                  ? { ...m, content: `Erro: ${msg}` }
-                  : m
-              )
+              prev.map((m) => (m.id === tempAssistantId ? { ...m, content: `Erro: ${msg}` } : m))
             );
 
-            // Opcional: alert (se você quiser menos alertas, pode remover)
             alert(msg);
           }
         }
       }
     } catch (error: any) {
-      // Abort é esperado em algumas situações
-      if (error?.name === "AbortError") {
-        // não faz nada
-      } else {
+      if (error?.name !== "AbortError") {
         console.error("Erro inesperado ao enviar mensagem para IA:", error);
         alert("Erro ao enviar mensagem para a IA.");
         setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
@@ -521,16 +467,10 @@ export default function ChatPageClient({
     }
   }
 
-  // ----------------------------------------------------
-  // Regenerar última resposta (reusa a mesma pergunta do usuário)
-  // ----------------------------------------------------
   async function handleRegenerateLast(lastUserMessage: string) {
     await handleSend(lastUserMessage);
   }
 
-  // ----------------------------------------------------
-  // Ações rápidas com o PDF
-  // ----------------------------------------------------
   async function handlePdfQuickAction(kind: QuickActionKind) {
     if (!attachedPdf) {
       alert("Anexe um PDF antes de usar as ações rápidas.");
@@ -586,15 +526,22 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   // ----------------------------------------------------
-  // Copiar resposta (limpando markdown)
+  // ✅ Copiar resposta (HTML quando possível; fallback p/ texto)
   // ----------------------------------------------------
   async function handleCopyAnswer(messageId: string) {
-    const msg = messages.find(
-      (m) => m.id === messageId && m.role === "assistant"
-    );
-    if (!msg) return;
+    try {
+      // 1) Preferência: copia HTML do DOM (preserva tabelas e formatação)
+      await copyMessageToClipboard(messageId);
+      return;
+    } catch (err) {
+      console.warn("[copy] Falhou HTML copy, tentando fallback texto...", err);
+    }
 
     try {
+      // 2) Fallback: texto simples (não preserva tabelas, mas não falha)
+      const msg = messages.find((m) => m.id === messageId && m.role === "assistant");
+      if (!msg) throw new Error("Mensagem não encontrada para copiar.");
+
       const plainText = markdownToPlainText(msg.content);
       await navigator.clipboard.writeText(plainText);
     } catch (err) {
@@ -621,34 +568,22 @@ Organize a resposta em tópicos, com explicações objetivas.
         .single();
 
       if (error) {
-        console.error(
-          "Erro ao carregar conversa para compartilhar:",
-          error.message
-        );
+        console.error("Erro ao carregar conversa para compartilhar:", error.message);
         alert("Não foi possível preparar o compartilhamento.");
         return;
       }
 
       let shareId = data.share_id as string | null;
-
-      if (!shareId) {
-        shareId = crypto.randomUUID();
-      }
+      if (!shareId) shareId = crypto.randomUUID();
 
       const { error: updateError } = await supabase
         .from("conversations")
-        .update({
-          is_shared: true,
-          share_id: shareId,
-        })
+        .update({ is_shared: true, share_id: shareId })
         .eq("id", activeConversationId)
         .eq("user_id", userId);
 
       if (updateError) {
-        console.error(
-          "Erro ao marcar conversa como compartilhada:",
-          updateError.message
-        );
+        console.error("Erro ao marcar conversa como compartilhada:", updateError.message);
         alert("Não foi possível compartilhar a conversa.");
         return;
       }
@@ -657,16 +592,10 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       try {
         await navigator.clipboard.writeText(url);
-        alert(
-          "Link público da conversa copiado para a área de transferência:\n\n" +
-            url
-        );
+        alert("Link público da conversa copiado para a área de transferência:\n\n" + url);
       } catch (copyError) {
         console.error("Erro ao copiar link público:", copyError);
-        window.prompt(
-          "Link público da conversa (copie manualmente):",
-          url
-        );
+        window.prompt("Link público da conversa (copie manualmente):", url);
       }
     } catch (error) {
       console.error("Erro inesperado ao compartilhar conversa:", error);
@@ -707,15 +636,11 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      const safeName = file.name
-        .normalize("NFKD")
-        .replace(/[^\w.-]+/g, "_");
-
+      const safeName = file.name.normalize("NFKD").replace(/[^\w.-]+/g, "_");
       const storagePath = `${conversationId}/${Date.now()}-${safeName}`;
 
       const { data: storageData, error: storageError } = await (supabase as any)
-        .storage
-        .from("pdf-files")
+        .storage.from("pdf-files")
         .upload(storagePath, file, {
           cacheControl: "3600",
           upsert: false,
@@ -723,13 +648,8 @@ Organize a resposta em tópicos, com explicações objetivas.
         });
 
       if (storageError || !storageData) {
-        console.error(
-          "[Chat] Erro ao enviar PDF para o Supabase Storage:",
-          storageError
-        );
-        alert(
-          "Não foi possível enviar o PDF para o servidor. Tente novamente em alguns instantes."
-        );
+        console.error("[Chat] Erro ao enviar PDF para o Supabase Storage:", storageError);
+        alert("Não foi possível enviar o PDF para o servidor. Tente novamente em alguns instantes.");
         return;
       }
 
@@ -737,9 +657,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       const res = await fetch("/api/upload-pdf", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversationId,
           fileName: file.name,
@@ -749,27 +667,14 @@ Organize a resposta em tópicos, com explicações objetivas.
       });
 
       if (!res.ok) {
-        console.error(
-          "Erro ao registrar PDF no banco:",
-          await res.text()
-        );
-        alert(
-          "O arquivo foi enviado, mas não foi possível registrar o PDF no histórico da conversa."
-        );
+        console.error("Erro ao registrar PDF no banco:", await res.text());
+        alert("O arquivo foi enviado, mas não foi possível registrar o PDF no histórico da conversa.");
         return;
       }
 
-      const data = (await res.json()) as {
-        id: string;
-        fileName: string;
-        fileSize: number;
-      };
+      const data = (await res.json()) as { id: string; fileName: string; fileSize: number };
 
-      setAttachedPdf({
-        id: data.id,
-        fileName: data.fileName,
-        fileSize: data.fileSize,
-      });
+      setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
     } catch (error) {
       console.error("Erro inesperado ao enviar PDF:", error);
       alert("Não foi possível enviar o PDF.");
@@ -784,9 +689,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     setShowPdfQuickActions(false);
   }
 
-  // ----------------------------------------------------
-  // Render: função para reutilizar o MAIN (desktop + mobile)
-  // ----------------------------------------------------
   const renderMain = () => (
     <div className="flex flex-1 flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto px-8 py-6">
@@ -829,12 +731,8 @@ Organize a resposta em tópicos, com explicações objetivas.
 
             {attachedPdf && (
               <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
-                <span className="max-w-[240px] truncate">
-                  {attachedPdf.fileName}
-                </span>
-                <span className="opacity-80">
-                  {Math.round(attachedPdf.fileSize / 1024)} KB
-                </span>
+                <span className="max-w-[240px] truncate">{attachedPdf.fileName}</span>
+                <span className="opacity-80">{Math.round(attachedPdf.fileSize / 1024)} KB</span>
                 <button
                   type="button"
                   onClick={handleRemovePdf}
@@ -849,9 +747,7 @@ Organize a resposta em tópicos, com explicações objetivas.
               <button
                 type="button"
                 disabled={!attachedPdf}
-                onClick={() =>
-                  attachedPdf && setShowPdfQuickActions((prev) => !prev)
-                }
+                onClick={() => attachedPdf && setShowPdfQuickActions((prev) => !prev)}
                 className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
                   attachedPdf
                     ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
@@ -898,11 +794,7 @@ Organize a resposta em tópicos, com explicações objetivas.
             </div>
           </div>
 
-          {isUploadingPdf && (
-            <div className="mb-2 text-[11px] text-slate-100">
-              Enviando PDF...
-            </div>
-          )}
+          {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
 
           <ChatInput onSend={handleSend} disabled={isSending} />
         </div>
@@ -910,21 +802,13 @@ Organize a resposta em tópicos, com explicações objetivas.
     </div>
   );
 
-  // ----------------------------------------------------
-  // Render final: mobile e desktop separados
-  // ----------------------------------------------------
   return (
     <div className="h-screen bg-[#2f4f67]">
       {/* MOBILE */}
       <div className="flex h-full flex-col md:hidden">
-        {/* Header fixo */}
         <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
           <div className="flex items-center gap-2">
-            <a
-              href="https://nexuspublica.com.br/"
-              target="_blank"
-              rel="noreferrer noopener"
-            >
+            <a href="https://nexuspublica.com.br/" target="_blank" rel="noreferrer noopener">
               <Image
                 src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
                 alt="Logo Publ.IA - Nexus Pública"
@@ -935,19 +819,15 @@ Organize a resposta em tópicos, com explicações objetivas.
             </a>
             <div>
               <div className="text-sm font-semibold leading-none">Publ.IA 1.7</div>
-              <div className="text-[11px] text-slate-500 leading-none">
-                Nexus Pública
-              </div>
+              <div className="text-[11px] text-slate-500 leading-none">Nexus Pública</div>
             </div>
           </div>
 
           <div className="flex items-center gap-4">
             <span className="text-[11px] text-slate-600">
-              Usuário:{" "}
-              <span className="font-semibold break-all">{userLabel}</span>
+              Usuário: <span className="font-semibold break-all">{userLabel}</span>
             </span>
 
-            {/* Botão hamburguer */}
             <button
               type="button"
               aria-label="Abrir menu"
@@ -963,11 +843,9 @@ Organize a resposta em tópicos, com explicações objetivas.
           </div>
         </header>
 
-        {/* Empurra o conteúdo para baixo do header fixo */}
         <div className="relative flex flex-1 pt-[64px]">
-          {/* Sidebar como drawer */}
           <div
-            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duração-200 ${
+            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duration-200 ${
               isMobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
             }`}
           >
@@ -981,22 +859,15 @@ Organize a resposta em tópicos, com explicações objetivas.
             />
           </div>
 
-          {/* Overlay para fechar */}
           {isMobileSidebarOpen && (
-            <div
-              className="fixed inset-0 z-30 bg-black/40"
-              onClick={() => setIsMobileSidebarOpen(false)}
-            />
+            <div className="fixed inset-0 z-30 bg-black/40" onClick={() => setIsMobileSidebarOpen(false)} />
           )}
 
-          {/* Área principal */}
-          <main className="flex flex-1 flex-col bg-[#2f4f67]">
-            {renderMain()}
-          </main>
+          <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
         </div>
       </div>
 
-      {/* DESKTOP – volta exatamente ao layout antigo */}
+      {/* DESKTOP */}
       <div className="hidden h-full flex-row md:flex">
         <ChatSidebar
           conversations={conversations}
@@ -1007,9 +878,7 @@ Organize a resposta em tópicos, com explicações objetivas.
           userLabel={userLabel}
         />
 
-        <main className="flex flex-1 flex-col bg-[#2f4f67]">
-          {renderMain()}
-        </main>
+        <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
       </div>
     </div>
   );

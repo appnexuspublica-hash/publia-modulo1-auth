@@ -1,8 +1,11 @@
 // src/app/p/[shareId]/page.tsx
-
 import { createClient } from "@supabase/supabase-js";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import Image from "next/image";
+import {
+  ChatMessagesList,
+  type ChatMessage,
+} from "@/app/chat/components/ChatMessagesList";
+import CopyConversationButton from "./CopyConversationButton";
 
 type PageProps = {
   params: {
@@ -45,14 +48,16 @@ export default async function SharedConversationPage({ params }: PageProps) {
           <p>
             As variáveis <code>NEXT_PUBLIC_SUPABASE_URL</code> e{" "}
             <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> não estão configuradas
-            corretamente no ambiente de deploy.
+            corretamente no deploy.
           </p>
         </div>
       </main>
     );
   }
 
-  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 
   // 1) Buscar conversa compartilhada
   const { data: conv, error: convError } = await supabase
@@ -94,9 +99,7 @@ export default async function SharedConversationPage({ params }: PageProps) {
     return (
       <main className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
         <div className="max-w-md rounded-2xl bg-white shadow p-6 text-center text-sm text-slate-700">
-          <h1 className="text-base font-semibold mb-2">
-            Conversa não encontrada
-          </h1>
+          <h1 className="text-base font-semibold mb-2">Conversa não encontrada</h1>
           <p className="mb-2">
             Não foi encontrada nenhuma conversa compartilhada para este link.
           </p>
@@ -116,29 +119,25 @@ export default async function SharedConversationPage({ params }: PageProps) {
     .order("created_at", { ascending: true });
 
   if (msgsError) {
-    console.error(
-      "[share page] Erro ao carregar mensagens:",
-      msgsError.message
-    );
+    console.error("[share page] Erro ao carregar mensagens:", msgsError.message);
 
     return (
       <main className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
         <div className="max-w-md rounded-2xl bg-white shadow p-6 text-center text-sm text-slate-700">
-          <h1 className="text-base font-semibold mb-2">
-            Erro ao carregar mensagens
-          </h1>
-          <p className="mb-2">
-            As mensagens desta conversa não puderam ser carregadas.
-          </p>
-          <p className="text-xs text-slate-500">
-            Detalhe técnico: {msgsError.message}
-          </p>
+          <h1 className="text-base font-semibold mb-2">Erro ao carregar mensagens</h1>
+          <p className="mb-2">As mensagens desta conversa não puderam ser carregadas.</p>
+          <p className="text-xs text-slate-500">Detalhe técnico: {msgsError.message}</p>
         </div>
       </main>
     );
   }
 
-  const messages = (msgs ?? []) as MessageRow[];
+  const messages: ChatMessage[] = ((msgs ?? []) as MessageRow[]).map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    created_at: m.created_at,
+  }));
 
   // Formatar data/hora da conversa
   const createdAt = new Date(conv.created_at);
@@ -147,96 +146,70 @@ export default async function SharedConversationPage({ params }: PageProps) {
     timeStyle: "short",
   });
 
+  const title =
+    (conv.title || "").trim() &&
+    conv.title!.trim().toLowerCase() !== "nova conversa"
+      ? conv.title!.trim()
+      : "Conversa compartilhada";
+
   return (
-    // 🔹 Fundo da página ajustado para #2b4e69
     <main className="min-h-screen bg-[#2b4e69] text-slate-50">
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        {/* Cabeçalho */}
-        <header className="mb-6 flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Conversa compartilhada · Publ.IA
-          </h1>
-          <p className="text-xs text-slate-200/80">
-            Visualização pública das mensagens trocadas com o assistente
-            Publ.IA.
-          </p>
-          <p className="text-[11px] text-slate-200 mt-1">
-            Criada em <span className="font-medium">{formattedDate}</span>
-          </p>
-        </header>
-
-        {/* Mensagens */}
-        <section className="space-y-3">
-          {messages.length === 0 && (
-            <div className="rounded-2xl bg-[#154361] px-4 py-3 text-sm text-slate-50 border border-slate-700/40">
-              Nenhuma mensagem encontrada nesta conversa.
+      {/* Topbar */}
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-[#2b4e69]/90 backdrop-blur">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="h-9 w-9 overflow-hidden rounded-lg bg-white/10 flex items-center justify-center">
+              <Image
+                src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+                alt="Nexus Pública"
+                width={28}
+                height={28}
+                className="rounded"
+              />
             </div>
-          )}
 
-          {messages.map((m) => {
-            const isUser = m.role === "user";
-            return (
-              <div
-                key={m.id}
-                className={`flex ${
-                  isUser ? "justify-start" : "justify-start"
-                }`}
-              >
-                <div
-                  className={
-                    "max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-md border " +
-                    (isUser
-                      ? "bg-[#f8fafc] text-slate-900 border-slate-200"
-                      // 🔹 Bolha da resposta ajustada para #154361
-                      : "bg-[#154361] text-slate-50 border-slate-600/40")
-                  }
-                >
-                  {/* Rótulo (Usuário / Publ.IA) */}
-                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] opacity-70">
-                    {isUser ? "Usuário" : "Publ.IA"}
-                  </div>
-
-                  {/* Conteúdo em Markdown, com margens mais discretas */}
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      p: ({ node, ...props }) => (
-                        <p className="mb-2 last:mb-0" {...props} />
-                      ),
-                      ul: ({ node, ...props }) => (
-                        <ul
-                          className="mb-2 list-disc pl-5 space-y-1"
-                          {...props}
-                        />
-                      ),
-                      ol: ({ node, ...props }) => (
-                        <ol
-                          className="mb-2 list-decimal pl-5 space-y-1"
-                          {...props}
-                        />
-                      ),
-                      li: ({ node, ...props }) => <li {...props} />,
-                      strong: ({ node, ...props }) => (
-                        <strong className="font-semibold" {...props} />
-                      ),
-                      // 🔗 links em nova aba na página pública
-                      a: ({ node, ...props }) => (
-                        <a
-                          {...props}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="underline underline-offset-2 hover:opacity-80"
-                        />
-                      ),
-                    }}
-                  >
-                    {m.content}
-                  </ReactMarkdown>
-                </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold leading-tight">
+                {title}
               </div>
-            );
-          })}
-        </section>
+              <div className="text-[11px] text-slate-200/80 leading-tight">
+                Publ.IA · {formattedDate}
+              </div>
+            </div>
+          </div>
+
+          {/* Ações */}
+          <div className="flex items-center gap-2">
+            <CopyConversationButton targetId="share-conversation-content" />
+
+            <a
+              href="https://nexuspublica.com.br/"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="shrink-0 rounded-full bg-white/10 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-white/15"
+            >
+              Conheça NEXUS PÚBLICA
+            </a>
+          </div>
+        </div>
+      </header>
+
+      {/* Conteúdo */}
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        {messages.length === 0 ? (
+          <div className="rounded-2xl bg-white/5 px-4 py-3 text-sm text-slate-50 border border-white/10">
+            Nenhuma mensagem encontrada nesta conversa.
+          </div>
+        ) : (
+          <div id="share-conversation-content">
+            <ChatMessagesList messages={messages} isSending={false} variant="share" />
+          </div>
+        )}
+
+        {/* Rodapé */}
+        <footer className="mt-10 border-t border-white/10 pt-4 text-center text-[11px] text-slate-200/70">
+          Esta é uma visualização pública de uma conversa compartilhada.
+        </footer>
       </div>
     </main>
   );

@@ -91,16 +91,22 @@ export default function LoginPage() {
         </div>
       </form>
 
+      {/* ✅ DIVISÓRIA entre Entrar e Criar Conta */}
+      <div className="my-6 h-px w-full bg-slate-200" />
+
       {/* BLOCO: ainda não é cadastrado? */}
-      <div className="mt-4 text-center text-sm text-slate-700">
-        Ainda não é cadastrado?{" "}
+      <div className="text-center">
+        <div className="text-[15px] font-bold text-slate-800">
+          Ainda não é cadastrado?
+        </div>
+
         <button
           type="button"
           onClick={handleCreateAccount}
           disabled={creating}
-          className="font-semibold text-blue-600 hover:text-blue-700 underline disabled:opacity-60"
+          className="mt-3 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2 text-[13px] font-extrabold uppercase tracking-wide text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
         >
-          {creating ? "Abrindo cadastro..." : "Criar conta agora"}
+          {creating ? "ABRINDO CADASTRO..." : "CRIAR CONTA AGORA"}
         </button>
       </div>
     </AuthShell>
