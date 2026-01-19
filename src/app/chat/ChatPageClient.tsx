@@ -11,17 +11,11 @@ import { ChatEmptyState } from "./components/ChatEmptyState";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage, ChatMessagesList } from "./components/ChatMessagesList";
 
-// ------------------------------------------------------
-// Tipos de props
-// ------------------------------------------------------
 type ChatPageClientProps = {
   userId: string;
-  userLabel: string; // CPF/CNPJ (ou placeholder)
+  userLabel: string;
 };
 
-// ------------------------------------------------------
-// Helper: converter markdown em texto simples (fallback)
-// ------------------------------------------------------
 function markdownToPlainText(markdown: string): string {
   let text = markdown;
 
@@ -40,18 +34,10 @@ function markdownToPlainText(markdown: string): string {
   return text.trim();
 }
 
-// ------------------------------------------------------
-// Config Supabase (valores vêm do .env)
-// ------------------------------------------------------
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-// Limite de tamanho do PDF (em MB)
 const MAX_PDF_SIZE_MB = 48;
 
-// ------------------------------------------------------
-// Tipos
-// ------------------------------------------------------
 type Conversation = {
   id: string;
   title: string | null;
@@ -68,9 +54,6 @@ type AttachedPdf = {
 
 type QuickActionKind = "resumo" | "pontos" | "irregularidade";
 
-// ------------------------------------------------------
-// Helpers SSE (para /api/chat streaming)
-// ------------------------------------------------------
 type SSEParsed =
   | { event: "meta"; data: any }
   | { event: "delta"; data: { text?: string } }
@@ -110,6 +93,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -124,9 +109,12 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const stoppedByUserRef = useRef(false);
+  const streamingAssistantIdRef = useRef<string | null>(null);
 
-  // ✅ Ref do container que realmente rola (resolve o problema no Vercel)
-  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   useEffect(() => {
     return () => {
@@ -134,9 +122,39 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     };
   }, []);
 
-  // ----------------------------------------------------
-  // Carregar conversas ao abrir a página
-  // ----------------------------------------------------
+  function handleStop() {
+    stoppedByUserRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsSending(false);
+
+    const targetId = streamingAssistantIdRef.current;
+
+    setMessages((prev) => {
+      const idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
+
+      const fallbackIdx =
+        idx === -1 ? [...prev].reverse().findIndex((m) => m.role === "assistant") : -1;
+
+      const realIdx = idx !== -1 ? idx : fallbackIdx === -1 ? -1 : prev.length - 1 - fallbackIdx;
+
+      if (realIdx === -1) return prev;
+
+      const m = prev[realIdx];
+      if (m.role !== "assistant") return prev;
+
+      const marker = "\n\n*(Resposta interrompida pelo usuário.)*";
+      const already = (m.content || "").includes("Resposta interrompida pelo usuário");
+
+      const next = [...prev];
+      next[realIdx] = {
+        ...m,
+        content: already ? m.content : (m.content || "").trimEnd() + marker,
+      };
+      return next;
+    });
+  }
+
   useEffect(() => {
     async function loadConversations() {
       try {
@@ -155,7 +173,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         const convs = (data ?? []) as Conversation[];
         setConversations(convs);
 
-        if (convs.length > 0 && !activeConversationId) {
+        if (convs.length > 0 && !activeConversationIdRef.current) {
           setActiveConversationId(convs[0].id);
         }
       } finally {
@@ -167,9 +185,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, userId]);
 
-  // ----------------------------------------------------
-  // Carregar mensagens quando muda a conversa ativa
-  // ----------------------------------------------------
   useEffect(() => {
     if (!activeConversationId) {
       setMessages([]);
@@ -214,9 +229,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     loadMessages();
   }, [activeConversationId, supabase]);
 
-  // ----------------------------------------------------
-  // Conversas
-  // ----------------------------------------------------
   async function createConversation(shouldResetState: boolean = false): Promise<string | null> {
     try {
       const { data, error } = await supabase
@@ -255,11 +267,19 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   }
 
   async function handleNewConversation() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    stoppedByUserRef.current = false;
+    streamingAssistantIdRef.current = null;
+
     await createConversation(true);
     setIsMobileSidebarOpen(false);
   }
 
   function handleSelectConversation(id: string) {
+    stoppedByUserRef.current = false;
+    streamingAssistantIdRef.current = null;
+
     abortRef.current?.abort();
     abortRef.current = null;
 
@@ -292,16 +312,16 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   }
 
   async function ensureConversationId(): Promise<string | null> {
-    if (activeConversationId) return activeConversationId;
+    if (activeConversationIdRef.current) return activeConversationIdRef.current;
     return await createConversation(false);
   }
 
-  // ----------------------------------------------------
-  // Enviar mensagem para IA (streaming SSE)
-  // ----------------------------------------------------
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
     if (!trimmed) return;
+
+    stoppedByUserRef.current = false;
+    streamingAssistantIdRef.current = null;
 
     abortRef.current?.abort();
     abortRef.current = null;
@@ -311,23 +331,15 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
     const tempUserId = `temp-user-${Date.now()}`;
     const tempAssistantId = `temp-assistant-${Date.now() + 1}`;
+    streamingAssistantIdRef.current = tempAssistantId;
 
-    const tempUserMessage: ChatMessage = {
-      id: tempUserId,
-      role: "user",
-      content: trimmed,
-    };
-
-    const tempAssistantMessage: ChatMessage = {
-      id: tempAssistantId,
-      role: "assistant",
-      content: "",
-    };
-
-    setMessages((prev) => [...prev, tempUserMessage, tempAssistantMessage]);
+    setMessages((prev) => [
+      ...prev,
+      { id: tempUserId, role: "user", content: trimmed },
+      { id: tempAssistantId, role: "assistant", content: "" },
+    ]);
     setIsSending(true);
 
-    // Atualiza título
     try {
       const existingConv = conversations.find((c) => c.id === conversationId);
       const isDefaultTitle =
@@ -467,6 +479,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     } finally {
       abortRef.current = null;
       setIsSending(false);
+      streamingAssistantIdRef.current = null;
+      stoppedByUserRef.current = false;
     }
   }
 
@@ -528,9 +542,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     await handleSend(prompt);
   }
 
-  // ----------------------------------------------------
-  // ✅ Copiar resposta (HTML quando possível; fallback p/ texto)
-  // ----------------------------------------------------
   async function handleCopyAnswer(messageId: string) {
     try {
       await copyMessageToClipboard(messageId);
@@ -551,62 +562,50 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
   }
 
-  // ----------------------------------------------------
-  // Compartilhar conversa
-  // ----------------------------------------------------
-  async function handleShareConversation() {
-    if (!activeConversationId) {
-      alert("Nenhuma conversa selecionada.");
+// ----------------------------------------------------
+// ✅ Compartilhar conversa (cria um registro em conversation_shares)
+// ----------------------------------------------------
+async function handleShareConversation(conversationId: string) {
+  if (!conversationId) {
+    alert("Nenhuma conversa selecionada.");
+    return;
+  }
+
+  try {
+    // cria um link novo SEM sobrescrever conversations
+    const { data, error } = await supabase
+      .from("conversation_shares")
+      .insert({ conversation_id: conversationId })
+      .select("share_id")
+      .single();
+
+    if (error) {
+      console.error("Erro ao criar link de compartilhamento:", error.message);
+      alert("Não foi possível compartilhar a conversa.");
       return;
     }
 
-    try {
-      const { data, error } = await supabase
-        .from("conversations")
-        .select("id, is_shared, share_id")
-        .eq("id", activeConversationId)
-        .eq("user_id", userId)
-        .single();
-
-      if (error) {
-        console.error("Erro ao carregar conversa para compartilhar:", error.message);
-        alert("Não foi possível preparar o compartilhamento.");
-        return;
-      }
-
-      let shareId = data.share_id as string | null;
-      if (!shareId) shareId = crypto.randomUUID();
-
-      const { error: updateError } = await supabase
-        .from("conversations")
-        .update({ is_shared: true, share_id: shareId })
-        .eq("id", activeConversationId)
-        .eq("user_id", userId);
-
-      if (updateError) {
-        console.error("Erro ao marcar conversa como compartilhada:", updateError.message);
-        alert("Não foi possível compartilhar a conversa.");
-        return;
-      }
-
-      const url = `${window.location.origin}/p/${shareId}`;
-
-      try {
-        await navigator.clipboard.writeText(url);
-        alert("Link público da conversa copiado para a área de transferência:\n\n" + url);
-      } catch (copyError) {
-        console.error("Erro ao copiar link público:", copyError);
-        window.prompt("Link público da conversa (copie manualmente):", url);
-      }
-    } catch (error) {
-      console.error("Erro inesperado ao compartilhar conversa:", error);
-      alert("Erro inesperado ao compartilhar a conversa.");
+    const shareId = data?.share_id;
+    if (!shareId) {
+      alert("Não foi possível gerar o link de compartilhamento.");
+      return;
     }
-  }
 
-  // ----------------------------------------------------
-  // Upload de PDF (direto no Supabase Storage)
-  // ----------------------------------------------------
+    const url = `${window.location.origin}/p/${shareId}`;
+
+    try {
+      await navigator.clipboard.writeText(url);
+      alert("Link público da conversa copiado:\n\n" + url);
+    } catch (copyError) {
+      console.error("Erro ao copiar link público:", copyError);
+      window.prompt("Link público da conversa (copie manualmente):", url);
+    }
+  } catch (err) {
+    console.error("Erro inesperado ao compartilhar conversa:", err);
+    alert("Erro inesperado ao compartilhar a conversa.");
+  }
+}
+
   function handlePdfButtonClick() {
     fileInputRef.current?.click();
   }
@@ -674,7 +673,6 @@ Organize a resposta em tópicos, com explicações objetivas.
       }
 
       const data = (await res.json()) as { id: string; fileName: string; fileSize: number };
-
       setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
     } catch (error) {
       console.error("Erro inesperado ao enviar PDF:", error);
@@ -692,8 +690,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
   const renderMain = () => (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* ✅ aqui é o container rolável REAL */}
-      <div ref={messagesScrollRef} className="flex-1 overflow-y-auto px-8 py-6">
+      <div className="flex-1 overflow-y-auto px-8 py-6">
         {messages.length > 0 ? (
           <ChatMessagesList
             messages={messages}
@@ -702,8 +699,7 @@ Organize a resposta em tópicos, com explicações objetivas.
             onRegenerateLast={handleRegenerateLast}
             isSending={isSending}
             activePdfName={attachedPdf?.fileName ?? null}
-            // ✅ passa o ref do scroll container (corrige Vercel)
-            scrollContainerRef={messagesScrollRef}
+            activeConversationId={activeConversationId}
           />
         ) : loadingMessages && activeConversationId ? (
           <div className="flex h-full items-center justify-center text-sm text-white">
@@ -800,7 +796,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
           {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
 
-          <ChatInput onSend={handleSend} disabled={isSending} />
+          <ChatInput onSend={handleSend} isSending={isSending} onStop={handleStop} />
         </div>
       </div>
     </div>
@@ -864,7 +860,10 @@ Organize a resposta em tópicos, com explicações objetivas.
           </div>
 
           {isMobileSidebarOpen && (
-            <div className="fixed inset-0 z-30 bg-black/40" onClick={() => setIsMobileSidebarOpen(false)} />
+            <div
+              className="fixed inset-0 z-30 bg-black/40"
+              onClick={() => setIsMobileSidebarOpen(false)}
+            />
           )}
 
           <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>

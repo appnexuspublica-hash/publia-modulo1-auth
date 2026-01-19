@@ -12,6 +12,7 @@ import {
   Children,
   useCallback,
 } from "react";
+import type { RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -26,16 +27,23 @@ type Variant = "chat" | "share";
 
 type ChatMessagesListProps = {
   messages: ChatMessage[];
+
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
-  onShareConversation?: () => void;
+
+  // ✅ recebe o conversationId explicitamente
+  onShareConversation?: (conversationId: string) => void | Promise<void>;
+
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   isSending: boolean;
   activePdfName?: string | null;
 
   variant?: Variant;
 
-  // ✅ container REAL de scroll (passado pelo ChatPageClient)
-  scrollContainerRef?: React.RefObject<HTMLElement | null>;
+  // ✅ conversa ativa
+  activeConversationId?: string | null;
+
+  // ✅ container REAL de scroll
+  scrollContainerRef?: RefObject<HTMLElement | null>;
 };
 
 const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -99,9 +107,7 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
 
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.toLowerCase().endsWith(".xlsx")
-    ? filename
-    : `${filename}.xlsx`;
+  a.download = filename.toLowerCase().endsWith(".xlsx") ? filename : `${filename}.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -230,15 +236,11 @@ const THEME_CHAT: MdTheme = {
   tableClassWide: "min-w-max w-full border-collapse text-[13px]",
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
   theadBg: "bg-white/5",
-  thWide:
-    "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold",
-  thNormal:
-    "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
+  thWide: "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold",
+  thNormal: "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
   tdWide: "whitespace-nowrap border border-white/10 px-3 py-2 align-top",
-  tdNormal:
-    "whitespace-normal break-words border border-white/10 px-3 py-2 align-top",
-  btn:
-    "rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
+  tdNormal: "whitespace-normal break-words border border-white/10 px-3 py-2 align-top",
+  btn: "rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
   pre: "my-3 overflow-x-auto rounded-xl bg-black/20 p-3",
   link: "text-inherit underline underline-offset-2 hover:opacity-80",
 };
@@ -248,15 +250,11 @@ const THEME_SHARE: MdTheme = {
   tableClassWide: "min-w-max w-full border-collapse text-[13px]",
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
   theadBg: "bg-slate-200/10",
-  thWide:
-    "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
-  thNormal:
-    "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  thWide: "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  thNormal: "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
   tdWide: "whitespace-nowrap border border-slate-200/15 px-3 py-2 align-top",
-  tdNormal:
-    "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
-  btn:
-    "rounded-full border border-slate-200/50 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
+  tdNormal: "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
+  btn: "rounded-full border border-slate-200/50 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
   pre: "my-3 overflow-x-auto rounded-xl bg-black/25 p-3",
   link: "text-inherit underline underline-offset-2 hover:opacity-80",
 };
@@ -267,22 +265,17 @@ function useMdTheme() {
 }
 
 // ----------------------------------------------------
-// Contexto por tabela (pra alternar wrap/scroll por colunas)
+// Contexto por tabela
 // ----------------------------------------------------
 const TableLayoutContext = createContext<{ isWide: boolean }>({ isWide: false });
 function useTableLayout() {
   return useContext(TableLayoutContext);
 }
 
-// ----------------------------------------------------
-// Tabela Markdown: downloads abaixo + modo híbrido
-// ----------------------------------------------------
 function tableElementToMatrix(tableEl: HTMLTableElement): string[][] {
   const trs = Array.from(tableEl.querySelectorAll("tr"));
   return trs.map((tr) =>
-    Array.from(tr.querySelectorAll("th,td")).map((cell) =>
-      (cell.textContent ?? "").trim()
-    )
+    Array.from(tr.querySelectorAll("th,td")).map((cell) => (cell.textContent ?? "").trim())
   );
 }
 
@@ -370,9 +363,6 @@ function TableWithDownloads({
   );
 }
 
-// ----------------------------------------------------
-// CSV block: preview em tabela + downloads
-// ----------------------------------------------------
 function CsvPreviewTable({
   rows,
   maxRows = 30,
@@ -479,9 +469,6 @@ function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: str
   );
 }
 
-// ----------------------------------------------------
-// ✅ Fallback (se não passarem ref)
-// ----------------------------------------------------
 function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   if (!el) return null;
 
@@ -489,9 +476,7 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   while (p) {
     const style = window.getComputedStyle(p);
     const overflowY = style.overflowY;
-    const isCandidate =
-      overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
-
+    const isCandidate = overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
     if (isCandidate) return p;
     p = p.parentElement;
   }
@@ -507,6 +492,7 @@ export function ChatMessagesList({
   isSending,
   variant = "chat",
   scrollContainerRef,
+  activeConversationId,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -518,7 +504,6 @@ export function ChatMessagesList({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [unread, setUnread] = useState(0);
 
-  // ✅ refs para evitar “briga” durante streaming
   const isAtBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
 
@@ -528,10 +513,8 @@ export function ChatMessagesList({
   const userMessages = messages.filter((m) => m.role === "user");
   const lastTwoUsers = userMessages.slice(-2);
   const isRegeneratedForSameQuestion =
-    lastTwoUsers.length === 2 &&
-    lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
+    lastTwoUsers.length === 2 && lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
-  // ✅ aqui estava o problema: threshold grande + streaming rápido
   const BOTTOM_THRESHOLD_PX = 120;
 
   const computeAtBottom = useCallback((sp: HTMLElement | null) => {
@@ -540,7 +523,6 @@ export function ChatMessagesList({
     return dist <= BOTTOM_THRESHOLD_PX;
   }, []);
 
-  // 1) Define o container rolável e monitora scroll do usuário
   useEffect(() => {
     const forced = scrollContainerRef?.current ?? null;
     const sp = forced ?? getScrollParent(bottomRef.current);
@@ -548,7 +530,6 @@ export function ChatMessagesList({
 
     if (!sp) return;
 
-    // init refs
     lastScrollTopRef.current = sp.scrollTop;
     const initialAtBottom = computeAtBottom(sp);
     isAtBottomRef.current = initialAtBottom;
@@ -560,33 +541,25 @@ export function ChatMessagesList({
       const prevTop = lastScrollTopRef.current;
       lastScrollTopRef.current = top;
 
-      // ✅ se o usuário rolou para CIMA, desliga o stick IMEDIATAMENTE
       const userScrolledUp = top < prevTop - 2;
-
       const atBottomNow = userScrolledUp ? false : computeAtBottom(sp);
 
       isAtBottomRef.current = atBottomNow;
       setIsAtBottom(atBottomNow);
 
-      if (atBottomNow) {
-        setUnread(0);
-      }
+      if (atBottomNow) setUnread(0);
     };
 
     sp.addEventListener("scroll", onScroll, { passive: true });
     return () => sp.removeEventListener("scroll", onScroll);
   }, [computeAtBottom, scrollContainerRef]);
 
-  // 2) Quando chega conteúdo novo:
-  //    - se está no fim -> acompanha
-  //    - se usuário rolou para cima -> NÃO puxa
   useEffect(() => {
     if (!isAtBottomRef.current) {
       setIsAtBottom(false);
-      setUnread((u) => Math.min(u + 1, 99)); // evita explodir no streaming
+      setUnread((u) => Math.min(u + 1, 99));
       return;
     }
-
     bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages, isSending]);
 
@@ -614,11 +587,8 @@ export function ChatMessagesList({
           let tableIndex = 0;
           let csvIndex = 0;
 
-          // bolhas por variante (✅ sem borda)
           const userBubble =
-            variant === "share"
-              ? "bg-[#0d4161] text-white"
-              : "bg-[#1c4561] text-white";
+            variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
 
           const assistantBubble =
             variant === "share"
@@ -628,17 +598,13 @@ export function ChatMessagesList({
           return (
             <div key={msg.id}>
               {showDateDivider && (
-                <div className="my-4 text-[11px] font-semibold text-slate-300">
-                  {dateLabel}
-                </div>
+                <div className="my-4 text-[11px] font-semibold text-slate-300">{dateLabel}</div>
               )}
 
               {isUser ? (
                 <div className="flex justify-start">
                   <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
-                    <p className="whitespace-pre-line text-[14px] leading-relaxed">
-                      {msg.content}
-                    </p>
+                    <p className="whitespace-pre-line text-[14px] leading-relaxed">{msg.content}</p>
                   </div>
                 </div>
               ) : (
@@ -665,15 +631,12 @@ export function ChatMessagesList({
                               className={theme.link}
                             />
                           ),
-
                           hr: () => <div className="my-4 h-px w-full bg-white/20" />,
-
                           p: ({ node, ...props }) => {
                             const txt = extractText((props as any).children);
                             if (!txt.trim()) return null;
                             return <p {...props} />;
                           },
-
                           table: ({ node, ...props }) => {
                             tableIndex += 1;
                             return (
@@ -682,31 +645,15 @@ export function ChatMessagesList({
                               </TableWithDownloads>
                             );
                           },
-
-                          thead: ({ node, ...props }) => (
-                            <thead {...props} className={theme.theadBg} />
-                          ),
-
+                          thead: ({ node, ...props }) => <thead {...props} className={theme.theadBg} />,
                           th: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return (
-                              <th
-                                {...props}
-                                className={isWide ? theme.thWide : theme.thNormal}
-                              />
-                            );
+                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
                           },
-
                           td: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return (
-                              <td
-                                {...props}
-                                className={isWide ? theme.tdWide : theme.tdNormal}
-                              />
-                            );
+                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
                           },
-
                           code: (p: any) => {
                             const { inline, className, children, ...props } = p as any;
 
@@ -733,17 +680,13 @@ export function ChatMessagesList({
                               </code>
                             );
                           },
-
                           pre: ({ node, children, ...props }) => {
                             const arr = Children.toArray(children);
-
                             if (arr.length === 0) return null;
 
                             if (arr.length === 1 && isValidElement(arr[0])) {
                               const el: any = arr[0];
-                              if (typeof el.type !== "string") {
-                                return <>{children}</>;
-                              }
+                              if (typeof el.type !== "string") return <>{children}</>;
                             }
 
                             const txt = extractText(children);
@@ -773,19 +716,32 @@ export function ChatMessagesList({
 
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
-                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
+                          <button
+                            type="button"
+                            onClick={() => onCopyAnswer(msg.id)}
+                            className={theme.btn}
+                          >
                             Copiar
                           </button>
                         )}
 
                         {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
-                          <button type="button" onClick={() => onRegenerateLast(lastUser.content)} className={theme.btn}>
+                          <button
+                            type="button"
+                            onClick={() => onRegenerateLast(lastUser.content)}
+                            className={theme.btn}
+                          >
                             Regenerar
                           </button>
                         )}
 
-                        {onShareConversation && (
-                          <button type="button" onClick={() => onShareConversation()} className={theme.btn}>
+                        {/* ✅ Compartilha SEMPRE a conversa ativa */}
+                        {onShareConversation && activeConversationId && (
+                          <button
+                            type="button"
+                            onClick={() => onShareConversation(activeConversationId)}
+                            className={theme.btn}
+                          >
                             Compartilhar
                           </button>
                         )}
