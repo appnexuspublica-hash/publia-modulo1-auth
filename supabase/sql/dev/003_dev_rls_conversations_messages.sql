@@ -1,3 +1,7 @@
+-- ⚠️ DEV ONLY — NÃO RODAR EM PRODUÇÃO
+-- Este arquivo REMOVE policies seguras e cria policies abertas (using true / with check true).
+-- Use apenas em ambiente local para depuração.
+
 -- MODO DEV: policies abertas para conversas e mensagens
 -- ATENÇÃO: antes de ir para produção, vamos refinar isso.
 

@@ -1,4 +1,4 @@
-﻿// src/app/(auth)/recuperar-senha/ResetForm.tsx
+// src/app/(auth)/recuperar-senha/ResetForm.tsx
 "use client";
 
 import { useFormState, useFormStatus } from "react-dom";

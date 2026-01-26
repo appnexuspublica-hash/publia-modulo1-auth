@@ -93,6 +93,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+
+  // ✅ Ref precisa ficar sincronizado IMEDIATAMENTE (não só via useEffect)
   const activeConversationIdRef = useRef<string | null>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -112,6 +114,16 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const stoppedByUserRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
 
+  // ✅ Toast simples (sem alert / sem janela de compartilhar)
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<any>(null);
+
+  function showToast(msg: string) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast(msg);
+    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+  }
+
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
@@ -119,6 +131,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, []);
 
@@ -174,7 +187,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         setConversations(convs);
 
         if (convs.length > 0 && !activeConversationIdRef.current) {
+          // ✅ sincroniza state + ref juntos
           setActiveConversationId(convs[0].id);
+          activeConversationIdRef.current = convs[0].id;
         }
       } finally {
         setLoadingConversations(false);
@@ -213,7 +228,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         }
 
         const msgs =
-          (data ?? []).map((m) => ({
+          (data ?? []).map((m: any) => ({
             id: m.id as string,
             role: m.role as "user" | "assistant",
             content: m.content as string,
@@ -242,13 +257,16 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
       if (error) {
         console.error("Erro ao criar conversa:", error.message);
-        alert("Não foi possível criar a conversa.");
+        showToast("Não foi possível criar a conversa.");
         return null;
       }
 
       const newConv = data as Conversation;
       setConversations((prev) => [newConv, ...prev]);
+
+      // ✅ sincroniza state + ref juntos
       setActiveConversationId(newConv.id);
+      activeConversationIdRef.current = newConv.id;
 
       justCreatedConversationRef.current = true;
 
@@ -261,7 +279,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       return newConv.id;
     } catch (err) {
       console.error("Erro inesperado ao criar conversa:", err);
-      alert("Erro inesperado ao criar conversa.");
+      showToast("Erro inesperado ao criar conversa.");
       return null;
     }
   }
@@ -283,7 +301,10 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     abortRef.current?.abort();
     abortRef.current = null;
 
+    // ✅ sincroniza state + ref juntos (isso evita “compartilhar a primeira conversa”)
     setActiveConversationId(id);
+    activeConversationIdRef.current = id;
+
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
     setIsMobileSidebarOpen(false);
@@ -297,14 +318,17 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
     if (error) {
       console.error("Erro ao excluir conversa:", error.message);
-      alert("Não foi possível excluir a conversa.");
+      showToast("Não foi possível excluir a conversa.");
       return;
     }
 
     setConversations((prev) => prev.filter((c) => c.id !== id));
 
     if (activeConversationId === id) {
+      // ✅ sincroniza state + ref juntos
       setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+
       setMessages([]);
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
@@ -313,7 +337,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
   async function ensureConversationId(): Promise<string | null> {
     if (activeConversationIdRef.current) return activeConversationIdRef.current;
-    return await createConversation(false);
+    const created = await createConversation(false);
+    return created;
   }
 
   async function handleSend(messageText: string) {
@@ -362,7 +387,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           .update({ title: newTitle })
           .eq("id", conversationId)
           .eq("user_id", userId)
-          .then(({ error }) => {
+          .then(({ error }: any) => {
             if (error) console.error("Erro ao atualizar título:", error.message);
           });
       }
@@ -386,7 +411,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
       if (!res.ok || !res.body) {
         console.error("Erro ao chamar /api/chat:", await res.text());
-        alert("Erro ao enviar mensagem para a IA.");
+        showToast("Erro ao enviar mensagem para a IA.");
         setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
         return;
       }
@@ -466,14 +491,14 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
               prev.map((m) => (m.id === tempAssistantId ? { ...m, content: `Erro: ${msg}` } : m))
             );
 
-            alert(msg);
+            showToast(msg);
           }
         }
       }
     } catch (error: any) {
       if (error?.name !== "AbortError") {
         console.error("Erro inesperado ao enviar mensagem para IA:", error);
-        alert("Erro ao enviar mensagem para a IA.");
+        showToast("Erro ao enviar mensagem para a IA.");
         setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
       }
     } finally {
@@ -490,7 +515,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
   async function handlePdfQuickAction(kind: QuickActionKind) {
     if (!attachedPdf) {
-      alert("Anexe um PDF antes de usar as ações rápidas.");
+      showToast("Anexe um PDF antes de usar as ações rápidas.");
       return;
     }
 
@@ -545,6 +570,7 @@ Organize a resposta em tópicos, com explicações objetivas.
   async function handleCopyAnswer(messageId: string) {
     try {
       await copyMessageToClipboard(messageId);
+      showToast("Resposta copiada.");
       return;
     } catch (err) {
       console.warn("[copy] Falhou HTML copy, tentando fallback texto...", err);
@@ -556,55 +582,58 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       const plainText = markdownToPlainText(msg.content);
       await navigator.clipboard.writeText(plainText);
+      showToast("Resposta copiada.");
     } catch (err) {
       console.error("Erro ao copiar resposta:", err);
-      alert("Não foi possível copiar a resposta.");
+      showToast("Não foi possível copiar a resposta.");
     }
   }
 
-// ----------------------------------------------------
-// ✅ Compartilhar conversa (cria um registro em conversation_shares)
-// ----------------------------------------------------
-async function handleShareConversation(conversationId: string) {
-  if (!conversationId) {
-    alert("Nenhuma conversa selecionada.");
-    return;
-  }
+  // ----------------------------------------------------
+  // ✅ Compartilhar conversa (COPIAR LINK PÚBLICO)
+  // Agora: via FETCH no endpoint do servidor
+  // /api/public/share/create
+  // ----------------------------------------------------
+  async function handleShareConversation(conversationIdFromButton: string) {
+    const targetConversationId =
+      (conversationIdFromButton || "").trim() ||
+      (activeConversationIdRef.current || "").trim() ||
+      (activeConversationId || "").trim();
 
-  try {
-    // cria um link novo SEM sobrescrever conversations
-    const { data, error } = await supabase
-      .from("conversation_shares")
-      .insert({ conversation_id: conversationId })
-      .select("share_id")
-      .single();
-
-    if (error) {
-      console.error("Erro ao criar link de compartilhamento:", error.message);
-      alert("Não foi possível compartilhar a conversa.");
+    if (!targetConversationId) {
+      showToast("Nenhuma conversa selecionada.");
       return;
     }
-
-    const shareId = data?.share_id;
-    if (!shareId) {
-      alert("Não foi possível gerar o link de compartilhamento.");
-      return;
-    }
-
-    const url = `${window.location.origin}/p/${shareId}`;
 
     try {
+      const res = await fetch("/api/public/share/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: targetConversationId }),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        console.error("[share/create] erro:", data);
+        showToast(String(data?.error ?? "Não foi possível gerar o link público."));
+        return;
+      }
+
+      const shareId = String(data?.shareId ?? "").trim();
+      if (!shareId) {
+        showToast("Não foi possível gerar o link público.");
+        return;
+      }
+
+      const url = `${window.location.origin}/p/${shareId}`;
       await navigator.clipboard.writeText(url);
-      alert("Link público da conversa copiado:\n\n" + url);
-    } catch (copyError) {
-      console.error("Erro ao copiar link público:", copyError);
-      window.prompt("Link público da conversa (copie manualmente):", url);
+      showToast("Link público copiado.");
+    } catch (err) {
+      console.error("Erro inesperado ao compartilhar conversa:", err);
+      showToast("Erro inesperado ao gerar link público.");
     }
-  } catch (err) {
-    console.error("Erro inesperado ao compartilhar conversa:", err);
-    alert("Erro inesperado ao compartilhar a conversa.");
   }
-}
 
   function handlePdfButtonClick() {
     fileInputRef.current?.click();
@@ -617,11 +646,7 @@ async function handleShareConversation(conversationId: string) {
     const maxBytes = MAX_PDF_SIZE_MB * 1024 * 1024;
     if (file.size > maxBytes) {
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      alert(
-        `Este PDF tem ${sizeMb} MB e o limite atual é de ${MAX_PDF_SIZE_MB} MB.\n\n` +
-          "Tente dividir o arquivo em partes menores (por exemplo, um PDF por anexo ou por capítulo) " +
-          "e envie novamente."
-      );
+      showToast(`PDF grande (${sizeMb} MB). Limite atual: ${MAX_PDF_SIZE_MB} MB.`);
       e.target.value = "";
       return;
     }
@@ -631,7 +656,7 @@ async function handleShareConversation(conversationId: string) {
     try {
       const conversationId = await ensureConversationId();
       if (!conversationId) {
-        alert("Não foi possível criar uma conversa para vincular o PDF.");
+        showToast("Não foi possível criar uma conversa para vincular o PDF.");
         setIsUploadingPdf(false);
         return;
       }
@@ -649,7 +674,7 @@ async function handleShareConversation(conversationId: string) {
 
       if (storageError || !storageData) {
         console.error("[Chat] Erro ao enviar PDF para o Supabase Storage:", storageError);
-        alert("Não foi possível enviar o PDF para o servidor. Tente novamente em alguns instantes.");
+        showToast("Não foi possível enviar o PDF. Tente novamente.");
         return;
       }
 
@@ -668,15 +693,16 @@ async function handleShareConversation(conversationId: string) {
 
       if (!res.ok) {
         console.error("Erro ao registrar PDF no banco:", await res.text());
-        alert("O arquivo foi enviado, mas não foi possível registrar o PDF no histórico da conversa.");
+        showToast("PDF enviado, mas falhou ao registrar no histórico.");
         return;
       }
 
       const data = (await res.json()) as { id: string; fileName: string; fileSize: number };
       setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
+      showToast("PDF anexado.");
     } catch (error) {
       console.error("Erro inesperado ao enviar PDF:", error);
-      alert("Não foi possível enviar o PDF.");
+      showToast("Não foi possível enviar o PDF.");
     } finally {
       e.target.value = "";
       setIsUploadingPdf(false);
@@ -712,6 +738,13 @@ async function handleShareConversation(conversationId: string) {
 
       <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
         <div className="mx-auto w-full max-w-3xl">
+          {/* ✅ Toast (sem alert) */}
+          {toast && (
+            <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+              {toast}
+            </div>
+          )}
+
           <div className="mb-2 flex flex-wrap items-center gap-3">
             <button
               type="button"

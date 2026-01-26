@@ -1,4 +1,4 @@
-﻿
+
 "use client";
 import { ReactNode } from "react";
 export default function Modal({ open, title, children, onClose }:{open:boolean; title:string; children:ReactNode; onClose:()=>void}){

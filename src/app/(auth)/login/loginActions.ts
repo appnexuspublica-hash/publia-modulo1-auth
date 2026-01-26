@@ -1,10 +1,9 @@
 "use server";
 
 import { z } from "zod";
-import { cookies } from "next/headers";
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { createServerClient } from "@supabase/ssr";
 import { onlyDigits } from "@/lib/validators";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export type LoginState = {
   ok: boolean;
@@ -12,64 +11,22 @@ export type LoginState = {
   redirect?: string;
 };
 
-// Client ADMIN (service role) – apenas para ler profiles
-function admin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !url.startsWith("http")) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL inválida. Confira o .env.local");
-  }
-  if (!service) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY ausente. Confira o .env.local");
-  }
-
-  return createSupabaseClient(url, service, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
-// Client PÚBLICO + COOKIES (SSR) – para autenticar e gravar sessão no navegador
-function pub() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !url.startsWith("http")) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL inválida. Confira o .env.local");
-  }
-  if (!anon) {
-    throw new Error(
-      "NEXT_PUBLIC_SUPABASE_ANON_KEY ausente. Confira o .env.local"
-    );
-  }
-
-  const cookieStore = cookies();
-
-  return createServerClient(url, anon, {
-    cookies: {
-      get(name: string) {
-        return cookieStore.get(name)?.value;
-      },
-      set(name: string, value: string, options: any) {
-        cookieStore.set({ name, value, ...options });
-      },
-      remove(name: string, options: any) {
-        cookieStore.set({ name, value: "", ...options });
-      },
-    },
-  });
-}
-
 const schema = z.object({
-  cpf_cnpj: z
-    .string()
-    .transform((v) => onlyDigits(v))
-    .refine((d) => /^\d+$/.test(d), "Informe apenas números")
-    .refine(
-      (d) => d.length === 11 || d.length === 14,
-      "Informe CPF (11) ou CNPJ (14)"
-    ),
-  senha: z.string().min(1, "Informe sua senha"),
+  cpf_cnpj: z.preprocess(
+    (v) => (typeof v === "string" ? v : ""),
+    z
+      .string()
+      .min(1, "Informe seu CPF ou CNPJ.")
+      .transform((v) => onlyDigits(v))
+      .refine(
+        (v) => v.length === 11 || v.length === 14,
+        "Informe um CPF (11 dígitos) ou CNPJ (14 dígitos)."
+      )
+  ),
+  senha: z.preprocess(
+    (v) => (typeof v === "string" ? v : ""),
+    z.string().min(1, "Informe sua senha.")
+  ),
 });
 
 export async function login(
@@ -77,43 +34,47 @@ export async function login(
   formData: FormData
 ): Promise<LoginState> {
   try {
-    const raw = Object.fromEntries(formData.entries());
-    const { cpf_cnpj, senha } = schema.parse(raw);
-
-    // 1) Buscar e-mail pelo CPF/CNPJ (usando service role)
-    const adm = admin();
-    const { data: prof, error: e1 } = await adm
-      .from("profiles")
-      .select("email")
-      .eq("cpf_cnpj", cpf_cnpj)
-      .maybeSingle();
-
-    if (e1) {
-      console.error("[login] erro ao consultar cadastro", e1);
-      return {
-        ok: false,
-        // DEBUG TEMPORÁRIO – assim sabemos que veio daqui
-        error: `DEBUG LOGIN v2 – erro Supabase ao consultar profiles: ${e1.message}`,
-      };
-    }
-
-    if (!prof?.email) {
-      return { ok: false, error: "CPF/CNPJ não encontrado." };
-    }
-
-    // 2) Autenticar usuário (gravando sessão em cookie via SSR)
-    const client = pub();
-    const { error: e2 } = await client.auth.signInWithPassword({
-      email: prof.email,
-      password: senha,
+    const parsed = schema.parse({
+      cpf_cnpj: formData.get("cpf_cnpj"),
+      senha: formData.get("senha"),
     });
 
-    if (e2) {
-      console.error("[login] erro ao autenticar", e2);
+    // 1) ADMIN: localizar e-mail a partir do cpf/cnpj no profiles
+    const supaAdmin = createSupabaseAdminClient();
+
+    const { data: profile, error: profileErr } = await supaAdmin
+      .from("profiles")
+      .select("email")
+      .eq("cpf_cnpj", parsed.cpf_cnpj)
+      .maybeSingle();
+
+    if (profileErr) {
+      console.error("[login] profiles lookup error", profileErr);
+      return { ok: false, error: "Não foi possível validar seu acesso. Tente novamente." };
+    }
+
+    if (!profile?.email) {
       return { ok: false, error: "Credenciais inválidas." };
     }
 
-    // 3) Sucesso -> devolver redirect para o front
+    // 2) SERVER (cookie-based): autenticar (grava sessão em cookie)
+    const supa = createSupabaseServerClient();
+
+    const { error: signErr } = await supa.auth.signInWithPassword({
+      email: profile.email,
+      password: parsed.senha,
+    });
+
+    if (signErr) {
+      const msg =
+        signErr.message?.toLowerCase().includes("invalid") ||
+        signErr.message?.toLowerCase().includes("credentials")
+          ? "Credenciais inválidas."
+          : "Não foi possível entrar agora.";
+      return { ok: false, error: msg };
+    }
+
+    // 3) Sucesso -> front faz router.push
     return { ok: true, redirect: "/chat" };
   } catch (e: any) {
     console.error("[login] error", e);

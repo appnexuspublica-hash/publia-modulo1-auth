@@ -27,10 +27,9 @@ type Variant = "chat" | "share";
 
 type ChatMessagesListProps = {
   messages: ChatMessage[];
-
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
 
-  // ✅ recebe o conversationId explicitamente
+  // Compartilhar: recebe SEMPRE string
   onShareConversation?: (conversationId: string) => void | Promise<void>;
 
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
@@ -38,11 +37,7 @@ type ChatMessagesListProps = {
   activePdfName?: string | null;
 
   variant?: Variant;
-
-  // ✅ conversa ativa
   activeConversationId?: string | null;
-
-  // ✅ container REAL de scroll
   scrollContainerRef?: RefObject<HTMLElement | null>;
 };
 
@@ -65,9 +60,7 @@ function extractText(node: any): string {
   return "";
 }
 
-// ----------------------------------------------------
-// Helpers: Downloads
-// ----------------------------------------------------
+// Downloads
 function downloadTextFile(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -115,9 +108,7 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// ----------------------------------------------------
-// CSV: parse robusto (aspas, ; ou ,) + heurística
-// ----------------------------------------------------
+// CSV helpers
 function detectDelimiter(text: string): ";" | "," {
   const semi = (text.match(/;/g) || []).length;
   const comma = (text.match(/,/g) || []).length;
@@ -214,9 +205,7 @@ function toCsvFromRows(rows: string[][], delimiter = ";") {
   return rows.map((r) => (r ?? []).map(esc).join(delimiter)).join("\n");
 }
 
-// ----------------------------------------------------
-// Tema visual (chat vs share) + context
-// ----------------------------------------------------
+// Theme
 type MdTheme = {
   tableOuterBorder: string;
   tableClassWide: string;
@@ -264,9 +253,6 @@ function useMdTheme() {
   return useContext(MarkdownThemeContext);
 }
 
-// ----------------------------------------------------
-// Contexto por tabela
-// ----------------------------------------------------
 const TableLayoutContext = createContext<{ isWide: boolean }>({ isWide: false });
 function useTableLayout() {
   return useContext(TableLayoutContext);
@@ -735,16 +721,19 @@ export function ChatMessagesList({
                           </button>
                         )}
 
-                        {/* ✅ Compartilha SEMPRE a conversa ativa */}
-                        {onShareConversation && activeConversationId && (
-                          <button
-                            type="button"
-                            onClick={() => onShareConversation(activeConversationId)}
-                            className={theme.btn}
-                          >
-                            Compartilhar
-                          </button>
-                        )}
+                        {/* Compartilhar só no chat (nunca no share) */}
+                        {variant === "chat" &&
+                          onShareConversation &&
+                          typeof activeConversationId === "string" &&
+                          activeConversationId.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => onShareConversation(activeConversationId)}
+                              className={theme.btn}
+                            >
+                              Compartilhar
+                            </button>
+                          )}
                       </div>
                     </div>
                   )}

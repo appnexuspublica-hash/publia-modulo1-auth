@@ -1,10 +1,10 @@
-// src/app/api/chat/route.ts
 import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 
-import { publiaPrompt } from "@/lib/publiaPrompt"; // ✅ AQUI
+import { publiaPrompt } from "@/lib/publiaPrompt";
+import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 
 export const runtime = "nodejs";
 
@@ -118,6 +118,37 @@ async function getLatestPdfForConversation(
   if (!data[0].storage_path || data[0].storage_path.includes("..")) return null;
 
   return data[0] as PdfFileRow;
+}
+
+async function downloadPdfBuffer(pdfRow: PdfFileRow): Promise<Buffer | null> {
+  if (!supabase) return null;
+  const client = supabase as any;
+
+  const { data: fileData, error } = await client.storage
+    .from("pdf-files")
+    .download(pdfRow.storage_path);
+
+  if (error || !fileData) return null;
+
+  try {
+    return Buffer.from(await fileData.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+async function extractPdfText(buffer: Buffer): Promise<string | null> {
+  try {
+    // ✅ dynamic import pra evitar erro de bundling/default export no Next
+    const mod: any = await import("pdf-parse");
+    const fn: any = mod?.default ?? mod;
+    const parsed = await fn(buffer);
+    const text = (parsed?.text || "").trim();
+    return text || null;
+  } catch (e) {
+    console.warn("[/api/chat] Falha ao extrair texto do PDF (pdf-parse).", e);
+    return null;
+  }
 }
 
 async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
@@ -262,28 +293,54 @@ export async function POST(req: Request) {
 
         send("meta", { userMessage: userMessageRow });
 
-        // 2) pdf
-        let openaiFileId: string | null = null;
+        // 2) PDF: extrai texto -> chunk -> seleciona trechos relevantes
+        let openaiFileId: string | null = null; // fallback: input_file
+        let pdfContext = ""; // preferencial: texto selecionado
+
         const latestPdf = await getLatestPdfForConversation(conversationId, userId!);
 
         if (latestPdf) {
-          if (latestPdf.openai_file_id) {
-            openaiFileId = latestPdf.openai_file_id;
-          } else {
-            const uploadedId = await uploadPdfToOpenAI(latestPdf);
-            if (uploadedId) {
-              openaiFileId = uploadedId;
+          const buf = await downloadPdfBuffer(latestPdf);
+          if (buf) {
+            const textRaw = await extractPdfText(buf);
 
-              await client
-                .from("pdf_files")
-                .update({ openai_file_id: uploadedId } as any)
-                .eq("id", latestPdf.id)
-                .eq("user_id", userId!);
+            if (textRaw) {
+              const HARD_LIMIT = 250_000; // chars
+              const text = textRaw.length > HARD_LIMIT ? textRaw.slice(0, HARD_LIMIT) : textRaw;
+
+              const chunks = chunkText(text, { chunkSize: 1400, overlap: 200, maxChunks: 400 });
+              const picked = pickRelevantChunks(chunks, message, {
+                maxChunks: 6,
+                maxChars: 9000,
+                minScore: 1,
+              });
+
+              pdfContext = picked
+                .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
+                .join("\n\n---\n\n");
+            }
+          }
+
+          // fallback: se não extrair texto, usa input_file (OpenAI) como antes
+          if (!pdfContext) {
+            if (latestPdf.openai_file_id) {
+              openaiFileId = latestPdf.openai_file_id;
+            } else {
+              const uploadedId = await uploadPdfToOpenAI(latestPdf);
+              if (uploadedId) {
+                openaiFileId = uploadedId;
+
+                await client
+                  .from("pdf_files")
+                  .update({ openai_file_id: uploadedId } as any)
+                  .eq("id", latestPdf.id)
+                  .eq("user_id", userId!);
+              }
             }
           }
         }
 
-        // 3) monta contexto
+        // 3) monta contexto (histórico + pergunta + PDF selecionado)
         let combinedText = message.trim();
 
         if (historyRows.length > 0) {
@@ -301,8 +358,16 @@ export async function POST(req: Request) {
             message.trim();
         }
 
-        const MAX_CHARS = 12000;
-        if (combinedText.length > MAX_CHARS) combinedText = combinedText.slice(-MAX_CHARS);
+        if (pdfContext) {
+          combinedText =
+            "CONTEXTO DO PDF (trechos selecionados; se não estiver aqui, diga que não encontrou no PDF):\n\n" +
+            pdfContext +
+            "\n\n" +
+            combinedText;
+        }
+
+        const MAX_TOTAL_CHARS = 18000;
+        if (combinedText.length > MAX_TOTAL_CHARS) combinedText = combinedText.slice(-MAX_TOTAL_CHARS);
 
         const userContent: any[] = [{ type: "input_text", text: combinedText }];
 
@@ -317,11 +382,10 @@ export async function POST(req: Request) {
         const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
         const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
-        // ✅ usa o prompt importado
         const responseStream = await openai.responses.create({
           model,
           instructions: publiaPrompt,
-          tools: [{ type: "web_search_preview" }], // ✅ corrige TS "never"
+          tools: [{ type: "web_search_preview" }],
           input,
           stream: true,
         } as any);

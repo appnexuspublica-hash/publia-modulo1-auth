@@ -1,4 +1,4 @@
-// src/lib/publiaPrompt.ts// src/lib/publiaPrompt.ts
+// src/lib/publiaPrompt.ts// 
 export const publiaPrompt = `
 System Instructions - Versão Aprimorada - 19/01/2026
 1. APRESENTAÇÃO E IDENTIDADE

@@ -33,19 +33,19 @@ export default function SignupForm({ token, tokenOk }: Props) {
 
   return (
     <form action={formAction} className="space-y-4">
-      {/* Token vem da URL e é enviado escondido para a server action */}
+      {/* Token vem da URL e ï¿½ enviado escondido para a server action */}
       <input type="hidden" name="tk" value={token} />
 
-      {/* Token inválido (verificado no server e no client) */}
+      {/* Token invï¿½lido (verificado no server e no client) */}
       {!tokenOk && (
         <Alert
           variant="error"
-          title="Cadastro bloqueado. Token inválido."
-          message="Use o link oficial enviado pela Nexus Pública para criar sua conta."
+          title="Cadastro bloqueado. Token invï¿½lido."
+          message="Use o link oficial enviado pela Nexus Pï¿½blica para criar sua conta."
         />
       )}
 
-      {/* Erro retornado pela server action (quando o token é válido) */}
+      {/* Erro retornado pela server action (quando o token ï¿½ vï¿½lido) */}
       {state?.error && tokenOk && (
         <Alert variant="error" title={state.error ?? "Erro ao cadastrar."} />
       )}
@@ -59,10 +59,10 @@ export default function SignupForm({ token, tokenOk }: Props) {
         disabled={blocked}
       />
 
-      {/* Nome / Razão Social */}
+      {/* Nome / Razï¿½o Social */}
       <AuthInput
         name="nome"
-        label="Nome / Razão Social"
+        label="Nome / Razï¿½o Social"
         placeholder="Seu nome completo"
         required
         disabled={blocked}
@@ -91,7 +91,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
       <AuthInput
         name="cidade_uf"
         label="Cidade/UF"
-        placeholder="Santana do Itararé/PR"
+        placeholder="Santana do Itararï¿½/PR"
         required
         disabled={blocked}
       />
@@ -99,7 +99,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
       {/* Senha */}
       <AuthPasswordInput
         name="senha"
-        label="Senha (mínimo 8)"
+        label="Senha (mï¿½nimo 8)"
         placeholder="Digite uma senha segura"
         required
         disabled={blocked}

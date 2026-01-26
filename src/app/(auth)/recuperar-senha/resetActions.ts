@@ -14,12 +14,12 @@ const schema = z.object({
   cpf_cnpj: z
     .string()
     .transform((v) => onlyDigits(v))
-    .refine((d) => /^\d+$/.test(d), "Informe apenas números")
+    .refine((d) => /^\d+$/.test(d), "Informe apenas nï¿½meros")
     .refine((d) => d.length === 11 || d.length === 14, "Informe CPF (11) ou CNPJ (14)"),
   senha: z.string().min(8, "A senha precisa ter 8+ caracteres"),
-  confirm: z.string().min(8, "A confirmação precisa ter 8+ caracteres"),
+  confirm: z.string().min(8, "A confirmaï¿½ï¿½o precisa ter 8+ caracteres"),
 }).refine((data) => data.senha === data.confirm, {
-  message: "As senhas não conferem",
+  message: "As senhas nï¿½o conferem",
   path: ["confirm"],
 });
 
@@ -38,20 +38,20 @@ export async function resetAction(prevState: any, formData: FormData) {
       .maybeSingle();
 
     if (e1) return { ok: false, error: "Falha ao consultar cadastro." };
-    if (!prof?.user_id) return { ok: false, error: "CPF/CNPJ não encontrado." };
+    if (!prof?.user_id) return { ok: false, error: "CPF/CNPJ nï¿½o encontrado." };
 
-    // atualizar a senha do usuário (admin)
+    // atualizar a senha do usuï¿½rio (admin)
     const { error: e2 } = await supa.auth.admin.updateUserById(prof.user_id, {
       password: senha,
     });
-    if (e2) return { ok: false, error: "Não foi possível atualizar a senha." };
+    if (e2) return { ok: false, error: "Nï¿½o foi possï¿½vel atualizar a senha." };
 
-    return { ok: true, message: "Senha cadastrada com sucesso. Você já pode fazer login." };
+    return { ok: true, message: "Senha cadastrada com sucesso. Vocï¿½ jï¿½ pode fazer login." };
   } catch (e: any) {
     if (e instanceof ZodError) {
-      const msg = e.issues?.[0]?.message || "Dados inválidos.";
+      const msg = e.issues?.[0]?.message || "Dados invï¿½lidos.";
       return { ok: false, error: msg };
     }
-    return { ok: false, error: "Não foi possível processar sua solicitação agora." };
+    return { ok: false, error: "Nï¿½o foi possï¿½vel processar sua solicitaï¿½ï¿½o agora." };
   }
 }

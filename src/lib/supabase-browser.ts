@@ -1,4 +1,4 @@
-﻿// src/lib/supabase-browser.ts
+// src/lib/supabase-browser.ts
 import { createClient } from "@supabase/supabase-js";
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
