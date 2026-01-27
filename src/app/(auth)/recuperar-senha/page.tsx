@@ -53,13 +53,13 @@ export default function RecuperarSenhaPage() {
   return (
     <AuthShell
       title="Recuperar senha"
-      subtitle="Informe seu CPF/CNPJ para receber instruções de recuperação."
+      subtitle="Informe o CPF/CNPJ para receber no e-mail cadastrado link de redefinição de senha."
     >
       {error && <Alert type="error">{error}</Alert>}
 
       {status === "ok" && (
         <Alert type="success">
-          Se existir uma conta para este CPF/CNPJ, enviaremos instruções em instantes.
+          Enviamos para o e-mail cadastrado instruções para redefinir nova senha de acesso. Pode levar alguns instantes ou mesmo cair no spam. 
         </Alert>
       )}
 
@@ -76,7 +76,7 @@ export default function RecuperarSenhaPage() {
           disabled={status === "loading"}
           className="w-full rounded-xl bg-[#0d4161] px-4 py-2 text-sm font-semibold uppercase text-white hover:opacity-95 disabled:opacity-60"
         >
-          {status === "loading" ? "Enviando..." : "Enviar instruções"}
+          {status === "loading" ? "Enviando..." : "Solicitar Redefinição de Senha"}
         </button>
       </form>
 
