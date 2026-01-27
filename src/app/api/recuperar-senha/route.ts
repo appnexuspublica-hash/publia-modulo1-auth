@@ -10,15 +10,25 @@ const schema = z.object({
 });
 
 function getOrigin(req: Request) {
-  const url = new URL(req.url);
-  return `${url.protocol}//${url.host}`;
+  // ✅ Robusto para Vercel/Proxy:
+  // - Em produção, use x-forwarded-proto/host para obter o domínio público
+  // - Em dev, cai no host do próprio request
+  const proto = req.headers.get("x-forwarded-proto") ?? "https";
+  const host =
+    req.headers.get("x-forwarded-host") ??
+    req.headers.get("host") ??
+    new URL(req.url).host;
+
+  return `${proto}://${host}`;
 }
 
 function getClientIp(req: Request) {
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
+
   const rip = req.headers.get("x-real-ip");
   if (rip) return rip.trim();
+
   return "unknown";
 }
 
@@ -44,8 +54,8 @@ export async function POST(req: Request) {
     }
 
     // (1) Rate limit BEST-EFFORT no seu banco (evita estourar limite do Supabase)
-    // Reaproveita a função check_rate_limit que você já arrumou:
-    //  - 5 tentativas / 15 minutos por IP
+    // Reaproveita a função check_rate_limit:
+    // - 5 tentativas / 15 minutos por IP
     try {
       const admin = createSupabaseAdminClient();
       const ip = getClientIp(req);
@@ -61,7 +71,10 @@ export async function POST(req: Request) {
         const row = Array.isArray(data) ? data[0] : data;
         if (row && row.allowed === false) {
           return NextResponse.json(
-            { ok: false, error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." },
+            {
+              ok: false,
+              error: "Muitas tentativas. Aguarde alguns minutos e tente novamente.",
+            },
             { status: 429 }
           );
         }
@@ -113,10 +126,11 @@ export async function POST(req: Request) {
     const origin = getOrigin(req);
     const redirectTo = `${origin}/atualizar-senha`;
 
-    const { error: e2 } = await supa.auth.resetPasswordForEmail(email, { redirectTo });
+    const { error: e2 } = await supa.auth.resetPasswordForEmail(email, {
+      redirectTo,
+    });
 
     if (e2) {
-      // Agora você ENXERGA o erro no front
       console.error("[recuperar-senha] resetPasswordForEmail error:", e2);
 
       const code = (e2 as any)?.code;
@@ -124,21 +138,37 @@ export async function POST(req: Request) {
       // rate limit do próprio Supabase
       if (code === "over_email_send_rate_limit") {
         return NextResponse.json(
-          { ok: false, error: "Limite de envio de e-mail excedido. Aguarde alguns minutos e tente novamente." },
+          {
+            ok: false,
+            error:
+              "Limite de envio de e-mail excedido. Aguarde alguns minutos e tente novamente.",
+          },
           { status: 429 }
         );
       }
 
       // redirect_to não permitido (muito comum se não estiver nas Redirect URLs do Supabase)
-      if (String((e2 as any)?.message || "").toLowerCase().includes("redirect")) {
+      if (
+        String((e2 as any)?.message || "")
+          .toLowerCase()
+          .includes("redirect")
+      ) {
         return NextResponse.json(
-          { ok: false, error: "Redirect URL não permitido no Supabase. Verifique Auth → URL Configuration." },
+          {
+            ok: false,
+            error:
+              "Redirect URL não permitido no Supabase. Verifique Auth → URL Configuration.",
+          },
           { status: 500 }
         );
       }
 
       return NextResponse.json(
-        { ok: false, error: "Não foi possível enviar o e-mail agora. Tente novamente em instantes." },
+        {
+          ok: false,
+          error:
+            "Não foi possível enviar o e-mail agora. Tente novamente em instantes.",
+        },
         { status: 500 }
       );
     }
