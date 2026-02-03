@@ -551,7 +551,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       case "resumo":
         prompt = `
 Com base exclusivamente no PDF anexado a esta conversa (${attachedPdf.fileName}). Faça um resumo objetivo e didático, em linguagem simples, destacando:
-
 - Contexto geral do documento;
 - Principais pontos normativos ou orientações;
 - Impactos práticos para a administração pública municipal.
