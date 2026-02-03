@@ -550,7 +550,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     switch (kind) {
       case "resumo":
         prompt = `
-Com base exclusivamente no PDF anexado a esta conversa (${attachedPdf.fileName}). Faça um resumo objetivo e didático, em linguagem simples, destacando:
+Com base no PDF anexado ( ${attachedPdf.fileName} ). Faça um resumo objetivo e didático, em linguagem simples, destacando:
 - Contexto geral do documento;
 - Principais pontos normativos ou orientações;
 - Impactos práticos para a administração pública municipal.
@@ -561,9 +561,7 @@ Organize a resposta em tópicos e parágrafos curtos.
 
       case "pontos":
         prompt = `
-Considerando apenas o conteúdo do PDF anexado a esta conversa (${attachedPdf.fileName}),
-liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
-
+Considerando apenas o conteúdo do PDF anexado ( ${attachedPdf.fileName} ). Liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
 - Obrigações principais;
 - Prazos relevantes;
 - Riscos para a administração pública municipal em caso de descumprimento.
@@ -574,10 +572,8 @@ Explique de forma clara, em linguagem acessível, e organize em tópicos.
 
       case "irregularidade":
         prompt = `
-Com base no conteúdo do PDF anexado a esta conversa (${attachedPdf.fileName}),
-identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção jurídica,
+Com base no conteúdo do PDF anexado ( ${attachedPdf.fileName} ). Identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção jurídica,
 tanto formais quanto materiais, que possam gerar risco para a administração pública municipal.
-
 Aponte:
 - Dispositivos que possam gerar dúvidas ou conflitos com a legislação vigente;
 - Riscos de responsabilização do gestor;
