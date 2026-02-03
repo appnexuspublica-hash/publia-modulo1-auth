@@ -16,6 +16,12 @@ type ChatPageClientProps = {
   userLabel: string;
 };
 
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    String(v ?? "").trim()
+  );
+}
+
 function markdownToPlainText(markdown: string): string {
   let text = markdown;
 
@@ -114,14 +120,24 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const stoppedByUserRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
 
-  // ✅ Toast simples (sem alert / sem janela de compartilhar)
+  // ✅ Toast simples (sem alert) — mantém para erros/avisos gerais
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<any>(null);
+
+  // ✅ Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
+  const [actionToast, setActionToast] = useState<{ messageId: string; text: string } | null>(null);
+  const actionToastTimerRef = useRef<any>(null);
 
   function showToast(msg: string) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast(msg);
     toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+  }
+
+  function showActionToast(messageId: string, text: string) {
+    if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current);
+    setActionToast({ messageId, text });
+    actionToastTimerRef.current = setTimeout(() => setActionToast(null), 2500);
   }
 
   useEffect(() => {
@@ -132,6 +148,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     return () => {
       abortRef.current?.abort();
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current);
     };
   }, []);
 
@@ -187,7 +204,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         setConversations(convs);
 
         if (convs.length > 0 && !activeConversationIdRef.current) {
-          // ✅ sincroniza state + ref juntos
           setActiveConversationId(convs[0].id);
           activeConversationIdRef.current = convs[0].id;
         }
@@ -205,6 +221,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       setMessages([]);
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
+      setActionToast(null);
       return;
     }
 
@@ -213,8 +230,12 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       return;
     }
 
+    // ✅ FIX: evita “descasamento visual”
+    setMessages([]);
+    setLoadingMessages(true);
+    setActionToast(null);
+
     async function loadMessages() {
-      setLoadingMessages(true);
       try {
         const { data, error } = await supabase
           .from("messages")
@@ -264,7 +285,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       const newConv = data as Conversation;
       setConversations((prev) => [newConv, ...prev]);
 
-      // ✅ sincroniza state + ref juntos
       setActiveConversationId(newConv.id);
       activeConversationIdRef.current = newConv.id;
 
@@ -274,6 +294,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         setMessages([]);
         setAttachedPdf(null);
         setShowPdfQuickActions(false);
+        setActionToast(null);
       }
 
       return newConv.id;
@@ -290,6 +311,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     stoppedByUserRef.current = false;
     streamingAssistantIdRef.current = null;
 
+    setActionToast(null);
     await createConversation(true);
     setIsMobileSidebarOpen(false);
   }
@@ -301,13 +323,17 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     abortRef.current?.abort();
     abortRef.current = null;
 
-    // ✅ sincroniza state + ref juntos (isso evita “compartilhar a primeira conversa”)
     setActiveConversationId(id);
     activeConversationIdRef.current = id;
+
+    setMessages([]);
+    setLoadingMessages(true);
 
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
     setIsMobileSidebarOpen(false);
+
+    setActionToast(null);
   }
 
   async function handleDeleteConversation(id: string) {
@@ -325,13 +351,13 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     setConversations((prev) => prev.filter((c) => c.id !== id));
 
     if (activeConversationId === id) {
-      // ✅ sincroniza state + ref juntos
       setActiveConversationId(null);
       activeConversationIdRef.current = null;
 
       setMessages([]);
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
+      setActionToast(null);
     }
   }
 
@@ -540,9 +566,9 @@ Organize a resposta em tópicos e parágrafos curtos.
 Considerando apenas o conteúdo do PDF anexado a esta conversa (${attachedPdf.fileName}),
 liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
 
-- obrigações principais;
-- prazos relevantes;
-- riscos para a administração pública municipal em caso de descumprimento.
+- Obrigações principais;
+- Prazos relevantes;
+- Riscos para a administração pública municipal em caso de descumprimento.
 
 Explique de forma clara, em linguagem acessível, e organize em tópicos.
 `.trim();
@@ -555,9 +581,9 @@ identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção 
 tanto formais quanto materiais, que possam gerar risco para a administração pública municipal.
 
 Aponte:
-- dispositivos que possam gerar dúvidas ou conflitos com a legislação vigente;
-- riscos de responsabilização do gestor;
-- recomendações de cautela.
+- Dispositivos que possam gerar dúvidas ou conflitos com a legislação vigente;
+- Riscos de responsabilização do gestor;
+- Recomendações de cautela.
 
 Organize a resposta em tópicos, com explicações objetivas.
 `.trim();
@@ -570,7 +596,8 @@ Organize a resposta em tópicos, com explicações objetivas.
   async function handleCopyAnswer(messageId: string) {
     try {
       await copyMessageToClipboard(messageId);
-      showToast("Resposta copiada.");
+      // ✅ agora aparece acima dos botões da mensagem
+      showActionToast(messageId, "Resposta copiada.");
       return;
     } catch (err) {
       console.warn("[copy] Falhou HTML copy, tentando fallback texto...", err);
@@ -582,7 +609,9 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       const plainText = markdownToPlainText(msg.content);
       await navigator.clipboard.writeText(plainText);
-      showToast("Resposta copiada.");
+
+      // ✅ agora aparece acima dos botões da mensagem
+      showActionToast(messageId, "Resposta copiada.");
     } catch (err) {
       console.error("Erro ao copiar resposta:", err);
       showToast("Não foi possível copiar a resposta.");
@@ -590,18 +619,19 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   // ----------------------------------------------------
-  // ✅ Compartilhar conversa (COPIAR LINK PÚBLICO)
-  // Agora: via FETCH no endpoint do servidor
-  // /api/public/share/create
+  // ✅ Compartilhar por MENSAGEM (COPIAR LINK PÚBLICO)
+  // Recebe conversationId + messageId (UUIDs)
   // ----------------------------------------------------
-  async function handleShareConversation(conversationIdFromButton: string) {
-    const targetConversationId =
-      (conversationIdFromButton || "").trim() ||
-      (activeConversationIdRef.current || "").trim() ||
-      (activeConversationId || "").trim();
+  async function handleShareConversation(conversationId: string, messageId: string) {
+    const targetConversationId = String(conversationId ?? "").trim();
+    const targetMessageId = String(messageId ?? "").trim();
 
-    if (!targetConversationId) {
-      showToast("Nenhuma conversa selecionada.");
+    if (!targetConversationId || !isUuid(targetConversationId)) {
+      showToast("Conversa inválida para compartilhar.");
+      return;
+    }
+    if (!targetMessageId || !isUuid(targetMessageId)) {
+      showToast("Mensagem inválida para compartilhar.");
       return;
     }
 
@@ -626,11 +656,14 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      const url = `${window.location.origin}/p/${shareId}`;
+      // ✅ link do recorte por mensagem
+      const url = `${window.location.origin}/p/${shareId}?m=${encodeURIComponent(targetMessageId)}`;
       await navigator.clipboard.writeText(url);
-      showToast("Link público copiado.");
+
+      // ✅ agora aparece acima dos botões da mensagem
+      showActionToast(messageId, "Link público copiado.");
     } catch (err) {
-      console.error("Erro inesperado ao compartilhar conversa:", err);
+      console.error("Erro inesperado ao compartilhar:", err);
       showToast("Erro inesperado ao gerar link público.");
     }
   }
@@ -724,8 +757,9 @@ Organize a resposta em tópicos, com explicações objetivas.
             onShareConversation={handleShareConversation}
             onRegenerateLast={handleRegenerateLast}
             isSending={isSending}
-            activePdfName={attachedPdf?.fileName ?? null}
+            variant="chat"
             activeConversationId={activeConversationId}
+            actionToast={actionToast}
           />
         ) : loadingMessages && activeConversationId ? (
           <div className="flex h-full items-center justify-center text-sm text-white">
@@ -738,7 +772,7 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
         <div className="mx-auto w-full max-w-3xl">
-          {/* ✅ Toast (sem alert) */}
+          {/* ✅ Toast (sem alert) — mantém para erros/avisos gerais */}
           {toast && (
             <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
               {toast}
@@ -825,6 +859,8 @@ Organize a resposta em tópicos, com explicações objetivas.
                 </div>
               )}
             </div>
+
+            {/* ✅ Compartilhar foi removido daqui: agora fica junto do "Copiar" nas mensagens */}
           </div>
 
           {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
@@ -893,10 +929,7 @@ Organize a resposta em tópicos, com explicações objetivas.
           </div>
 
           {isMobileSidebarOpen && (
-            <div
-              className="fixed inset-0 z-30 bg-black/40"
-              onClick={() => setIsMobileSidebarOpen(false)}
-            />
+            <div className="fixed inset-0 z-30 bg-black/40" onClick={() => setIsMobileSidebarOpen(false)} />
           )}
 
           <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>

@@ -29,8 +29,8 @@ type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
 
-  // Compartilhar: recebe SEMPRE string
-  onShareConversation?: (conversationId: string) => void | Promise<void>;
+  // ✅ Compartilhar por mensagem (conversationId + messageId)
+  onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
 
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   isSending: boolean;
@@ -39,17 +39,30 @@ type ChatMessagesListProps = {
   variant?: Variant;
   activeConversationId?: string | null;
   scrollContainerRef?: RefObject<HTMLElement | null>;
+
+  // ✅ Toast por mensagem (para aparecer acima dos botões)
+  actionToast?: { messageId: string; text: string } | null;
 };
 
-const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
+const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
   timeZone: "America/Sao_Paulo",
 });
 
-function getDateLabel(created_at?: string): string | null {
+const timeOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Sao_Paulo",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function getUserDateTimeLabel(created_at?: string): string | null {
   if (!created_at) return null;
   const d = new Date(created_at);
   if (Number.isNaN(d.getTime())) return null;
-  return dateFormatter.format(d);
+
+  const date = dateOnlyFormatter.format(d);
+  const time = timeOnlyFormatter.format(d); // 14:53
+  return `${date} - ${time}h`;
 }
 
 function extractText(node: any): string {
@@ -185,11 +198,8 @@ function looksLikeCsvText(textRaw: string): boolean {
   const colsSemi = firstLine.split(";").length;
   const colsComma = firstLine.split(",").length;
 
-  const looksTabular =
-    (colsSemi >= 4 && hasManySemicolons) || (colsComma >= 4 && hasManyCommas);
-
-  const oneHugeLine =
-    !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
+  const looksTabular = (colsSemi >= 4 && hasManySemicolons) || (colsComma >= 4 && hasManyCommas);
+  const oneHugeLine = !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
 
   return looksTabular || oneHugeLine;
 }
@@ -405,6 +415,11 @@ function CsvPreviewTable({
   );
 }
 
+function seeSafeCsv(csvForDownload: string, rows: string[][], delimiter: string) {
+  if ((csvForDownload || "").trim().length > 0) return csvForDownload;
+  return toCsvFromRows(rows, delimiter as any);
+}
+
 function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: string }) {
   const theme = useMdTheme();
   const { delimiter, rows } = useMemo(() => parseCsv(csvText), [csvText]);
@@ -428,7 +443,7 @@ function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: str
           onClick={() =>
             downloadTextFile(
               `${baseName}.csv`,
-              csvForDownload || toCsvFromRows(rows, delimiter as any),
+              seeSafeCsv(csvForDownload, rows, delimiter),
               "text/csv;charset=utf-8"
             )
           }
@@ -479,10 +494,9 @@ export function ChatMessagesList({
   variant = "chat",
   scrollContainerRef,
   activeConversationId,
+  actionToast,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
-
-  let lastDateLabel: string | null = null;
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const scrollParentRef = useRef<HTMLElement | null>(null);
@@ -559,16 +573,19 @@ export function ChatMessagesList({
     if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
+  // ✅ Compartilhar válido somente no chat e somente se tiver conversationId ativo
+  const canShare =
+    variant === "chat" &&
+    typeof activeConversationId === "string" &&
+    activeConversationId.trim().length > 0 &&
+    typeof onShareConversation === "function";
+
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
         {messages.map((msg) => {
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
-
-          const dateLabel = getDateLabel(msg.created_at);
-          const showDateDivider = !!dateLabel && dateLabel !== lastDateLabel;
-          if (showDateDivider) lastDateLabel = dateLabel!;
 
           let tableIndex = 0;
           let csvIndex = 0;
@@ -577,18 +594,19 @@ export function ChatMessagesList({
             variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
 
           const assistantBubble =
-            variant === "share"
-              ? "bg-[#274d69] text-slate-50"
-              : "bg-[#2b4e67] text-slate-50";
+            variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
           return (
             <div key={msg.id}>
-              {showDateDivider && (
-                <div className="my-4 text-[11px] font-semibold text-slate-300">{dateLabel}</div>
-              )}
-
               {isUser ? (
-                <div className="flex justify-start">
+                <div className="flex flex-col items-start">
+                  {/* ✅ Data + hora SOMENTE da pergunta */}
+                  {getUserDateTimeLabel(msg.created_at) && (
+                    <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
+                      {getUserDateTimeLabel(msg.created_at)}
+                    </div>
+                  )}
+
                   <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
                     <p className="whitespace-pre-line text-[14px] leading-relaxed">{msg.content}</p>
                   </div>
@@ -631,14 +649,26 @@ export function ChatMessagesList({
                               </TableWithDownloads>
                             );
                           },
-                          thead: ({ node, ...props }) => <thead {...props} className={theme.theadBg} />,
+                          thead: ({ node, ...props }) => (
+                            <thead {...props} className={theme.theadBg} />
+                          ),
                           th: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
+                            return (
+                              <th
+                                {...props}
+                                className={isWide ? theme.thWide : theme.thNormal}
+                              />
+                            );
                           },
                           td: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
+                            return (
+                              <td
+                                {...props}
+                                className={isWide ? theme.tdWide : theme.tdNormal}
+                              />
+                            );
                           },
                           code: (p: any) => {
                             const { inline, className, children, ...props } = p as any;
@@ -691,7 +721,7 @@ export function ChatMessagesList({
                     </div>
                   </div>
 
-                  {(onCopyAnswer || onShareConversation || onRegenerateLast) && (
+                  {(onCopyAnswer || onRegenerateLast || canShare) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
                       {isLastAssistant && isSending && (
                         <div className="flex items-center gap-2 text-xs text-slate-100">
@@ -699,6 +729,16 @@ export function ChatMessagesList({
                           <span>Gerando resposta...</span>
                         </div>
                       )}
+
+                      {/* ✅ Toast acima dos botões, somente na mensagem alvo */}
+                      {variant === "chat" &&
+                        actionToast &&
+                        actionToast.messageId === msg.id &&
+                        (actionToast.text || "").trim() && (
+                          <div className="mx-auto w-fit rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+                            {actionToast.text}
+                          </div>
+                        )}
 
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
@@ -711,27 +751,26 @@ export function ChatMessagesList({
                           </button>
                         )}
 
-                        {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
+                        {canShare && (
                           <button
                             type="button"
-                            onClick={() => onRegenerateLast(lastUser.content)}
+                            onClick={() => onShareConversation!(activeConversationId!.trim(), msg.id)}
                             className={theme.btn}
                           >
-                            Regenerar
+                            Compartilhar
                           </button>
                         )}
 
-                        {/* Compartilhar só no chat (nunca no share) */}
-                        {variant === "chat" &&
-                          onShareConversation &&
-                          typeof activeConversationId === "string" &&
-                          activeConversationId.trim() && (
+                        {onRegenerateLast &&
+                          lastAssistant &&
+                          lastUser &&
+                          msg.id === lastAssistant.id && (
                             <button
                               type="button"
-                              onClick={() => onShareConversation(activeConversationId)}
+                              onClick={() => onRegenerateLast(lastUser.content)}
                               className={theme.btn}
                             >
-                              Compartilhar
+                              Regenerar
                             </button>
                           )}
                       </div>
