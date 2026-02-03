@@ -550,12 +550,11 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     switch (kind) {
       case "resumo":
         prompt = `
-Com base exclusivamente no PDF anexado a esta conversa (${attachedPdf.fileName}),
-faça um resumo objetivo e didático, em linguagem simples, destacando:
+Com base exclusivamente no PDF anexado a esta conversa (${attachedPdf.fileName}). Faça um resumo objetivo e didático, em linguagem simples, destacando:
 
-- contexto geral do documento;
-- principais pontos normativos ou orientações;
-- impactos práticos para a administração pública municipal.
+- Contexto geral do documento;
+- Principais pontos normativos ou orientações;
+- Impactos práticos para a administração pública municipal.
 
 Organize a resposta em tópicos e parágrafos curtos.
 `.trim();
@@ -844,7 +843,7 @@ Organize a resposta em tópicos, com explicações objetivas.
                     }}
                     className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
                   >
-                    Pontos de Atenção (obrigações, prazos e riscos)
+                    Pontos de Atenção (Obrigações, prazos e riscos)
                   </button>
                   <button
                     type="button"
