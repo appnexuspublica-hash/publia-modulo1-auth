@@ -39,9 +39,6 @@ type ChatMessagesListProps = {
   variant?: Variant;
   activeConversationId?: string | null;
   scrollContainerRef?: RefObject<HTMLElement | null>;
-
-  // ✅ Toast por mensagem (para aparecer acima dos botões)
-  actionToast?: { messageId: string; text: string } | null;
 };
 
 const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -71,21 +68,6 @@ function extractText(node: any): string {
   if (Array.isArray(node)) return node.map(extractText).join("");
   if (isValidElement(node)) return extractText((node as any).props?.children);
   return "";
-}
-
-// Downloads
-function downloadTextFile(filename: string, content: string, mime: string) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-
-  URL.revokeObjectURL(url);
 }
 
 function sanitizeFilenameBase(name: string) {
@@ -121,7 +103,7 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// CSV helpers
+// CSV helpers (mantidos apenas para DETECÇÃO e para evitar renderização duplicada)
 function detectDelimiter(text: string): ";" | "," {
   const semi = (text.match(/;/g) || []).length;
   const comma = (text.match(/,/g) || []).length;
@@ -202,17 +184,6 @@ function looksLikeCsvText(textRaw: string): boolean {
   const oneHugeLine = !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
 
   return looksTabular || oneHugeLine;
-}
-
-function toCsvFromRows(rows: string[][], delimiter = ";") {
-  const esc = (v: string) => {
-    const s = (v ?? "").toString();
-    if (s.includes('"') || s.includes("\n") || s.includes(delimiter)) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  };
-  return rows.map((r) => (r ?? []).map(esc).join(delimiter)).join("\n");
 }
 
 // Theme
@@ -322,21 +293,8 @@ function TableWithDownloads({
           </div>
         </div>
 
+        {/* ✅ Apenas Excel (renomeado) */}
         <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
-          <button
-            type="button"
-            onClick={() => {
-              const el = tableRef.current;
-              if (!el) return;
-              const matrix = tableElementToMatrix(el);
-              const csv = toCsvFromRows(matrix, ";");
-              downloadTextFile(`tabela-${index}.csv`, csv, "text/csv;charset=utf-8");
-            }}
-            className={theme.btn}
-          >
-            Baixar CSV
-          </button>
-
           <button
             type="button"
             onClick={async () => {
@@ -351,122 +309,11 @@ function TableWithDownloads({
             }}
             className={theme.btn}
           >
-            Baixar Excel
+            Baixar Tabela/Planilha
           </button>
         </div>
       </div>
     </TableLayoutContext.Provider>
-  );
-}
-
-function CsvPreviewTable({
-  rows,
-  maxRows = 30,
-  maxCols = 18,
-}: {
-  rows: string[][];
-  maxRows?: number;
-  maxCols?: number;
-}) {
-  const theme = useMdTheme();
-  if (!rows || rows.length === 0) return null;
-
-  const head = rows[0] ?? [];
-  const body = rows.slice(1);
-
-  const clippedHead = head.slice(0, maxCols);
-  const clippedBody = body.slice(0, maxRows).map((r) => (r ?? []).slice(0, maxCols));
-
-  const isWide = (head?.length ?? 0) >= 8;
-
-  return (
-    <div className={isWide ? "w-full overflow-x-auto" : "w-full overflow-hidden"}>
-      <table className={isWide ? theme.tableClassWide : theme.tableClassNormal}>
-        <thead className={theme.theadBg}>
-          <tr>
-            {clippedHead.map((h, i) => (
-              <th key={i} className={isWide ? theme.thWide : theme.thNormal}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-
-        <tbody>
-          {clippedBody.map((r, ri) => (
-            <tr key={ri}>
-              {r.map((c, ci) => (
-                <td key={ci} className={isWide ? theme.tdWide : theme.tdNormal}>
-                  {c}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      {(rows.length - 1 > maxRows || head.length > maxCols) && (
-        <div className="mt-2 px-1 text-[11px] text-slate-200/80">
-          Mostrando prévia ({Math.min(rows.length - 1, maxRows)} linhas /{" "}
-          {Math.min(head.length, maxCols)} colunas). Baixe para ver completo.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function seeSafeCsv(csvForDownload: string, rows: string[][], delimiter: string) {
-  if ((csvForDownload || "").trim().length > 0) return csvForDownload;
-  return toCsvFromRows(rows, delimiter as any);
-}
-
-function CsvBlockWithDownloads({ index, csvText }: { index: number; csvText: string }) {
-  const theme = useMdTheme();
-  const { delimiter, rows } = useMemo(() => parseCsv(csvText), [csvText]);
-
-  if (!rows || rows.length === 0) return null;
-
-  const baseName = sanitizeFilenameBase(`planilha-${index}`);
-  const csvForDownload = (csvText || "").trim();
-
-  return (
-    <div className="my-3 w-full">
-      <div className={theme.tableOuterBorder}>
-        <div className="px-3 py-3">
-          <CsvPreviewTable rows={rows} />
-        </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
-        <button
-          type="button"
-          onClick={() =>
-            downloadTextFile(
-              `${baseName}.csv`,
-              seeSafeCsv(csvForDownload, rows, delimiter),
-              "text/csv;charset=utf-8"
-            )
-          }
-          className={theme.btn}
-        >
-          Baixar CSV
-        </button>
-
-        <button
-          type="button"
-          onClick={async () => {
-            try {
-              await downloadXlsxFromRows(rows, `${baseName}.xlsx`);
-            } catch (e: any) {
-              alert(e?.message || "Erro ao gerar Excel.");
-            }
-          }}
-          className={theme.btn}
-        >
-          Baixar Excel
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -494,7 +341,6 @@ export function ChatMessagesList({
   variant = "chat",
   scrollContainerRef,
   activeConversationId,
-  actionToast,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -588,7 +434,7 @@ export function ChatMessagesList({
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
           let tableIndex = 0;
-          let csvIndex = 0;
+          let csvIndex = 0; // mantido (mesmo que agora não renderize), para não quebrar lógica futura
 
           const userBubble =
             variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
@@ -649,27 +495,17 @@ export function ChatMessagesList({
                               </TableWithDownloads>
                             );
                           },
-                          thead: ({ node, ...props }) => (
-                            <thead {...props} className={theme.theadBg} />
-                          ),
+                          thead: ({ node, ...props }) => <thead {...props} className={theme.theadBg} />,
                           th: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return (
-                              <th
-                                {...props}
-                                className={isWide ? theme.thWide : theme.thNormal}
-                              />
-                            );
+                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
                           },
                           td: ({ node, ...props }) => {
                             const { isWide } = useTableLayout();
-                            return (
-                              <td
-                                {...props}
-                                className={isWide ? theme.tdWide : theme.tdNormal}
-                              />
-                            );
+                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
                           },
+
+                          // ✅ NÃO renderizar blocos CSV (evita duplicar tabela / preview)
                           code: (p: any) => {
                             const { inline, className, children, ...props } = p as any;
 
@@ -680,14 +516,9 @@ export function ChatMessagesList({
                             const disguisedCsv =
                               !inline && (!lang || lang === "text") && looksLikeCsvText(text);
 
-                            if (!inline && lang === "csv") {
+                            if (!inline && (lang === "csv" || disguisedCsv)) {
                               csvIndex += 1;
-                              return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
-                            }
-
-                            if (!inline && disguisedCsv) {
-                              csvIndex += 1;
-                              return <CsvBlockWithDownloads index={csvIndex} csvText={text} />;
+                              return null; // ✅ remove totalmente (sem preview)
                             }
 
                             return (
@@ -696,13 +527,26 @@ export function ChatMessagesList({
                               </code>
                             );
                           },
+
+                          // ✅ elimina o “balão vazio” quando o pre era só CSV
                           pre: ({ node, children, ...props }) => {
                             const arr = Children.toArray(children);
                             if (arr.length === 0) return null;
 
+                            // Se for um único <code> dentro do <pre>, checar se era CSV
                             if (arr.length === 1 && isValidElement(arr[0])) {
                               const el: any = arr[0];
-                              if (typeof el.type !== "string") return <>{children}</>;
+                              const className = String(el?.props?.className ?? "");
+                              const match = /language-(\w+)/.exec(className);
+                              const lang = match?.[1]?.toLowerCase();
+
+                              const raw = String(el?.props?.children ?? "");
+                              const disguisedCsv =
+                                (!lang || lang === "text") && looksLikeCsvText(raw);
+
+                              if (lang === "csv" || disguisedCsv) {
+                                return null; // ✅ remove o bloco pre inteiro
+                              }
                             }
 
                             const txt = extractText(children);
@@ -730,23 +574,9 @@ export function ChatMessagesList({
                         </div>
                       )}
 
-                      {/* ✅ Toast acima dos botões, somente na mensagem alvo */}
-                      {variant === "chat" &&
-                        actionToast &&
-                        actionToast.messageId === msg.id &&
-                        (actionToast.text || "").trim() && (
-                          <div className="mx-auto w-fit rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
-                            {actionToast.text}
-                          </div>
-                        )}
-
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
-                          <button
-                            type="button"
-                            onClick={() => onCopyAnswer(msg.id)}
-                            className={theme.btn}
-                          >
+                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
                             Copiar
                           </button>
                         )}
@@ -761,18 +591,15 @@ export function ChatMessagesList({
                           </button>
                         )}
 
-                        {onRegenerateLast &&
-                          lastAssistant &&
-                          lastUser &&
-                          msg.id === lastAssistant.id && (
-                            <button
-                              type="button"
-                              onClick={() => onRegenerateLast(lastUser.content)}
-                              className={theme.btn}
-                            >
-                              Regenerar
-                            </button>
-                          )}
+                        {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
+                          <button
+                            type="button"
+                            onClick={() => onRegenerateLast(lastUser.content)}
+                            className={theme.btn}
+                          >
+                            Regenerar
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
