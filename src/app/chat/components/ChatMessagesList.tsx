@@ -39,6 +39,9 @@ type ChatMessagesListProps = {
   variant?: Variant;
   activeConversationId?: string | null;
   scrollContainerRef?: RefObject<HTMLElement | null>;
+
+  // ✅ Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
+  actionToast?: { messageId: string; text: string } | null;
 };
 
 const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -70,14 +73,7 @@ function extractText(node: any): string {
   return "";
 }
 
-function sanitizeFilenameBase(name: string) {
-  return (name || "planilha")
-    .normalize("NFKD")
-    .replace(/[^\w.-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
+// XLSX export (via API)
 async function downloadXlsxFromRows(rows: string[][], filename: string) {
   const res = await fetch("/api/export-xlsx", {
     method: "POST",
@@ -103,90 +99,6 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// CSV helpers (mantidos apenas para DETECÇÃO e para evitar renderização duplicada)
-function detectDelimiter(text: string): ";" | "," {
-  const semi = (text.match(/;/g) || []).length;
-  const comma = (text.match(/,/g) || []).length;
-  return semi >= comma ? ";" : ",";
-}
-
-function parseCsv(csvTextRaw: string): { delimiter: string; rows: string[][] } {
-  const csvText = (csvTextRaw || "").replace(/\r\n/g, "\n").trim();
-  if (!csvText) return { delimiter: ";", rows: [] };
-
-  const delimiter = detectDelimiter(csvText);
-
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < csvText.length; i++) {
-    const ch = csvText[i];
-
-    if (inQuotes) {
-      if (ch === '"') {
-        const next = csvText[i + 1];
-        if (next === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += ch;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inQuotes = true;
-      continue;
-    }
-
-    if (ch === delimiter) {
-      row.push(field);
-      field = "";
-      continue;
-    }
-
-    if (ch === "\n") {
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = "";
-      continue;
-    }
-
-    field += ch;
-  }
-
-  row.push(field);
-  rows.push(row);
-
-  const cleaned = rows.filter((r) => r.some((c) => (c ?? "").trim() !== ""));
-  return { delimiter, rows: cleaned };
-}
-
-function looksLikeCsvText(textRaw: string): boolean {
-  const text = (textRaw || "").trim();
-  if (!text) return false;
-
-  const hasManySemicolons = (text.match(/;/g) || []).length >= 6;
-  const hasManyCommas = (text.match(/,/g) || []).length >= 8;
-
-  const hasNewline = text.includes("\n");
-  const firstLine = text.split("\n")[0] || "";
-  const colsSemi = firstLine.split(";").length;
-  const colsComma = firstLine.split(",").length;
-
-  const looksTabular = (colsSemi >= 4 && hasManySemicolons) || (colsComma >= 4 && hasManyCommas);
-  const oneHugeLine = !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
-
-  return looksTabular || oneHugeLine;
-}
-
-// Theme
 type MdTheme = {
   tableOuterBorder: string;
   tableClassWide: string;
@@ -293,7 +205,7 @@ function TableWithDownloads({
           </div>
         </div>
 
-        {/* ✅ Apenas Excel (renomeado) */}
+        {/* ✅ Só manter “Excel”, com texto “Baixar Tabela/Planilha” */}
         <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
           <button
             type="button"
@@ -315,6 +227,25 @@ function TableWithDownloads({
       </div>
     </TableLayoutContext.Provider>
   );
+}
+
+// Mantém detecção, mas vamos “ocultar” o CSV para não duplicar tabelas.
+function looksLikeCsvText(textRaw: string): boolean {
+  const text = (textRaw || "").trim();
+  if (!text) return false;
+
+  const hasManySemicolons = (text.match(/;/g) || []).length >= 6;
+  const hasManyCommas = (text.match(/,/g) || []).length >= 8;
+
+  const hasNewline = text.includes("\n");
+  const firstLine = text.split("\n")[0] || "";
+  const colsSemi = firstLine.split(";").length;
+  const colsComma = firstLine.split(",").length;
+
+  const looksTabular = (colsSemi >= 4 && hasManySemicolons) || (colsComma >= 4 && hasManyCommas);
+  const oneHugeLine = !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
+
+  return looksTabular || oneHugeLine;
 }
 
 function getScrollParent(el: HTMLElement | null): HTMLElement | null {
@@ -341,6 +272,7 @@ export function ChatMessagesList({
   variant = "chat",
   scrollContainerRef,
   activeConversationId,
+  actionToast,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -419,7 +351,6 @@ export function ChatMessagesList({
     if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
-  // ✅ Compartilhar válido somente no chat e somente se tiver conversationId ativo
   const canShare =
     variant === "chat" &&
     typeof activeConversationId === "string" &&
@@ -434,7 +365,6 @@ export function ChatMessagesList({
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
           let tableIndex = 0;
-          let csvIndex = 0; // mantido (mesmo que agora não renderize), para não quebrar lógica futura
 
           const userBubble =
             variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
@@ -442,11 +372,13 @@ export function ChatMessagesList({
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
+          const showThisActionToast =
+            !!actionToast && actionToast.messageId === msg.id && (actionToast.text || "").trim().length > 0;
+
           return (
             <div key={msg.id}>
               {isUser ? (
                 <div className="flex flex-col items-start">
-                  {/* ✅ Data + hora SOMENTE da pergunta */}
                   {getUserDateTimeLabel(msg.created_at) && (
                     <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
                       {getUserDateTimeLabel(msg.created_at)}
@@ -505,10 +437,9 @@ export function ChatMessagesList({
                             return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
                           },
 
-                          // ✅ NÃO renderizar blocos CSV (evita duplicar tabela / preview)
+                          // ✅ NÃO renderizar CSV (evita duplicar tabelas)
                           code: (p: any) => {
                             const { inline, className, children, ...props } = p as any;
-
                             const text = String(children ?? "");
                             const match = /language-(\w+)/.exec(className ?? "");
                             const lang = match?.[1]?.toLowerCase();
@@ -517,8 +448,7 @@ export function ChatMessagesList({
                               !inline && (!lang || lang === "text") && looksLikeCsvText(text);
 
                             if (!inline && (lang === "csv" || disguisedCsv)) {
-                              csvIndex += 1;
-                              return null; // ✅ remove totalmente (sem preview)
+                              return null;
                             }
 
                             return (
@@ -528,27 +458,11 @@ export function ChatMessagesList({
                             );
                           },
 
-                          // ✅ elimina o “balão vazio” quando o pre era só CSV
                           pre: ({ node, children, ...props }) => {
                             const arr = Children.toArray(children);
                             if (arr.length === 0) return null;
 
-                            // Se for um único <code> dentro do <pre>, checar se era CSV
-                            if (arr.length === 1 && isValidElement(arr[0])) {
-                              const el: any = arr[0];
-                              const className = String(el?.props?.className ?? "");
-                              const match = /language-(\w+)/.exec(className);
-                              const lang = match?.[1]?.toLowerCase();
-
-                              const raw = String(el?.props?.children ?? "");
-                              const disguisedCsv =
-                                (!lang || lang === "text") && looksLikeCsvText(raw);
-
-                              if (lang === "csv" || disguisedCsv) {
-                                return null; // ✅ remove o bloco pre inteiro
-                              }
-                            }
-
+                            // Se o <pre> contém apenas um <code> CSV (que será null), não renderize o <pre>.
                             const txt = extractText(children);
                             if (!txt.trim()) return null;
 
@@ -567,6 +481,13 @@ export function ChatMessagesList({
 
                   {(onCopyAnswer || onRegenerateLast || canShare) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
+                      {/* ✅ Toast por mensagem (somente quando existir) */}
+                      {showThisActionToast && (
+                        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+                          {actionToast!.text}
+                        </div>
+                      )}
+
                       {isLastAssistant && isSending && (
                         <div className="flex items-center gap-2 text-xs text-slate-100">
                           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
