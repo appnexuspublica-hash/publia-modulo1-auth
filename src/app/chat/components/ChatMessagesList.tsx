@@ -25,6 +25,8 @@ export type ChatMessage = {
 
 type Variant = "chat" | "share";
 
+type ActionToast = { messageId: string; text: string } | null;
+
 type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
@@ -41,7 +43,7 @@ type ChatMessagesListProps = {
   scrollContainerRef?: RefObject<HTMLElement | null>;
 
   // ✅ Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
-  actionToast?: { messageId: string; text: string } | null;
+  actionToast?: ActionToast;
 };
 
 const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -73,7 +75,7 @@ function extractText(node: any): string {
   return "";
 }
 
-// XLSX export (via API)
+// Downloads
 async function downloadXlsxFromRows(rows: string[][], filename: string) {
   const res = await fetch("/api/export-xlsx", {
     method: "POST",
@@ -99,6 +101,7 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
   URL.revokeObjectURL(url);
 }
 
+// Theme
 type MdTheme = {
   tableOuterBorder: string;
   tableClassWide: string;
@@ -205,7 +208,7 @@ function TableWithDownloads({
           </div>
         </div>
 
-        {/* ✅ Só manter “Excel”, com texto “Baixar Tabela/Planilha” */}
+        {/* ✅ Somente 1 botão: Baixar Tabela/Planilha (Excel) */}
         <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
           <button
             type="button"
@@ -216,7 +219,7 @@ function TableWithDownloads({
                 const matrix = tableElementToMatrix(el);
                 await downloadXlsxFromRows(matrix, `tabela-${index}.xlsx`);
               } catch (e: any) {
-                alert(e?.message || "Erro ao gerar Excel.");
+                alert(e?.message || "Erro ao gerar planilha.");
               }
             }}
             className={theme.btn}
@@ -227,25 +230,6 @@ function TableWithDownloads({
       </div>
     </TableLayoutContext.Provider>
   );
-}
-
-// Mantém detecção, mas vamos “ocultar” o CSV para não duplicar tabelas.
-function looksLikeCsvText(textRaw: string): boolean {
-  const text = (textRaw || "").trim();
-  if (!text) return false;
-
-  const hasManySemicolons = (text.match(/;/g) || []).length >= 6;
-  const hasManyCommas = (text.match(/,/g) || []).length >= 8;
-
-  const hasNewline = text.includes("\n");
-  const firstLine = text.split("\n")[0] || "";
-  const colsSemi = firstLine.split(";").length;
-  const colsComma = firstLine.split(",").length;
-
-  const looksTabular = (colsSemi >= 4 && hasManySemicolons) || (colsComma >= 4 && hasManyCommas);
-  const oneHugeLine = !hasNewline && (colsSemi >= 6 || colsComma >= 8) && text.length >= 40;
-
-  return looksTabular || oneHugeLine;
 }
 
 function getScrollParent(el: HTMLElement | null): HTMLElement | null {
@@ -263,6 +247,11 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   return (document.scrollingElement as HTMLElement | null) ?? null;
 }
 
+function isCsvHeading(text: string) {
+  const t = (text || "").trim().toLowerCase();
+  return t === "versão em csv" || t === "versao em csv" || t === "versão em csv:" || t === "versao em csv:";
+}
+
 export function ChatMessagesList({
   messages,
   onCopyAnswer,
@@ -272,7 +261,7 @@ export function ChatMessagesList({
   variant = "chat",
   scrollContainerRef,
   activeConversationId,
-  actionToast,
+  actionToast = null,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -351,6 +340,7 @@ export function ChatMessagesList({
     if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
+  // ✅ Compartilhar válido somente no chat e somente se tiver conversationId ativo
   const canShare =
     variant === "chat" &&
     typeof activeConversationId === "string" &&
@@ -372,13 +362,11 @@ export function ChatMessagesList({
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
-          const showThisActionToast =
-            !!actionToast && actionToast.messageId === msg.id && (actionToast.text || "").trim().length > 0;
-
           return (
             <div key={msg.id}>
               {isUser ? (
                 <div className="flex flex-col items-start">
+                  {/* ✅ Data + hora SOMENTE da pergunta */}
                   {getUserDateTimeLabel(msg.created_at) && (
                     <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
                       {getUserDateTimeLabel(msg.created_at)}
@@ -414,11 +402,31 @@ export function ChatMessagesList({
                             />
                           ),
                           hr: () => <div className="my-4 h-px w-full bg-white/20" />,
+
+                          // ✅ Remove “Versão em CSV” do texto
+                          h1: ({ node, ...props }) => {
+                            const txt = extractText((props as any).children);
+                            if (isCsvHeading(txt)) return null;
+                            return <h1 {...props} />;
+                          },
+                          h2: ({ node, ...props }) => {
+                            const txt = extractText((props as any).children);
+                            if (isCsvHeading(txt)) return null;
+                            return <h2 {...props} />;
+                          },
+                          h3: ({ node, ...props }) => {
+                            const txt = extractText((props as any).children);
+                            if (isCsvHeading(txt)) return null;
+                            return <h3 {...props} />;
+                          },
+
                           p: ({ node, ...props }) => {
                             const txt = extractText((props as any).children);
                             if (!txt.trim()) return null;
+                            if (isCsvHeading(txt)) return null;
                             return <p {...props} />;
                           },
+
                           table: ({ node, ...props }) => {
                             tableIndex += 1;
                             return (
@@ -437,18 +445,20 @@ export function ChatMessagesList({
                             return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
                           },
 
-                          // ✅ NÃO renderizar CSV (evita duplicar tabelas)
+                          // ✅ NÃO renderizar blocos CSV (evita tabela duplicada + balão vazio)
                           code: (p: any) => {
                             const { inline, className, children, ...props } = p as any;
                             const text = String(children ?? "");
                             const match = /language-(\w+)/.exec(className ?? "");
                             const lang = match?.[1]?.toLowerCase();
 
-                            const disguisedCsv =
-                              !inline && (!lang || lang === "text") && looksLikeCsvText(text);
+                            if (!inline && lang === "csv") return null;
 
-                            if (!inline && (lang === "csv" || disguisedCsv)) {
-                              return null;
+                            // também suprime blocos “texto” que pareçam CSV/planilha
+                            if (!inline && text.trim().includes(";") && text.trim().split("\n").length >= 2) {
+                              // heurística simples para evitar “versão CSV” virar box/pre
+                              const semi = (text.match(/;/g) || []).length;
+                              if (semi >= 6) return null;
                             }
 
                             return (
@@ -459,12 +469,14 @@ export function ChatMessagesList({
                           },
 
                           pre: ({ node, children, ...props }) => {
-                            const arr = Children.toArray(children);
-                            if (arr.length === 0) return null;
-
-                            // Se o <pre> contém apenas um <code> CSV (que será null), não renderize o <pre>.
                             const txt = extractText(children);
                             if (!txt.trim()) return null;
+
+                            // se for “pre” contendo um csv (mesmo sem language-csv), suprime
+                            const t = txt.trim();
+                            const semi = (t.match(/;/g) || []).length;
+                            const lines = t.split("\n").filter(Boolean).length;
+                            if (semi >= 6 && lines >= 2) return null;
 
                             return (
                               <pre {...props} className={theme.pre}>
@@ -481,10 +493,10 @@ export function ChatMessagesList({
 
                   {(onCopyAnswer || onRegenerateLast || canShare) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
-                      {/* ✅ Toast por mensagem (somente quando existir) */}
-                      {showThisActionToast && (
+                      {/* ✅ Toast por mensagem (acima dos botões) */}
+                      {actionToast?.messageId === msg.id && (
                         <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
-                          {actionToast!.text}
+                          {actionToast.text}
                         </div>
                       )}
 
@@ -513,11 +525,7 @@ export function ChatMessagesList({
                         )}
 
                         {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
-                          <button
-                            type="button"
-                            onClick={() => onRegenerateLast(lastUser.content)}
-                            className={theme.btn}
-                          >
+                          <button type="button" onClick={() => onRegenerateLast(lastUser.content)} className={theme.btn}>
                             Regenerar
                           </button>
                         )}
