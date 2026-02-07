@@ -248,27 +248,35 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
 
 function isCsvHeading(text: string) {
   const t = (text || "").trim().toLowerCase();
-  return t === "versão em csv" || t === "versao em csv" || t === "versão em csv:" || t === "versao em csv:";
+  return (
+    t === "versão em csv" ||
+    t === "versao em csv" ||
+    t === "versão em csv:" ||
+    t === "versao em csv:"
+  );
 }
 
 /**
- * Divide o conteúdo em:
- * - main: tudo antes do "Base legal"
+ * Split “rodapé normativo”:
+ * - main: tudo antes de "Base legal"
  * - footer: de "Base legal" até o final
  *
- * Aceita variações:
- * - "Base legal:"
- * - "## Base legal"
- * - "## Base legal:" etc.
+ * Regex “blindado”:
+ * pega linha começando com:
+ * - Base legal
+ * - ## Base legal
+ * - **Base legal**
+ * com ou sem ":" e espaços
  */
 function splitMarkdownFooter(md: string): { main: string; footer: string } {
   const s = String(md ?? "");
-  // pega o primeiro "Base legal" no início de linha
-  const re = /(^|\n)(##\s*)?Base\s+legal\b\s*:?\s*/i;
+  const re =
+    /(^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?\s*base\s+legal\s*(?:\*\*)?\s*:?\s*(?=\n|$)/im;
+
   const m = re.exec(s);
   if (!m) return { main: s, footer: "" };
 
-  const start = (m.index ?? 0) + (m[1]?.length ?? 0); // aponta para "Base..."
+  const start = (m.index ?? 0) + (m[1]?.length ?? 0); // começa em "Base legal..."
   const main = s.slice(0, start).trimEnd();
   const footer = s.slice(start).trim();
   return { main, footer };
@@ -369,14 +377,22 @@ export function ChatMessagesList({
     activeConversationId.trim().length > 0 &&
     typeof onShareConversation === "function";
 
+  // ✅ PRE-CALCULA main/footer fora do map (sem quebrar regras de hooks)
+  const preparedMessages = useMemo(() => {
+    return messages.map((m) => {
+      const { main, footer } = splitMarkdownFooter(m.content);
+      return { ...m, __main: main, __footer: footer };
+    });
+  }, [messages]);
+
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
-        {messages.map((msg) => {
+        {preparedMessages.map((msg) => {
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
-          // importante: manter fora do ReactMarkdown para não resetar indevidamente
+          // por-mensagem (não hook)
           let tableIndex = 0;
 
           const userBubble =
@@ -385,7 +401,8 @@ export function ChatMessagesList({
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
-          const { main, footer } = useMemo(() => splitMarkdownFooter(msg.content), [msg.content]);
+          const main = (msg as any).__main ?? msg.content;
+          const footer = (msg as any).__footer ?? "";
 
           const markdownComponentsMain: any = {
             a: ({ node, ...props }: any) => (
@@ -479,7 +496,7 @@ export function ChatMessagesList({
               <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
             ),
 
-            // não faz sentido ter tabela/CSV no rodapé; se vier, ignora
+            // no rodapé: sem tabela/csv
             table: () => null,
             pre: () => null,
             code: () => null,
@@ -546,22 +563,19 @@ export function ChatMessagesList({
                       </ReactMarkdown>
                     </div>
 
-                    {/* FOOTER (Base legal + Referências) em 9px */}
+                    {/* FOOTER em 9px (blindado) */}
                     {footer.trim().length > 0 && (
-                      <div className="mt-4 text-[9px] leading-snug text-slate-100/90">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={markdownComponentsFooter}
-                        >
-                          {footer}
-                        </ReactMarkdown>
-                      </div>
+                     <div className="markdown-footer mt-4">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsFooter}>
+                        {footer}
+                     </ReactMarkdown>
+                     </div>
                     )}
+
                   </div>
 
                   {(onCopyAnswer || onRegenerateLast || canShare) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
-                      {/* Toast por mensagem (acima dos botões) */}
                       {actionToast?.messageId === msg.id && (
                         <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
                           {actionToast.text}
@@ -629,4 +643,3 @@ export function ChatMessagesList({
     </MarkdownThemeContext.Provider>
   );
 }
-

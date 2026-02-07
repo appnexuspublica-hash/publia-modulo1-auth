@@ -88,3 +88,17 @@ body {
 .markdown a {
   text-decoration: underline;
 }
+
+/* Rodapé normativo (Base legal + Referências) — sempre menor */
+.markdown-footer {
+  font-size: 9px !important;
+  line-height: 1.25 !important;
+  opacity: 0.92;
+}
+
+/* Garante que qualquer tag dentro herde 9px (e não o .markdown) */
+.markdown-footer * {
+  font-size: inherit !important;
+  line-height: inherit !important;
+}
+
