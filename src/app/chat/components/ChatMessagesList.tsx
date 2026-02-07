@@ -9,7 +9,6 @@ import {
   isValidElement,
   createContext,
   useContext,
-  Children,
   useCallback,
 } from "react";
 import type { RefObject } from "react";
@@ -31,7 +30,7 @@ type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
 
-  // ✅ Compartilhar por mensagem (conversationId + messageId)
+  // Compartilhar por mensagem (conversationId + messageId)
   onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
 
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
@@ -42,7 +41,7 @@ type ChatMessagesListProps = {
   activeConversationId?: string | null;
   scrollContainerRef?: RefObject<HTMLElement | null>;
 
-  // ✅ Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
+  // Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
   actionToast?: ActionToast;
 };
 
@@ -63,7 +62,7 @@ function getUserDateTimeLabel(created_at?: string): string | null {
   if (Number.isNaN(d.getTime())) return null;
 
   const date = dateOnlyFormatter.format(d);
-  const time = timeOnlyFormatter.format(d); // 14:53
+  const time = timeOnlyFormatter.format(d);
   return `${date} - ${time}h`;
 }
 
@@ -208,7 +207,7 @@ function TableWithDownloads({
           </div>
         </div>
 
-        {/* ✅ Somente 1 botão: Baixar Tabela/Planilha (Excel) */}
+        {/* Somente 1 botão: Baixar Tabela/Planilha (Excel) */}
         <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
           <button
             type="button"
@@ -250,6 +249,29 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
 function isCsvHeading(text: string) {
   const t = (text || "").trim().toLowerCase();
   return t === "versão em csv" || t === "versao em csv" || t === "versão em csv:" || t === "versao em csv:";
+}
+
+/**
+ * Divide o conteúdo em:
+ * - main: tudo antes do "Base legal"
+ * - footer: de "Base legal" até o final
+ *
+ * Aceita variações:
+ * - "Base legal:"
+ * - "## Base legal"
+ * - "## Base legal:" etc.
+ */
+function splitMarkdownFooter(md: string): { main: string; footer: string } {
+  const s = String(md ?? "");
+  // pega o primeiro "Base legal" no início de linha
+  const re = /(^|\n)(##\s*)?Base\s+legal\b\s*:?\s*/i;
+  const m = re.exec(s);
+  if (!m) return { main: s, footer: "" };
+
+  const start = (m.index ?? 0) + (m[1]?.length ?? 0); // aponta para "Base..."
+  const main = s.slice(0, start).trimEnd();
+  const footer = s.slice(start).trim();
+  return { main, footer };
 }
 
 export function ChatMessagesList({
@@ -340,7 +362,7 @@ export function ChatMessagesList({
     if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
-  // ✅ Compartilhar válido somente no chat e somente se tiver conversationId ativo
+  // Compartilhar válido somente no chat e somente se tiver conversationId ativo
   const canShare =
     variant === "chat" &&
     typeof activeConversationId === "string" &&
@@ -354,6 +376,7 @@ export function ChatMessagesList({
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
+          // importante: manter fora do ReactMarkdown para não resetar indevidamente
           let tableIndex = 0;
 
           const userBubble =
@@ -362,11 +385,138 @@ export function ChatMessagesList({
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
+          const { main, footer } = useMemo(() => splitMarkdownFooter(msg.content), [msg.content]);
+
+          const markdownComponentsMain: any = {
+            a: ({ node, ...props }: any) => (
+              <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
+            ),
+            hr: () => <div className="my-4 h-px w-full bg-white/20" />,
+
+            // Remove “Versão em CSV”
+            h1: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h1 {...props} />;
+            },
+            h2: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h2 {...props} />;
+            },
+            h3: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h3 {...props} />;
+            },
+
+            p: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (!txt.trim()) return null;
+              if (isCsvHeading(txt)) return null;
+              return <p {...props} />;
+            },
+
+            table: ({ node, ...props }: any) => {
+              tableIndex += 1;
+              return (
+                <TableWithDownloads index={tableIndex} tableProps={props}>
+                  {props.children}
+                </TableWithDownloads>
+              );
+            },
+            thead: ({ node, ...props }: any) => <thead {...props} className={theme.theadBg} />,
+            th: ({ node, ...props }: any) => {
+              const { isWide } = useTableLayout();
+              return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
+            },
+            td: ({ node, ...props }: any) => {
+              const { isWide } = useTableLayout();
+              return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
+            },
+
+            // NÃO renderizar blocos CSV (evita tabela duplicada + balão vazio)
+            code: (p: any) => {
+              const { inline, className, children, ...props } = p as any;
+              const text = String(children ?? "");
+              const match = /language-(\w+)/.exec(className ?? "");
+              const lang = match?.[1]?.toLowerCase();
+
+              if (!inline && lang === "csv") return null;
+
+              // heurística: suprime blocos que parecem CSV grande
+              if (!inline && text.trim().includes(";") && text.trim().split("\n").length >= 2) {
+                const semi = (text.match(/;/g) || []).length;
+                if (semi >= 6) return null;
+              }
+
+              return (
+                <code {...props} className="text-[12px]">
+                  {children}
+                </code>
+              );
+            },
+
+            pre: ({ node, children, ...props }: any) => {
+              const txt = extractText(children);
+              if (!txt.trim()) return null;
+
+              const t = txt.trim();
+              const semi = (t.match(/;/g) || []).length;
+              const lines = t.split("\n").filter(Boolean).length;
+              if (semi >= 6 && lines >= 2) return null;
+
+              return (
+                <pre {...props} className={theme.pre}>
+                  {children}
+                </pre>
+              );
+            },
+          };
+
+          const markdownComponentsFooter: any = {
+            a: ({ node, ...props }: any) => (
+              <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
+            ),
+
+            // não faz sentido ter tabela/CSV no rodapé; se vier, ignora
+            table: () => null,
+            pre: () => null,
+            code: () => null,
+
+            // remove headings "Versão em CSV" caso apareça
+            h1: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h1 {...props} />;
+            },
+            h2: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h2 {...props} />;
+            },
+            h3: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (isCsvHeading(txt)) return null;
+              return <h3 {...props} />;
+            },
+
+            // LISTA COM TRAÇO (-)
+            ul: ({ node, ...props }: any) => <ul {...props} className="mt-2 space-y-1" />,
+            ol: ({ node, ...props }: any) => <ol {...props} className="mt-2 space-y-1" />,
+            li: ({ node, ...props }: any) => (
+              <li className="flex gap-2">
+                <span className="shrink-0">-</span>
+                <span className="min-w-0">{props.children}</span>
+              </li>
+            ),
+          };
+
           return (
             <div key={msg.id}>
               {isUser ? (
                 <div className="flex flex-col items-start">
-                  {/* ✅ Data + hora SOMENTE da pergunta */}
+                  {/* Data + hora SOMENTE da pergunta */}
                   {getUserDateTimeLabel(msg.created_at) && (
                     <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
                       {getUserDateTimeLabel(msg.created_at)}
@@ -389,111 +539,29 @@ export function ChatMessagesList({
                         </div>
                       )}
 
+                    {/* MAIN */}
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          a: ({ node, ...props }) => (
-                            <a
-                              {...props}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              className={theme.link}
-                            />
-                          ),
-                          hr: () => <div className="my-4 h-px w-full bg-white/20" />,
-
-                          // ✅ Remove “Versão em CSV” do texto
-                          h1: ({ node, ...props }) => {
-                            const txt = extractText((props as any).children);
-                            if (isCsvHeading(txt)) return null;
-                            return <h1 {...props} />;
-                          },
-                          h2: ({ node, ...props }) => {
-                            const txt = extractText((props as any).children);
-                            if (isCsvHeading(txt)) return null;
-                            return <h2 {...props} />;
-                          },
-                          h3: ({ node, ...props }) => {
-                            const txt = extractText((props as any).children);
-                            if (isCsvHeading(txt)) return null;
-                            return <h3 {...props} />;
-                          },
-
-                          p: ({ node, ...props }) => {
-                            const txt = extractText((props as any).children);
-                            if (!txt.trim()) return null;
-                            if (isCsvHeading(txt)) return null;
-                            return <p {...props} />;
-                          },
-
-                          table: ({ node, ...props }) => {
-                            tableIndex += 1;
-                            return (
-                              <TableWithDownloads index={tableIndex} tableProps={props}>
-                                {props.children}
-                              </TableWithDownloads>
-                            );
-                          },
-                          thead: ({ node, ...props }) => <thead {...props} className={theme.theadBg} />,
-                          th: ({ node, ...props }) => {
-                            const { isWide } = useTableLayout();
-                            return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
-                          },
-                          td: ({ node, ...props }) => {
-                            const { isWide } = useTableLayout();
-                            return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
-                          },
-
-                          // ✅ NÃO renderizar blocos CSV (evita tabela duplicada + balão vazio)
-                          code: (p: any) => {
-                            const { inline, className, children, ...props } = p as any;
-                            const text = String(children ?? "");
-                            const match = /language-(\w+)/.exec(className ?? "");
-                            const lang = match?.[1]?.toLowerCase();
-
-                            if (!inline && lang === "csv") return null;
-
-                            // também suprime blocos “texto” que pareçam CSV/planilha
-                            if (!inline && text.trim().includes(";") && text.trim().split("\n").length >= 2) {
-                              // heurística simples para evitar “versão CSV” virar box/pre
-                              const semi = (text.match(/;/g) || []).length;
-                              if (semi >= 6) return null;
-                            }
-
-                            return (
-                              <code {...props} className="text-[12px]">
-                                {children}
-                              </code>
-                            );
-                          },
-
-                          pre: ({ node, children, ...props }) => {
-                            const txt = extractText(children);
-                            if (!txt.trim()) return null;
-
-                            // se for “pre” contendo um csv (mesmo sem language-csv), suprime
-                            const t = txt.trim();
-                            const semi = (t.match(/;/g) || []).length;
-                            const lines = t.split("\n").filter(Boolean).length;
-                            if (semi >= 6 && lines >= 2) return null;
-
-                            return (
-                              <pre {...props} className={theme.pre}>
-                                {children}
-                              </pre>
-                            );
-                          },
-                        }}
-                      >
-                        {msg.content}
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
+                        {main}
                       </ReactMarkdown>
                     </div>
+
+                    {/* FOOTER (Base legal + Referências) em 9px */}
+                    {footer.trim().length > 0 && (
+                      <div className="mt-4 text-[9px] leading-snug text-slate-100/90">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={markdownComponentsFooter}
+                        >
+                          {footer}
+                        </ReactMarkdown>
+                      </div>
+                    )}
                   </div>
 
                   {(onCopyAnswer || onRegenerateLast || canShare) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
-                      {/* ✅ Toast por mensagem (acima dos botões) */}
+                      {/* Toast por mensagem (acima dos botões) */}
                       {actionToast?.messageId === msg.id && (
                         <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
                           {actionToast.text}
@@ -509,7 +577,11 @@ export function ChatMessagesList({
 
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
-                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
+                          <button
+                            type="button"
+                            onClick={() => onCopyAnswer(msg.id)}
+                            className={theme.btn}
+                          >
                             Copiar
                           </button>
                         )}
@@ -525,7 +597,11 @@ export function ChatMessagesList({
                         )}
 
                         {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
-                          <button type="button" onClick={() => onRegenerateLast(lastUser.content)} className={theme.btn}>
+                          <button
+                            type="button"
+                            onClick={() => onRegenerateLast(lastUser.content)}
+                            className={theme.btn}
+                          >
                             Regenerar
                           </button>
                         )}
@@ -553,3 +629,4 @@ export function ChatMessagesList({
     </MarkdownThemeContext.Provider>
   );
 }
+
