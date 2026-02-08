@@ -27,6 +27,7 @@ body {
 *::after {
   box-sizing: border-box;
 }
+
 /* Estilo básico para o conteúdo Markdown das respostas do Publ.IA */
 .markdown {
   font-size: 0.875rem; /* 14px */
@@ -89,16 +90,60 @@ body {
   text-decoration: underline;
 }
 
-/* Rodapé normativo (Base legal + Referências) — sempre menor */
-.markdown-footer {
-  font-size: 9px !important;
+/* ===========================
+   Rodapé normativo (BLINDADO)
+   =========================== */
+
+.publia-footnote {
+  font-size: 0.875rem !important;
   line-height: 1.25 !important;
   opacity: 0.92;
 }
 
-/* Garante que qualquer tag dentro herde 9px (e não o .markdown) */
-.markdown-footer * {
+/* força TODAS as tags internas a herdarem 9px */
+.publia-footnote,
+.publia-footnote * {
   font-size: inherit !important;
   line-height: inherit !important;
 }
 
+/* mata o "tamanho padrão do browser" de headings no rodapé */
+.publia-footnote h1,
+.publia-footnote h2,
+.publia-footnote h3,
+.publia-footnote h4,
+.publia-footnote h5,
+.publia-footnote h6 {
+  font-size: inherit !important;
+  font-weight: 600;
+  margin: 0.15rem 0 !important;
+}
+
+/* blockquote do rodapé (porque seu prompt usa > ...) */
+.publia-footnote blockquote {
+  margin: 0.25rem 0 !important;
+  padding-left: 0.5rem !important;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+}
+
+/* parágrafos e listas no rodapé com margens menores */
+.publia-footnote p {
+  margin: 0.1rem 0 !important;
+}
+
+.publia-footnote ul,
+.publia-footnote ol {
+  margin: 0.15rem 0 !important;
+  padding-left: 0 !important; /* você está usando traço manual */
+  list-style: none !important;
+}
+
+.publia-footnote li {
+  margin: 0.05rem 0 !important;
+}
+
+/* helper para heading mapeado no ReactMarkdown */
+.publia-footnote__heading {
+  font-weight: 600;
+  margin: 0.15rem 0 !important;
+}

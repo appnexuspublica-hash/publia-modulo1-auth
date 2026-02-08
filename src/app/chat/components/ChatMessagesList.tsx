@@ -3,7 +3,6 @@
 
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   isValidElement,
@@ -248,35 +247,26 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
 
 function isCsvHeading(text: string) {
   const t = (text || "").trim().toLowerCase();
-  return (
-    t === "versão em csv" ||
-    t === "versao em csv" ||
-    t === "versão em csv:" ||
-    t === "versao em csv:"
-  );
+  return t === "versão em csv" || t === "versao em csv" || t === "versão em csv:" || t === "versao em csv:";
 }
 
 /**
- * Split “rodapé normativo”:
- * - main: tudo antes de "Base legal"
- * - footer: de "Base legal" até o final
+ * Split do rodapé normativo:
+ * - main: tudo antes do início de "Base legal"
+ * - footer: de "Base legal" até o final (inclui "Referências oficiais consultadas")
  *
- * Regex “blindado”:
- * pega linha começando com:
- * - Base legal
- * - ## Base legal
- * - **Base legal**
- * com ou sem ":" e espaços
+ * Regex "blindado": aceita heading, negrito e variações com espaços.
  */
 function splitMarkdownFooter(md: string): { main: string; footer: string } {
   const s = String(md ?? "");
+  // início de linha + espaços + (##)? + (**)? Base legal (**)? :?
   const re =
-    /(^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?\s*base\s+legal\s*(?:\*\*)?\s*:?\s*(?=\n|$)/im;
+    /(?:^|\n)\s*(?:#{1,6}\s*)?(?:(?:\*\*|__)\s*)?base\s+legal\s*(?:(?:\*\*|__)\s*)?:?\s*(?:\n|$)/i;
 
   const m = re.exec(s);
   if (!m) return { main: s, footer: "" };
 
-  const start = (m.index ?? 0) + (m[1]?.length ?? 0); // começa em "Base legal..."
+  const start = m.index; // começo da linha do "Base legal"
   const main = s.slice(0, start).trimEnd();
   const footer = s.slice(start).trim();
   return { main, footer };
@@ -377,22 +367,14 @@ export function ChatMessagesList({
     activeConversationId.trim().length > 0 &&
     typeof onShareConversation === "function";
 
-  // ✅ PRE-CALCULA main/footer fora do map (sem quebrar regras de hooks)
-  const preparedMessages = useMemo(() => {
-    return messages.map((m) => {
-      const { main, footer } = splitMarkdownFooter(m.content);
-      return { ...m, __main: main, __footer: footer };
-    });
-  }, [messages]);
-
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
-        {preparedMessages.map((msg) => {
+        {messages.map((msg) => {
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
 
-          // por-mensagem (não hook)
+          // índice de tabela por mensagem
           let tableIndex = 0;
 
           const userBubble =
@@ -401,8 +383,8 @@ export function ChatMessagesList({
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
-          const main = (msg as any).__main ?? msg.content;
-          const footer = (msg as any).__footer ?? "";
+          // ✅ SEM HOOK aqui (evita "Rendered more hooks...")
+          const { main, footer } = splitMarkdownFooter(msg.content);
 
           const markdownComponentsMain: any = {
             a: ({ node, ...props }: any) => (
@@ -496,31 +478,37 @@ export function ChatMessagesList({
               <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
             ),
 
-            // no rodapé: sem tabela/csv
+            // no rodapé, se vier tabela/csv, ignora
             table: () => null,
             pre: () => null,
             code: () => null,
 
-            // remove headings "Versão em CSV" caso apareça
+            // evita heading com tamanho padrão do browser
             h1: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <h1 {...props} />;
+              return <p className="publia-footnote__heading">{(props as any).children}</p>;
             },
             h2: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <h2 {...props} />;
+              return <p className="publia-footnote__heading">{(props as any).children}</p>;
             },
             h3: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <h3 {...props} />;
+              return <p className="publia-footnote__heading">{(props as any).children}</p>;
+            },
+            p: ({ node, ...props }: any) => {
+              const txt = extractText((props as any).children);
+              if (!txt.trim()) return null;
+              if (isCsvHeading(txt)) return null;
+              return <p {...props} />;
             },
 
-            // LISTA COM TRAÇO (-)
-            ul: ({ node, ...props }: any) => <ul {...props} className="mt-2 space-y-1" />,
-            ol: ({ node, ...props }: any) => <ol {...props} className="mt-2 space-y-1" />,
+            // LISTA COM TRAÇO (-) e sem “bolinha”
+            ul: ({ node, ...props }: any) => <ul {...props} className="mt-2 space-y-1 list-none p-0" />,
+            ol: ({ node, ...props }: any) => <ol {...props} className="mt-2 space-y-1 list-none p-0" />,
             li: ({ node, ...props }: any) => (
               <li className="flex gap-2">
                 <span className="shrink-0">-</span>
@@ -533,7 +521,6 @@ export function ChatMessagesList({
             <div key={msg.id}>
               {isUser ? (
                 <div className="flex flex-col items-start">
-                  {/* Data + hora SOMENTE da pergunta */}
                   {getUserDateTimeLabel(msg.created_at) && (
                     <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
                       {getUserDateTimeLabel(msg.created_at)}
@@ -563,15 +550,14 @@ export function ChatMessagesList({
                       </ReactMarkdown>
                     </div>
 
-                    {/* FOOTER em 9px (blindado) */}
+                    {/* FOOTER (Base legal + Referências) — 9px blindado */}
                     {footer.trim().length > 0 && (
-                     <div className="markdown-footer mt-4">
+                      <div className="publia-footnote mt-4 text-slate-100/90" data-footnote>
                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsFooter}>
-                        {footer}
-                     </ReactMarkdown>
-                     </div>
+                          {footer}
+                        </ReactMarkdown>
+                      </div>
                     )}
-
                   </div>
 
                   {(onCopyAnswer || onRegenerateLast || canShare) && (
@@ -591,11 +577,7 @@ export function ChatMessagesList({
 
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
-                          <button
-                            type="button"
-                            onClick={() => onCopyAnswer(msg.id)}
-                            className={theme.btn}
-                          >
+                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
                             Copiar
                           </button>
                         )}
