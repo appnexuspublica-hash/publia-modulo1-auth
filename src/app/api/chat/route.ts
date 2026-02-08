@@ -1,3 +1,4 @@
+// src/app/api/chat/route.ts
 import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
@@ -103,7 +104,11 @@ function sseEvent(event: string, data: unknown) {
  * ✅ BACKEND TRAVA WEB-FIRST
  * ==========================
  * Detector “alta volatilidade / normativo sensível”.
- * Se retornar true, o backend vai forçar tool_choice=web_search_preview.
+ * Se retornar true, o backend vai:
+ * - NÃO streamar do OpenAI
+ * - exigir evidência de uso do web_search_preview
+ * - exigir seção "Referências oficiais consultadas"
+ * - bloquear respostas que afirmem "Não houve consulta web..."
  */
 function stripAccents(s: string) {
   return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -184,6 +189,91 @@ function shouldForceWebFirst(userText: string): boolean {
     t.length <= 90 && (t.startsWith("qual") || t.startsWith("quais") || t.includes("?"));
 
   return hit || numericSignals || shortQuestion;
+}
+
+/**
+ * Extrai texto final da Responses API (modo não-stream).
+ * Blindado para variações do SDK.
+ */
+function extractResponseText(resp: any): string {
+  if (!resp) return "";
+
+  if (typeof resp.output_text === "string") return resp.output_text;
+
+  const out = resp.output;
+  if (Array.isArray(out)) {
+    let acc = "";
+    for (const item of out) {
+      const content = item?.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (c?.type === "output_text" && typeof c?.text === "string") acc += c.text;
+        }
+      }
+      if (typeof item?.text === "string") acc += item.text;
+    }
+    return acc;
+  }
+
+  try {
+    return String(resp?.choices?.[0]?.message?.content ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Detecta se o response realmente usou web_search_preview.
+ * (Procura por itens de tool call no output e, como fallback, por "web_search" no JSON.)
+ */
+function usedWebSearchTool(resp: any): boolean {
+  try {
+    const out = resp?.output;
+    if (Array.isArray(out)) {
+      for (const item of out) {
+        const t = String(item?.type ?? "").toLowerCase();
+        if (t.includes("web_search")) return true;
+
+        if (t.includes("tool") && String(item?.name ?? "").toLowerCase().includes("web_search"))
+          return true;
+
+        const toolCalls = item?.tool_calls;
+        if (Array.isArray(toolCalls)) {
+          for (const tc of toolCalls) {
+            const name = String(tc?.name ?? tc?.tool_name ?? "").toLowerCase();
+            if (name.includes("web_search")) return true;
+          }
+        }
+      }
+    }
+
+    const s = JSON.stringify(resp);
+    return /web_search/i.test(s);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Valida “Web-First OK”:
+ * - usou web_search_preview (evidência no response)
+ * - inclui a seção "Referências oficiais consultadas"
+ * - NÃO declara "Não houve consulta web..." (quando Web-First era obrigatório)
+ */
+function validateWebFirst(resp: any, text: string): { ok: boolean; reason?: string } {
+  const usedTool = usedWebSearchTool(resp);
+
+  const hasRefsSection =
+    /referências\s+oficiais\s+consultadas\s*:/i.test(text) ||
+    /^##\s*referências\s+oficiais\s+consultadas/mi.test(text);
+
+  const deniesWeb = /não houve consulta web/i.test(text);
+
+  if (!usedTool) return { ok: false, reason: "Tool web_search_preview não foi usado." };
+  if (!hasRefsSection) return { ok: false, reason: "Faltou seção 'Referências oficiais consultadas'." };
+  if (deniesWeb) return { ok: false, reason: "Texto declarou que não houve consulta web." };
+
+  return { ok: true };
 }
 
 async function getLatestPdfForConversation(
@@ -404,7 +494,9 @@ export async function POST(req: Request) {
                 minScore: 1,
               });
 
-              pdfContext = picked.map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`).join("\n\n---\n\n");
+              pdfContext = picked
+                .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
+                .join("\n\n---\n\n");
             }
           }
 
@@ -458,6 +550,8 @@ export async function POST(req: Request) {
           combinedText =
             "⚠️ BACKEND: WEB-FIRST OBRIGATÓRIO NESTA PERGUNTA.\n" +
             "- Antes de responder com números/prazos/limites/dispositivos, use web_search_preview em fonte oficial.\n" +
+            "- Inclua no final: (1) Base legal; (2) Referências oficiais consultadas.\n" +
+            "- PROIBIDO: escrever “Não houve consulta web…” nesta resposta.\n" +
             "- Se não conseguir confirmar em fonte oficial, diga explicitamente que não foi possível confirmar e NÃO forneça número/prazo como certo.\n\n" +
             combinedText;
         }
@@ -478,32 +572,99 @@ export async function POST(req: Request) {
         const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
         const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
-        // ✅ Se backend exigiu Web-First, força o uso do web_search_preview
-        const request: any = {
-          model,
-          instructions: publiaPrompt,
-          tools: [{ type: "web_search_preview" }],
-          input,
-          stream: true,
-        };
-
-        if (forceWebFirst) {
-          // força o primeiro passo a ser consulta web via ferramenta
-          request.tool_choice = { type: "web_search_preview" };
-        }
-
-        const responseStream = await openai.responses.create(request);
-
         let assistantText = "";
 
-        for await (const event of responseStream as any) {
-          if (event?.type === "response.output_text.delta") {
-            const delta = event.delta as string;
-            if (delta) {
-              assistantText += delta;
-              send("delta", { text: delta });
+        // ============================================================
+        // ✅ HARD GATE: quando forceWebFirst, NÃO STREAMA (100% seguro)
+        // ============================================================
+        if (forceWebFirst) {
+          const strictInstructions =
+            publiaPrompt +
+            `
+
+[BACKEND HARD GATE — WEB-FIRST OBRIGATÓRIO]
+Esta pergunta exige Web-First (valores/prazos/limites/dispositivo vigente).
+Você DEVE:
+1) usar web_search_preview em fonte oficial;
+2) responder com a norma VIGENTE;
+3) incluir no final:
+   - Base legal
+   - Referências oficiais consultadas (lista em tópicos)
+PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
+`;
+
+          // 1ª tentativa (não-stream)
+          const resp1 = await openai.responses.create({
+            model,
+            instructions: strictInstructions,
+            tools: [{ type: "web_search_preview" }],
+            tool_choice: { type: "web_search_preview" }, // força o primeiro passo ser web
+            input,
+            stream: false,
+          } as any);
+
+          assistantText = formatAssistantText(extractResponseText(resp1));
+          const v1 = validateWebFirst(resp1, assistantText);
+
+          if (!v1.ok) {
+            // retry 1x (mais duro)
+            const retryInstructions =
+              strictInstructions +
+              `
+
+[RETRY — FALHA DE COMPLIANCE]
+Você falhou em cumprir Web-First. Motivo detectado: ${v1.reason}
+Refaça usando web_search_preview e entregue o rodapé completo com referências oficiais.
+`;
+
+            const resp2 = await openai.responses.create({
+              model,
+              instructions: retryInstructions,
+              tools: [{ type: "web_search_preview" }],
+              tool_choice: { type: "web_search_preview" },
+              input,
+              stream: false,
+            } as any);
+
+            assistantText = formatAssistantText(extractResponseText(resp2));
+            const v2 = validateWebFirst(resp2, assistantText);
+
+            if (!v2.ok) {
+              send("error", {
+                error:
+                  "Web-First obrigatório: não consegui confirmar em fonte oficial agora. Tente novamente em instantes ou refine com município/UF e TCE/TCM.",
+                debug: { reason: v2.reason },
+              });
+              controller.close();
+              return;
             }
           }
+
+          // Envia tudo de uma vez (mantém SSE sem mudar frontend)
+          send("delta", { text: assistantText });
+        } else {
+          // ✅ comportamento atual: streaming normal
+          const request: any = {
+            model,
+            instructions: publiaPrompt,
+            tools: [{ type: "web_search_preview" }],
+            input,
+            stream: true,
+          };
+
+          const responseStream = await openai.responses.create(request);
+
+          for await (const event of responseStream as any) {
+            if (event?.type === "response.output_text.delta") {
+              const delta = event.delta as string;
+              if (delta) {
+                assistantText += delta;
+                send("delta", { text: delta });
+              }
+            }
+          }
+
+          assistantText = formatAssistantText(assistantText);
         }
 
         if (!assistantText.trim()) {
@@ -511,8 +672,6 @@ export async function POST(req: Request) {
           controller.close();
           return;
         }
-
-        assistantText = formatAssistantText(assistantText);
 
         // 4) salva msg IA
         const { data: assistantMessageRow, error: insertAssistantError } = await client
