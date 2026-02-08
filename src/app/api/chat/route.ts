@@ -98,6 +98,94 @@ function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * ==========================
+ * ✅ BACKEND TRAVA WEB-FIRST
+ * ==========================
+ * Detector “alta volatilidade / normativo sensível”.
+ * Se retornar true, o backend vai forçar tool_choice=web_search_preview.
+ */
+function stripAccents(s: string) {
+  return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function shouldForceWebFirst(userText: string): boolean {
+  const raw = String(userText ?? "").trim();
+  if (!raw) return false;
+
+  const t = stripAccents(raw).toLowerCase();
+
+  // Gatilhos normativos sensíveis (valores/prazos/atos/dispositivos etc.)
+  const triggers = [
+    // valores/limites
+    "valor",
+    "valores",
+    "limite",
+    "teto",
+    "faixa",
+    "percentual",
+    "porcentagem",
+    "aliquota",
+    "indice",
+    "atualizado",
+    "vigente",
+    "hoje",
+    "ultima atualizacao",
+    "última atualização",
+    "novo decreto",
+    "decreto atual",
+
+    // prazos
+    "prazo",
+    "prazos",
+    "prazo legal",
+    "prazo de recurso",
+    "quantos dias",
+    "dias",
+
+    // pedido de dispositivo/ato
+    "art.",
+    "artigo",
+    "inciso",
+    "paragrafo",
+    "parágrafo",
+    "lei",
+    "decreto",
+    "portaria",
+    "instrucao normativa",
+    "in ",
+    "resolucao",
+    "resolução",
+
+    // temas muito comuns de atualização
+    "dispensa",
+    "inexigibilidade",
+    "aditivo",
+    "reajuste",
+    "repactuacao",
+    "repactuação",
+    "licitacao",
+    "licitação",
+    "14.133",
+    "14133",
+  ];
+
+  const hit = triggers.some((k) => t.includes(stripAccents(k).toLowerCase()));
+
+  // Sinais numéricos típicos (mesmo sem palavras-chave)
+  const numericSignals =
+    /\br\$\s*\d/i.test(t) || // "R$ 123"
+    /\b\d+\s*%\b/.test(t) || // "10%"
+    /\b\d+\s*dias?\b/.test(t) || // "5 dias"
+    /\b\d{1,3}\.\d{3}\b/.test(t); // "125.451"
+
+  // Pergunta curta pedindo “qual …” tende a ser normativa
+  const shortQuestion =
+    t.length <= 90 && (t.startsWith("qual") || t.startsWith("quais") || t.includes("?"));
+
+  return hit || numericSignals || shortQuestion;
+}
+
 async function getLatestPdfForConversation(
   conversationId: string,
   userId: string
@@ -124,9 +212,7 @@ async function downloadPdfBuffer(pdfRow: PdfFileRow): Promise<Buffer | null> {
   if (!supabase) return null;
   const client = supabase as any;
 
-  const { data: fileData, error } = await client.storage
-    .from("pdf-files")
-    .download(pdfRow.storage_path);
+  const { data: fileData, error } = await client.storage.from("pdf-files").download(pdfRow.storage_path);
 
   if (error || !fileData) return null;
 
@@ -197,10 +283,10 @@ export async function POST(req: Request) {
   try {
     body = await req.json();
   } catch {
-    return new Response(
-      sseEvent("error", { error: "Corpo da requisição inválido. JSON era esperado." }),
-      { status: 400, headers: SSE_HEADERS }
-    );
+    return new Response(sseEvent("error", { error: "Corpo da requisição inválido. JSON era esperado." }), {
+      status: 400,
+      headers: SSE_HEADERS,
+    });
   }
 
   const { conversationId, message } = body as { conversationId: string; message: string };
@@ -262,6 +348,9 @@ export async function POST(req: Request) {
       };
 
       try {
+        // ✅ Decide aqui (backend) se Web-First será obrigatório
+        const forceWebFirst = shouldForceWebFirst(message);
+
         // 0) histórico
         const MAX_HISTORY = 8;
         const { data: historyData } = await client
@@ -315,9 +404,7 @@ export async function POST(req: Request) {
                 minScore: 1,
               });
 
-              pdfContext = picked
-                .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
-                .join("\n\n---\n\n");
+              pdfContext = picked.map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`).join("\n\n---\n\n");
             }
           }
 
@@ -366,6 +453,15 @@ export async function POST(req: Request) {
             combinedText;
         }
 
+        // ✅ Instrução “dura” quando backend exige Web-First
+        if (forceWebFirst) {
+          combinedText =
+            "⚠️ BACKEND: WEB-FIRST OBRIGATÓRIO NESTA PERGUNTA.\n" +
+            "- Antes de responder com números/prazos/limites/dispositivos, use web_search_preview em fonte oficial.\n" +
+            "- Se não conseguir confirmar em fonte oficial, diga explicitamente que não foi possível confirmar e NÃO forneça número/prazo como certo.\n\n" +
+            combinedText;
+        }
+
         const MAX_TOTAL_CHARS = 18000;
         if (combinedText.length > MAX_TOTAL_CHARS) combinedText = combinedText.slice(-MAX_TOTAL_CHARS);
 
@@ -382,13 +478,21 @@ export async function POST(req: Request) {
         const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
         const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
-        const responseStream = await openai.responses.create({
+        // ✅ Se backend exigiu Web-First, força o uso do web_search_preview
+        const request: any = {
           model,
           instructions: publiaPrompt,
           tools: [{ type: "web_search_preview" }],
           input,
           stream: true,
-        } as any);
+        };
+
+        if (forceWebFirst) {
+          // força o primeiro passo a ser consulta web via ferramenta
+          request.tool_choice = { type: "web_search_preview" };
+        }
+
+        const responseStream = await openai.responses.create(request);
 
         let assistantText = "";
 
