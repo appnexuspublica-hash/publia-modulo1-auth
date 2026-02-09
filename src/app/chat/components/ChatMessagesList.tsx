@@ -74,15 +74,53 @@ function extractText(node: any): string {
 }
 
 // Downloads
+async function readErrorMessage(res: Response): Promise<string> {
+  const ct = res.headers.get("content-type") || "";
+  try {
+    if (ct.includes("application/json")) {
+      const data: any = await res.json();
+      const msg =
+        (typeof data === "string" && data) ||
+        data?.message ||
+        data?.error ||
+        data?.detail ||
+        data?.msg;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+      return JSON.stringify(data);
+    }
+
+    const txt = await res.text();
+    return (txt || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function isSessionExpiredStatus(status: number) {
+  // 401/403: não autenticado / proibido
+  // 419/440: variações comuns de "session expired" em alguns stacks
+  return status === 401 || status === 403 || status === 419 || status === 440;
+}
+
 async function downloadXlsxFromRows(rows: string[][], filename: string) {
   const res = await fetch("/api/export-xlsx", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filename, rows }),
+    credentials: "include",
+    cache: "no-store",
   });
 
   if (!res.ok) {
-    const msg = await res.text();
+    const msg = await readErrorMessage(res);
+
+    if (isSessionExpiredStatus(res.status) || /sess[aã]o\s+expirad/i.test(msg)) {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("auth:session-expired"));
+      }
+      throw new Error("Sessão expirada. Faça login novamente e tente baixar de novo.");
+    }
+
     throw new Error(msg || "Falha ao gerar Excel.");
   }
 
@@ -163,10 +201,12 @@ function TableWithDownloads({
   index,
   children,
   tableProps,
+  enableDownloads = true,
 }: {
   index: number;
   children: React.ReactNode;
   tableProps: React.TableHTMLAttributes<HTMLTableElement>;
+  enableDownloads?: boolean;
 }) {
   const theme = useMdTheme();
   const tableRef = useRef<HTMLTableElement | null>(null);
@@ -207,24 +247,26 @@ function TableWithDownloads({
         </div>
 
         {/* Somente 1 botão: Baixar Tabela/Planilha (Excel) */}
-        <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                const el = tableRef.current;
-                if (!el) return;
-                const matrix = tableElementToMatrix(el);
-                await downloadXlsxFromRows(matrix, `tabela-${index}.xlsx`);
-              } catch (e: any) {
-                alert(e?.message || "Erro ao gerar planilha.");
-              }
-            }}
-            className={theme.btn}
-          >
-            Baixar Tabela/Planilha
-          </button>
-        </div>
+        {enableDownloads && (
+          <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const el = tableRef.current;
+                  if (!el) return;
+                  const matrix = tableElementToMatrix(el);
+                  await downloadXlsxFromRows(matrix, `tabela-${index}.xlsx`);
+                } catch (e: any) {
+                  alert(e?.message || "Erro ao gerar planilha.");
+                }
+              }}
+              className={theme.btn}
+            >
+              Baixar Tabela/Planilha
+            </button>
+          </div>
+        )}
       </div>
     </TableLayoutContext.Provider>
   );
@@ -247,7 +289,12 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
 
 function isCsvHeading(text: string) {
   const t = (text || "").trim().toLowerCase();
-  return t === "versão em csv" || t === "versao em csv" || t === "versão em csv:" || t === "versao em csv:";
+  return (
+    t === "versão em csv" ||
+    t === "versao em csv" ||
+    t === "versão em csv:" ||
+    t === "versao em csv:"
+  );
 }
 
 /**
@@ -284,6 +331,8 @@ export function ChatMessagesList({
   actionToast = null,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
+
+  const enableTableDownloads = variant === "chat";
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const scrollParentRef = useRef<HTMLElement | null>(null);
@@ -373,17 +422,16 @@ export function ChatMessagesList({
         {messages.map((msg) => {
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
+          const isGeneratingThis = isLastAssistant && isSending;
 
           // índice de tabela por mensagem
           let tableIndex = 0;
 
-          const userBubble =
-            variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
+          const userBubble = variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
 
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
-          // ✅ SEM HOOK aqui (evita "Rendered more hooks...")
           const { main, footer } = splitMarkdownFooter(msg.content);
 
           const markdownComponentsMain: any = {
@@ -392,7 +440,6 @@ export function ChatMessagesList({
             ),
             hr: () => <div className="my-4 h-px w-full bg-white/20" />,
 
-            // Remove “Versão em CSV”
             h1: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
@@ -419,7 +466,11 @@ export function ChatMessagesList({
             table: ({ node, ...props }: any) => {
               tableIndex += 1;
               return (
-                <TableWithDownloads index={tableIndex} tableProps={props}>
+                <TableWithDownloads
+                  index={tableIndex}
+                  tableProps={props}
+                  enableDownloads={enableTableDownloads}
+                >
                   {props.children}
                 </TableWithDownloads>
               );
@@ -434,7 +485,6 @@ export function ChatMessagesList({
               return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
             },
 
-            // NÃO renderizar blocos CSV (evita tabela duplicada + balão vazio)
             code: (p: any) => {
               const { inline, className, children, ...props } = p as any;
               const text = String(children ?? "");
@@ -443,7 +493,6 @@ export function ChatMessagesList({
 
               if (!inline && lang === "csv") return null;
 
-              // heurística: suprime blocos que parecem CSV grande
               if (!inline && text.trim().includes(";") && text.trim().split("\n").length >= 2) {
                 const semi = (text.match(/;/g) || []).length;
                 if (semi >= 6) return null;
@@ -478,12 +527,10 @@ export function ChatMessagesList({
               <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
             ),
 
-            // no rodapé, se vier tabela/csv, ignora
             table: () => null,
             pre: () => null,
             code: () => null,
 
-            // evita heading com tamanho padrão do browser
             h1: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
@@ -506,7 +553,6 @@ export function ChatMessagesList({
               return <p {...props} />;
             },
 
-            // LISTA COM TRAÇO (-) e sem “bolinha”
             ul: ({ node, ...props }: any) => <ul {...props} className="mt-2 space-y-1 list-none p-0" />,
             ol: ({ node, ...props }: any) => <ol {...props} className="mt-2 space-y-1 list-none p-0" />,
             li: ({ node, ...props }: any) => (
@@ -543,6 +589,13 @@ export function ChatMessagesList({
                         </div>
                       )}
 
+                    {isGeneratingThis && (
+                      <div className="mb-2 flex items-center gap-2 text-xs text-slate-100">
+                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
+                        <span>Gerando resposta...</span>
+                      </div>
+                    )}
+
                     {/* MAIN */}
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
@@ -568,16 +621,14 @@ export function ChatMessagesList({
                         </div>
                       )}
 
-                      {isLastAssistant && isSending && (
-                        <div className="flex items-center gap-2 text-xs text-slate-100">
-                          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
-                          <span>Gerando resposta...</span>
-                        </div>
-                      )}
-
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
-                          <button type="button" onClick={() => onCopyAnswer(msg.id)} className={theme.btn}>
+                          <button
+                            type="button"
+                            disabled={isGeneratingThis}
+                            onClick={() => onCopyAnswer(msg.id)}
+                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
+                          >
                             Copiar
                           </button>
                         )}
@@ -585,8 +636,9 @@ export function ChatMessagesList({
                         {canShare && (
                           <button
                             type="button"
+                            disabled={isGeneratingThis}
                             onClick={() => onShareConversation!(activeConversationId!.trim(), msg.id)}
-                            className={theme.btn}
+                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
                           >
                             Compartilhar
                           </button>
@@ -595,8 +647,9 @@ export function ChatMessagesList({
                         {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
                           <button
                             type="button"
+                            disabled={isGeneratingThis}
                             onClick={() => onRegenerateLast(lastUser.content)}
-                            className={theme.btn}
+                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
                           >
                             Regenerar
                           </button>

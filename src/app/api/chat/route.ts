@@ -19,6 +19,8 @@ const SSE_HEADERS: HeadersInit = {
   "Content-Type": "text/event-stream; charset=utf-8",
   "Cache-Control": "no-cache, no-transform",
   Connection: "keep-alive",
+  // ajuda a evitar buffering em alguns proxies/reverse-proxies (nginx)
+  "X-Accel-Buffering": "no",
 };
 
 let supabase: ReturnType<typeof createClient> | null = null;
@@ -116,22 +118,31 @@ function parseTemperature(v: any, fallback = 0.3) {
  * ==========================
  * Detector “alta volatilidade / normativo sensível”.
  * Se retornar true, o backend vai:
- * - NÃO streamar do OpenAI
  * - exigir evidência de uso do web_search_preview
  * - exigir seção "Referências oficiais consultadas"
  * - bloquear respostas que afirmem "Não houve consulta web..."
+ *
+ * ⚠️ IMPORTANTE:
+ * Para NÃO matar o “efeito digitando”, mesmo no branch Web-First, este arquivo
+ * agora envia o texto final em CHUNKS via SSE (simulando streaming) APÓS validar compliance.
  */
 function stripAccents(s: string) {
   return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+/**
+ * ✅ Opção A (ajuste): detector menos agressivo
+ * - remove heurística de "pergunta curta" (era ampla demais)
+ * - remove "dias" genérico (gatilho muito comum)
+ * - mantém gatilhos realmente normativos + sinais numéricos
+ */
 function shouldForceWebFirst(userText: string): boolean {
   const raw = String(userText ?? "").trim();
   if (!raw) return false;
 
   const t = stripAccents(raw).toLowerCase();
 
-  // Gatilhos normativos sensíveis (valores/prazos/atos/dispositivos etc.)
+  // Gatilhos normativos sensíveis (mais "cirúrgicos")
   const triggers = [
     // valores/limites
     "valor",
@@ -145,19 +156,19 @@ function shouldForceWebFirst(userText: string): boolean {
     "indice",
     "atualizado",
     "vigente",
-    "hoje",
     "ultima atualizacao",
     "última atualização",
     "novo decreto",
     "decreto atual",
 
-    // prazos
+    // prazos (sem "dias" genérico)
     "prazo",
     "prazos",
     "prazo legal",
     "prazo de recurso",
     "quantos dias",
-    "dias",
+    "dia util",
+    "dias uteis",
 
     // pedido de dispositivo/ato
     "art.",
@@ -169,7 +180,7 @@ function shouldForceWebFirst(userText: string): boolean {
     "decreto",
     "portaria",
     "instrucao normativa",
-    "in ",
+    "instrução normativa",
     "resolucao",
     "resolução",
 
@@ -192,14 +203,10 @@ function shouldForceWebFirst(userText: string): boolean {
   const numericSignals =
     /\br\$\s*\d/i.test(t) || // "R$ 123"
     /\b\d+\s*%\b/.test(t) || // "10%"
-    /\b\d+\s*dias?\b/.test(t) || // "5 dias"
+    /\b\d+\s*dias?\b/.test(t) || // "5 dias" (aqui é sinal numérico, não gatilho textual)
     /\b\d{1,3}\.\d{3}\b/.test(t); // "125.451"
 
-  // Pergunta curta pedindo “qual …” tende a ser normativa
-  const shortQuestion =
-    t.length <= 90 && (t.startsWith("qual") || t.startsWith("quais") || t.includes("?"));
-
-  return hit || numericSignals || shortQuestion;
+  return hit || numericSignals;
 }
 
 /**
@@ -455,7 +462,28 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode(sseEvent(event, data)));
       };
 
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      // ✅ Opção B (stream no Web-First): "simula" digitação enviando em chunks após validação
+      const sendInChunks = async (text: string) => {
+        const s = String(text ?? "");
+        if (!s) return;
+
+        // chunk curto dá sensação de "digitando" sem alongar demais a request
+        const chunkSize = 120;
+        const delayMs = 12; // ajuste aqui se quiser mais lento/rápido
+
+        for (let i = 0; i < s.length; i += chunkSize) {
+          send("delta", { text: s.slice(i, i + chunkSize) });
+          // pequenos respiros ajudam a não agrupar chunks no mesmo flush
+          await sleep(delayMs);
+        }
+      };
+
       try {
+        // 🔥 flush inicial (ajuda em alguns ambientes a "abrir" o SSE mais cedo)
+        send("ping", { ts: Date.now() });
+
         // ✅ Decide aqui (backend) se Web-First será obrigatório
         const forceWebFirst = shouldForceWebFirst(message);
 
@@ -488,7 +516,7 @@ export async function POST(req: Request) {
           return;
         }
 
-        send("meta", { userMessage: userMessageRow });
+        send("meta", { userMessage: userMessageRow, forceWebFirst });
 
         // 2) PDF: extrai texto -> chunk -> seleciona trechos relevantes
         let openaiFileId: string | null = null; // fallback: input_file
@@ -593,7 +621,8 @@ export async function POST(req: Request) {
         let assistantText = "";
 
         // ============================================================
-        // ✅ HARD GATE: quando forceWebFirst, NÃO STREAMA (100% seguro)
+        // ✅ WEB-FIRST: NÃO streama do OpenAI, mas mantém “efeito digitando”
+        //    enviando em chunks APÓS validar compliance.
         // ============================================================
         if (forceWebFirst) {
           const strictInstructions =
@@ -618,7 +647,7 @@ PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
             tools: [{ type: "web_search_preview" }],
             tool_choice: { type: "web_search_preview" }, // força o primeiro passo ser web
             input,
-            temperature: temp, // ✅ default 0.3 (ou recebido do frontend)
+            temperature: temp,
             stream: false,
           } as any);
 
@@ -642,7 +671,7 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
               tools: [{ type: "web_search_preview" }],
               tool_choice: { type: "web_search_preview" },
               input,
-              temperature: temp, // ✅ aqui também
+              temperature: temp,
               stream: false,
             } as any);
 
@@ -660,16 +689,16 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
             }
           }
 
-          // Envia tudo de uma vez (mantém SSE sem mudar frontend)
-          send("delta", { text: assistantText });
+          // ✅ mantém “digitando” via SSE chunked (após validar)
+          await sendInChunks(assistantText);
         } else {
-          // ✅ comportamento atual: streaming normal
+          // ✅ streaming normal (OpenAI stream)
           const request: any = {
             model,
             instructions: publiaPrompt,
             tools: [{ type: "web_search_preview" }],
             input,
-            temperature: temp, // ✅ default 0.3 (ou recebido do frontend)
+            temperature: temp,
             stream: true,
           };
 
