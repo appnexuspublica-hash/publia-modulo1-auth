@@ -99,6 +99,17 @@ function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+// ===== Temperature helpers (DEFAULT 0.3) =====
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function parseTemperature(v: any, fallback = 0.3) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return clamp(n, 0, 2);
+}
+
 /**
  * ==========================
  * ✅ BACKEND TRAVA WEB-FIRST
@@ -379,7 +390,14 @@ export async function POST(req: Request) {
     });
   }
 
-  const { conversationId, message } = body as { conversationId: string; message: string };
+  const { conversationId, message, temperature } = body as {
+    conversationId: string;
+    message: string;
+    temperature?: number;
+  };
+
+  // ✅ default temperature = 0.3 (com clamp)
+  const temp = parseTemperature(temperature, 0.3);
 
   if (!conversationId) {
     return new Response(sseEvent("error", { error: "conversationId é obrigatório." }), {
@@ -600,6 +618,7 @@ PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
             tools: [{ type: "web_search_preview" }],
             tool_choice: { type: "web_search_preview" }, // força o primeiro passo ser web
             input,
+            temperature: temp, // ✅ default 0.3 (ou recebido do frontend)
             stream: false,
           } as any);
 
@@ -623,6 +642,7 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
               tools: [{ type: "web_search_preview" }],
               tool_choice: { type: "web_search_preview" },
               input,
+              temperature: temp, // ✅ aqui também
               stream: false,
             } as any);
 
@@ -649,6 +669,7 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
             instructions: publiaPrompt,
             tools: [{ type: "web_search_preview" }],
             input,
+            temperature: temp, // ✅ default 0.3 (ou recebido do frontend)
             stream: true,
           };
 
