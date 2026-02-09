@@ -97,8 +97,6 @@ async function readErrorMessage(res: Response): Promise<string> {
 }
 
 function isSessionExpiredStatus(status: number) {
-  // 401/403: não autenticado / proibido
-  // 419/440: variações comuns de "session expired" em alguns stacks
   return status === 401 || status === 403 || status === 419 || status === 440;
 }
 
@@ -246,7 +244,6 @@ function TableWithDownloads({
           </div>
         </div>
 
-        {/* Somente 1 botão: Baixar Tabela/Planilha (Excel) */}
         {enableDownloads && (
           <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
             <button
@@ -297,23 +294,15 @@ function isCsvHeading(text: string) {
   );
 }
 
-/**
- * Split do rodapé normativo:
- * - main: tudo antes do início de "Base legal"
- * - footer: de "Base legal" até o final (inclui "Referências oficiais consultadas")
- *
- * Regex "blindado": aceita heading, negrito e variações com espaços.
- */
 function splitMarkdownFooter(md: string): { main: string; footer: string } {
   const s = String(md ?? "");
-  // início de linha + espaços + (##)? + (**)? Base legal (**)? :?
   const re =
     /(?:^|\n)\s*(?:#{1,6}\s*)?(?:(?:\*\*|__)\s*)?base\s+legal\s*(?:(?:\*\*|__)\s*)?:?\s*(?:\n|$)/i;
 
   const m = re.exec(s);
   if (!m) return { main: s, footer: "" };
 
-  const start = m.index; // começo da linha do "Base legal"
+  const start = m.index;
   const main = s.slice(0, start).trimEnd();
   const footer = s.slice(start).trim();
   return { main, footer };
@@ -409,7 +398,6 @@ export function ChatMessagesList({
     if (sp) lastScrollTopRef.current = sp.scrollTop;
   };
 
-  // Compartilhar válido somente no chat e somente se tiver conversationId ativo
   const canShare =
     variant === "chat" &&
     typeof activeConversationId === "string" &&
@@ -424,7 +412,6 @@ export function ChatMessagesList({
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
           const isGeneratingThis = isLastAssistant && isSending;
 
-          // índice de tabela por mensagem
           let tableIndex = 0;
 
           const userBubble = variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
@@ -589,26 +576,26 @@ export function ChatMessagesList({
                         </div>
                       )}
 
-                    {isGeneratingThis && (
-                      <div className="mb-2 flex items-center gap-2 text-xs text-slate-100">
-                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
-                        <span>Gerando resposta...</span>
-                      </div>
-                    )}
-
-                    {/* MAIN */}
+                    {/* ✅ NÃO bloqueia o conteúdo durante streaming */}
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
                         {main}
                       </ReactMarkdown>
                     </div>
 
-                    {/* FOOTER (Base legal + Referências) — 9px blindado */}
                     {footer.trim().length > 0 && (
                       <div className="publia-footnote mt-4 text-slate-100/90" data-footnote>
                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsFooter}>
                           {footer}
                         </ReactMarkdown>
+                      </div>
+                    )}
+
+                    {/* Indicador “gerando” sem esconder texto */}
+                    {isGeneratingThis && (
+                      <div className="mt-3 flex items-center gap-2 text-xs text-slate-100">
+                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
+                        <span>Gerando resposta...</span>
                       </div>
                     )}
                   </div>

@@ -8,6 +8,7 @@ import { publiaPrompt } from "@/lib/publiaPrompt";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 // ---- Supabase & OpenAI ----
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -19,7 +20,6 @@ const SSE_HEADERS: HeadersInit = {
   "Content-Type": "text/event-stream; charset=utf-8",
   "Cache-Control": "no-cache, no-transform",
   Connection: "keep-alive",
-  // ajuda a evitar buffering em alguns proxies/reverse-proxies (nginx)
   "X-Accel-Buffering": "no",
 };
 
@@ -114,37 +114,21 @@ function parseTemperature(v: any, fallback = 0.3) {
 
 /**
  * ==========================
- * ✅ BACKEND TRAVA WEB-FIRST
+ * Detector “Web-First”
+ * (menos agressivo)
  * ==========================
- * Detector “alta volatilidade / normativo sensível”.
- * Se retornar true, o backend vai:
- * - exigir evidência de uso do web_search_preview
- * - exigir seção "Referências oficiais consultadas"
- * - bloquear respostas que afirmem "Não houve consulta web..."
- *
- * ⚠️ IMPORTANTE:
- * Para NÃO matar o “efeito digitando”, mesmo no branch Web-First, este arquivo
- * agora envia o texto final em CHUNKS via SSE (simulando streaming) APÓS validar compliance.
  */
 function stripAccents(s: string) {
   return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
-/**
- * ✅ Opção A (ajuste): detector menos agressivo
- * - remove heurística de "pergunta curta" (era ampla demais)
- * - remove "dias" genérico (gatilho muito comum)
- * - mantém gatilhos realmente normativos + sinais numéricos
- */
 function shouldForceWebFirst(userText: string): boolean {
   const raw = String(userText ?? "").trim();
   if (!raw) return false;
 
   const t = stripAccents(raw).toLowerCase();
 
-  // Gatilhos normativos sensíveis (mais "cirúrgicos")
   const triggers = [
-    // valores/limites
     "valor",
     "valores",
     "limite",
@@ -161,16 +145,14 @@ function shouldForceWebFirst(userText: string): boolean {
     "novo decreto",
     "decreto atual",
 
-    // prazos (sem "dias" genérico)
     "prazo",
     "prazos",
     "prazo legal",
     "prazo de recurso",
     "quantos dias",
-    "dia util",
+    "dias úteis",
     "dias uteis",
 
-    // pedido de dispositivo/ato
     "art.",
     "artigo",
     "inciso",
@@ -184,7 +166,6 @@ function shouldForceWebFirst(userText: string): boolean {
     "resolucao",
     "resolução",
 
-    // temas muito comuns de atualização
     "dispensa",
     "inexigibilidade",
     "aditivo",
@@ -199,19 +180,18 @@ function shouldForceWebFirst(userText: string): boolean {
 
   const hit = triggers.some((k) => t.includes(stripAccents(k).toLowerCase()));
 
-  // Sinais numéricos típicos (mesmo sem palavras-chave)
   const numericSignals =
-    /\br\$\s*\d/i.test(t) || // "R$ 123"
-    /\b\d+\s*%\b/.test(t) || // "10%"
-    /\b\d+\s*dias?\b/.test(t) || // "5 dias" (aqui é sinal numérico, não gatilho textual)
-    /\b\d{1,3}\.\d{3}\b/.test(t); // "125.451"
+    /\br\$\s*\d/i.test(t) ||
+    /\b\d+\s*%\b/.test(t) ||
+    /\b\d+\s*dias?\b/.test(t) ||
+    /\b\d{1,3}\.\d{3}\b/.test(t);
 
+  // ✅ sem “shortQuestion”: era o que fazia disparar “quase sempre”
   return hit || numericSignals;
 }
 
 /**
  * Extrai texto final da Responses API (modo não-stream).
- * Blindado para variações do SDK.
  */
 function extractResponseText(resp: any): string {
   if (!resp) return "";
@@ -240,10 +220,6 @@ function extractResponseText(resp: any): string {
   }
 }
 
-/**
- * Detecta se o response realmente usou web_search_preview.
- * (Procura por itens de tool call no output e, como fallback, por "web_search" no JSON.)
- */
 function usedWebSearchTool(resp: any): boolean {
   try {
     const out = resp?.output;
@@ -272,12 +248,6 @@ function usedWebSearchTool(resp: any): boolean {
   }
 }
 
-/**
- * Valida “Web-First OK”:
- * - usou web_search_preview (evidência no response)
- * - inclui a seção "Referências oficiais consultadas"
- * - NÃO declara "Não houve consulta web..." (quando Web-First era obrigatório)
- */
 function validateWebFirst(resp: any, text: string): { ok: boolean; reason?: string } {
   const usedTool = usedWebSearchTool(resp);
 
@@ -333,7 +303,6 @@ async function downloadPdfBuffer(pdfRow: PdfFileRow): Promise<Buffer | null> {
 
 async function extractPdfText(buffer: Buffer): Promise<string | null> {
   try {
-    // ✅ dynamic import pra evitar erro de bundling/default export no Next
     const mod: any = await import("pdf-parse");
     const fn: any = mod?.default ?? mod;
     const parsed = await fn(buffer);
@@ -403,7 +372,6 @@ export async function POST(req: Request) {
     temperature?: number;
   };
 
-  // ✅ default temperature = 0.3 (com clamp)
   const temp = parseTemperature(temperature, 0.3);
 
   if (!conversationId) {
@@ -458,36 +426,53 @@ export async function POST(req: Request) {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: string, data: unknown) => {
-        controller.enqueue(encoder.encode(sseEvent(event, data)));
+      const sendRaw = (raw: string) => controller.enqueue(encoder.encode(raw));
+      const send = (event: string, data: unknown) => sendRaw(sseEvent(event, data));
+
+      // ✅ anti-buffer: força “primeiro flush”
+      sendRaw(":" + " ".repeat(2048) + "\n\n");
+      const ka = setInterval(() => {
+        // comentário SSE: o client ignora
+        try {
+          sendRaw(":ka\n\n");
+        } catch {}
+      }, 15000);
+
+      // ✅ agrega deltas pequenos (anti-buffer)
+      let pending = "";
+      let flushTimer: any = null;
+      const FLUSH_MIN_CHARS = 900;
+      const FLUSH_MAX_DELAY_MS = 70;
+
+      const flush = () => {
+        if (!pending) return;
+        const out = pending;
+        pending = "";
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        send("delta", { text: out });
       };
 
-      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const scheduleFlush = () => {
+        if (flushTimer) return;
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flush();
+        }, FLUSH_MAX_DELAY_MS);
+      };
 
-      // ✅ Opção B (stream no Web-First): "simula" digitação enviando em chunks após validação
-      const sendInChunks = async (text: string) => {
-        const s = String(text ?? "");
-        if (!s) return;
-
-        // chunk curto dá sensação de "digitando" sem alongar demais a request
-        const chunkSize = 120;
-        const delayMs = 12; // ajuste aqui se quiser mais lento/rápido
-
-        for (let i = 0; i < s.length; i += chunkSize) {
-          send("delta", { text: s.slice(i, i + chunkSize) });
-          // pequenos respiros ajudam a não agrupar chunks no mesmo flush
-          await sleep(delayMs);
-        }
+      const pushDelta = (t: string) => {
+        if (!t) return;
+        pending += t;
+        if (pending.length >= FLUSH_MIN_CHARS) flush();
+        else scheduleFlush();
       };
 
       try {
-        // 🔥 flush inicial (ajuda em alguns ambientes a "abrir" o SSE mais cedo)
-        send("ping", { ts: Date.now() });
-
-        // ✅ Decide aqui (backend) se Web-First será obrigatório
         const forceWebFirst = shouldForceWebFirst(message);
 
-        // 0) histórico
         const MAX_HISTORY = 8;
         const { data: historyData } = await client
           .from("messages")
@@ -499,7 +484,6 @@ export async function POST(req: Request) {
         const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
         historyRows.reverse();
 
-        // 1) salva msg usuário
         const { data: userMessageRow, error: insertUserError } = await client
           .from("messages")
           .insert({
@@ -518,9 +502,9 @@ export async function POST(req: Request) {
 
         send("meta", { userMessage: userMessageRow, forceWebFirst });
 
-        // 2) PDF: extrai texto -> chunk -> seleciona trechos relevantes
-        let openaiFileId: string | null = null; // fallback: input_file
-        let pdfContext = ""; // preferencial: texto selecionado
+        // 2) PDF context
+        let openaiFileId: string | null = null;
+        let pdfContext = "";
 
         const latestPdf = await getLatestPdfForConversation(conversationId, userId!);
 
@@ -530,7 +514,7 @@ export async function POST(req: Request) {
             const textRaw = await extractPdfText(buf);
 
             if (textRaw) {
-              const HARD_LIMIT = 250_000; // chars
+              const HARD_LIMIT = 250_000;
               const text = textRaw.length > HARD_LIMIT ? textRaw.slice(0, HARD_LIMIT) : textRaw;
 
               const chunks = chunkText(text, { chunkSize: 1400, overlap: 200, maxChunks: 400 });
@@ -546,7 +530,6 @@ export async function POST(req: Request) {
             }
           }
 
-          // fallback: se não extrair texto, usa input_file (OpenAI) como antes
           if (!pdfContext) {
             if (latestPdf.openai_file_id) {
               openaiFileId = latestPdf.openai_file_id;
@@ -565,7 +548,6 @@ export async function POST(req: Request) {
           }
         }
 
-        // 3) monta contexto (histórico + pergunta + PDF selecionado)
         let combinedText = message.trim();
 
         if (historyRows.length > 0) {
@@ -591,7 +573,6 @@ export async function POST(req: Request) {
             combinedText;
         }
 
-        // ✅ Instrução “dura” quando backend exige Web-First
         if (forceWebFirst) {
           combinedText =
             "⚠️ BACKEND: WEB-FIRST OBRIGATÓRIO NESTA PERGUNTA.\n" +
@@ -606,24 +587,16 @@ export async function POST(req: Request) {
         if (combinedText.length > MAX_TOTAL_CHARS) combinedText = combinedText.slice(-MAX_TOTAL_CHARS);
 
         const userContent: any[] = [{ type: "input_text", text: combinedText }];
-
-        if (openaiFileId) {
-          userContent.push({ type: "input_file", file_id: openaiFileId });
-        }
+        if (openaiFileId) userContent.push({ type: "input_file", file_id: openaiFileId });
 
         const input: any[] = [{ role: "user", content: userContent }];
 
-        // modelos
         const modelWithPdf = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
         const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
         const model = openaiFileId ? modelWithPdf : modelNoPdf;
 
         let assistantText = "";
 
-        // ============================================================
-        // ✅ WEB-FIRST: NÃO streama do OpenAI, mas mantém “efeito digitando”
-        //    enviando em chunks APÓS validar compliance.
-        // ============================================================
         if (forceWebFirst) {
           const strictInstructions =
             publiaPrompt +
@@ -640,12 +613,11 @@ Você DEVE:
 PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
 `;
 
-          // 1ª tentativa (não-stream)
           const resp1 = await openai.responses.create({
             model,
             instructions: strictInstructions,
             tools: [{ type: "web_search_preview" }],
-            tool_choice: { type: "web_search_preview" }, // força o primeiro passo ser web
+            tool_choice: { type: "web_search_preview" },
             input,
             temperature: temp,
             stream: false,
@@ -655,7 +627,6 @@ PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
           const v1 = validateWebFirst(resp1, assistantText);
 
           if (!v1.ok) {
-            // retry 1x (mais duro)
             const retryInstructions =
               strictInstructions +
               `
@@ -689,10 +660,14 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
             }
           }
 
-          // ✅ mantém “digitando” via SSE chunked (após validar)
-          await sendInChunks(assistantText);
+          // ✅ efeito “digitando” também no Web-First
+          const CHUNK = 1200;
+          for (let i = 0; i < assistantText.length; i += CHUNK) {
+            pushDelta(assistantText.slice(i, i + CHUNK));
+            await new Promise((r) => setTimeout(r, 18));
+          }
+          flush();
         } else {
-          // ✅ streaming normal (OpenAI stream)
           const request: any = {
             model,
             instructions: publiaPrompt,
@@ -709,11 +684,12 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
               const delta = event.delta as string;
               if (delta) {
                 assistantText += delta;
-                send("delta", { text: delta });
+                pushDelta(delta);
               }
             }
           }
 
+          flush();
           assistantText = formatAssistantText(assistantText);
         }
 
@@ -723,7 +699,6 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
           return;
         }
 
-        // 4) salva msg IA
         const { data: assistantMessageRow, error: insertAssistantError } = await client
           .from("messages")
           .insert({
@@ -741,12 +716,16 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
         }
 
         send("done", { assistantMessage: assistantMessageRow });
+        clearInterval(ka);
         controller.close();
       } catch (err) {
         console.error("Erro inesperado em /api/chat:", err);
-        controller.enqueue(
-          encoder.encode(sseEvent("error", { error: "Erro inesperado ao processar a requisição." }))
-        );
+        try {
+          sendRaw(sseEvent("error", { error: "Erro inesperado ao processar a requisição." }));
+        } catch {}
+        try {
+          clearInterval(ka);
+        } catch {}
         controller.close();
       }
     },
