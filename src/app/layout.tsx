@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Publ.IA - Nexus Pública",
-  description: "Assistente virtual especializado em Gestão Pública, Licitações e Contratos.",
+  description: "Inteligência Artificial especializada em Gestão Pública, Licitações e Contratos.",
 };
 
 export default function RootLayout({

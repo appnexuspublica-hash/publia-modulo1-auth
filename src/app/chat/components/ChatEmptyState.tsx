@@ -6,9 +6,9 @@ export function ChatEmptyState() {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 text-center text-white">
       <p className="max-w-3xl text-sm">
-        Sou o <span className="font-semibold">Publ.IA</span>, assistente virtual
-        especializado em Gestão Pública, Licitações e Contratos. <br />
-        Viso fortalecer a eficiência, a transparência e a segurança jurídica na
+        Sou <span className="font-semibold">Publ.IA</span>, Inteligência Artificial
+        especializada em Gestão Pública, Licitações e Contratos. <br />
+        Atuo para fortalecer a eficiência, a transparência e a segurança jurídica na
         Administração Pública Municipal.
       </p>
 

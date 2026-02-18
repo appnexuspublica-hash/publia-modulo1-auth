@@ -100,7 +100,7 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
       {/* Rodapé */}
       <div className="w-full bg-[#2b4e67] text-white text-[12px] leading-snug text-center px-4 py-3">
         <p className="mx-auto">
-          IMPORTANTE: O Publ.IA é uma ferramenta de apoio técnico e informativo. Não substitui a assessoria jurídica,
+          IMPORTANTE: Publ.IA é uma ferramenta de apoio técnico e informativo. Não substitui a assessoria jurídica,
           contábil ou de controle interno. As informações são baseadas na legislação vigente e devem ser revisadas
           antes de uso oficial - Nexus Pública @2026 - Todos os direitos reservados |{" "}
           <a
@@ -118,7 +118,7 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
             rel="noopener noreferrer"
             className="underline"
           >
-            Sobre o Publ.IA
+            Sobre Publ.IA
           </a>
           <span className="mx-1">|</span>
           <a
