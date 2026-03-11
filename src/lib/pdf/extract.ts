@@ -1,4 +1,6 @@
 // src/lib/pdf/extract.ts
+import { getDocumentProxy } from "unpdf";
+
 export const DEFAULT_EXTRACT_TEXT_HARD_LIMIT = 250_000;
 
 export type PdfExtractResult =
@@ -14,10 +16,14 @@ type ExtractPdfTextOptions = {
   maxMbLabel?: number | null;
 };
 
-export function sanitizeExtractedText(raw: string, hardLimit = DEFAULT_EXTRACT_TEXT_HARD_LIMIT) {
+export function sanitizeExtractedText(
+  raw: string,
+  hardLimit = DEFAULT_EXTRACT_TEXT_HARD_LIMIT
+) {
   let text = String(raw ?? "");
   text = text.replace(/\u0000/g, " ");
   text = text.replace(/[ \t]+\n/g, "\n");
+  text = text.replace(/\r/g, "\n");
   text = text.replace(/\n{3,}/g, "\n\n");
   text = text.replace(/[ \t]{2,}/g, " ");
   text = text.trim();
@@ -34,11 +40,19 @@ export function getNoTextPdfMessage() {
 }
 
 export function getSkippedLargePdfMessage(maxMbLabel?: number | null) {
-  if (typeof maxMbLabel === "number" && Number.isFinite(maxMbLabel) && maxMbLabel > 0) {
+  if (
+    typeof maxMbLabel === "number" &&
+    Number.isFinite(maxMbLabel) &&
+    maxMbLabel > 0
+  ) {
     return `PDF grande demais para extração automática (${maxMbLabel} MB). Faça OCR/versão menor.`;
   }
 
   return "PDF grande demais para extração automática. Faça OCR/versão menor.";
+}
+
+function normalizeBufferInput(buf: Buffer): Uint8Array {
+  return new Uint8Array(buf);
 }
 
 export async function extractPdfTextFromBuffer(
@@ -65,20 +79,12 @@ export async function extractPdfTextFromBuffer(
   }
 
   try {
-    const pdfjs: any = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdf = await getDocumentProxy(normalizeBufferInput(buf));
 
-    const loadingTask = pdfjs.getDocument({
-      data: new Uint8Array(buf),
-      useWorkerFetch: false,
-      isEvalSupported: false,
-      useSystemFonts: true,
-    });
-
-    const doc = await loadingTask.promise;
     let out = "";
 
-    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
-      const page = await doc.getPage(pageNumber);
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
 
       const strings = (content.items ?? [])

@@ -89,7 +89,7 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
             <button
               type="submit"
               disabled={isDisabled}
-              className="ml-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-[#ffae00] text-slate-900 text-lg font-semibold disabled:opacity-60"
+              className="ml-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-[#bbbbbb] text-slate-900 text-lg font-semibold disabled:opacity-60"
               aria-label="Enviar"
               title="Enviar"
             >

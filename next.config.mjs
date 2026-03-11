@@ -8,8 +8,6 @@ const nextConfig = {
       { protocol: "https", hostname: "www.nexuspublica.com.br", pathname: "/**" },
     ],
   },
-
-  serverExternalPackages: ["pdfjs-dist"],
 };
 
 export default nextConfig;
