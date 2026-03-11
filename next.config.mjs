@@ -1,11 +1,15 @@
 ﻿/** @type {import('next').NextConfig} */
 const nextConfig = {
-  outputFileTracingIncludes: {
-    "/api/pdf/index": [
-      "./scripts/extract-pdf.mjs",
-      "./node_modules/pdfjs-dist/**/*",
+  reactStrictMode: true,
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "nexuspublica.com.br", pathname: "/**" },
+      { protocol: "https", hostname: "www.nexuspublica.com.br", pathname: "/**" },
     ],
-    "/api/pdf/reprocess": [
+  },
+
+  outputFileTracingIncludes: {
+    "/api/pdf/*": [
       "./scripts/extract-pdf.mjs",
       "./node_modules/pdfjs-dist/**/*",
     ],
