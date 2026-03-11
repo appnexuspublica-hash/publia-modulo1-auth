@@ -67,6 +67,55 @@ export function getSkippedLargePdfMessage(maxMbLabel?: number | null) {
   return "PDF grande demais para extração automática. Faça OCR/versão menor.";
 }
 
+function shouldUseInProcessExtractor() {
+  return process.env.VERCEL === "1";
+}
+
+async function extractPdfTextInProcess(
+  buffer: Buffer,
+  hardLimit: number
+): Promise<PdfExtractResult> {
+  try {
+    const pdfjs: any = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(buffer),
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      useSystemFonts: true,
+    });
+
+    const doc = await loadingTask.promise;
+    let out = "";
+
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
+      const page = await doc.getPage(pageNumber);
+      const content = await page.getTextContent();
+
+      const strings = (content.items ?? [])
+        .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
+        .filter(Boolean);
+
+      if (strings.length) {
+        out += strings.join(" ") + "\n";
+      }
+    }
+
+    const text = sanitizeExtractedText(out, hardLimit);
+
+    if (!text) {
+      return { kind: "no_text" };
+    }
+
+    return { kind: "ready", text };
+  } catch (error: any) {
+    return {
+      kind: "technical_error",
+      error: String(error?.message ?? error ?? "Falha técnica ao extrair texto do PDF."),
+    };
+  }
+}
+
 async function runExternalExtractor(
   tempFilePath: string,
   hardLimit: number
@@ -167,6 +216,10 @@ export async function extractPdfTextFromBuffer(
       kind: "skipped_large",
       error: getSkippedLargePdfMessage(options.maxMbLabel ?? null),
     };
+  }
+
+  if (shouldUseInProcessExtractor()) {
+    return extractPdfTextInProcess(buf, hardLimit);
   }
 
   let tempDir = "";

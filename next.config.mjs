@@ -1,6 +1,7 @@
 ﻿/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "nexuspublica.com.br", pathname: "/**" },
@@ -8,12 +9,10 @@ const nextConfig = {
     ],
   },
 
+  serverExternalPackages: ["pdfjs-dist"],
+
   outputFileTracingIncludes: {
-    "/api/pdf/*": [
-      "./scripts/extract-pdf.mjs",
-      "./node_modules/pdfjs-dist/package.json",
-      "./node_modules/pdfjs-dist/**/*",
-    ],
+    "/api/pdf/*": ["./scripts/extract-pdf.mjs"],
   },
 };
 
