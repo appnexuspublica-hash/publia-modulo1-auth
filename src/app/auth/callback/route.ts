@@ -7,6 +7,8 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const next = url.searchParams.get("next") || "/";
+  // Evita open redirect: aceita apenas caminhos relativos ("/...")
+  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/";
 
   if (!code) {
     return NextResponse.redirect(new URL("/login", url.origin));
@@ -38,5 +40,5 @@ export async function GET(req: Request) {
     return NextResponse.redirect(new URL("/login", url.origin));
   }
 
-  return NextResponse.redirect(new URL(next, url.origin));
+  return NextResponse.redirect(new URL(safeNext, url.origin));
 }

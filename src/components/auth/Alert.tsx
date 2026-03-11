@@ -18,13 +18,7 @@ type AlertProps = {
   children?: ReactNode;
 };
 
-export function Alert({
-  type,
-  variant,
-  title,
-  message,
-  children,
-}: AlertProps) {
+export function Alert({ type, variant, title, message, children }: AlertProps) {
   // Normaliza o tipo: prioridade para "type", depois "variant"
   const kind: AlertKind = type ?? variant ?? "error";
 
@@ -42,22 +36,12 @@ export function Alert({
     >
       {hasStructuredContent ? (
         <div className="space-y-1">
-          {title && (
-            <div className="font-semibold leading-snug">
-              {title}
-            </div>
-          )}
-          {message && (
-            <div className="leading-snug text-xs sm:text-sm">
-              {message}
-            </div>
-          )}
+          {title && <div className="font-semibold leading-snug">{title}</div>}
+          {message && <div className="leading-snug text-xs sm:text-sm">{message}</div>}
         </div>
       ) : (
         // Modo antigo: conteúdo vem em children
-        <div className="leading-snug text-xs sm:text-sm">
-          {children}
-        </div>
+        <div className="leading-snug text-xs sm:text-sm">{children}</div>
       )}
     </div>
   );

@@ -59,13 +59,16 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
     return String(m ?? "").trim();
   }, [searchParams]);
 
-  // Seleciona apenas a mensagem alvo (assistant) e o user anterior (como "título")
+  const cleanMessageId = useMemo(() => {
+    const v = String(messageIdFromQuery ?? "").trim();
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v) ? v : "";
+  }, [messageIdFromQuery]);
+
   const selected = useMemo(() => {
     const msgs = data?.messages ?? [];
     if (!msgs.length) return { dateLabel: "", sliced: [] as ChatMessage[], assistantId: "" };
 
     if (!messageIdFromQuery) {
-      // Sem ?m=, mostra tudo (fallback)
       const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
       const dateLabel = formatDateLabel(lastAssistant?.created_at);
       return {
@@ -103,10 +106,8 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
     if (!assistantMsg) return { dateLabel: "", sliced: [] as ChatMessage[], assistantId: "" };
 
     const dateLabel = formatDateLabel(assistantMsg.created_at);
-
     const sliced = [userMsg, assistantMsg].filter(Boolean) as ChatMessage[];
 
-    // remove created_at para não aparecer divisor de data dentro da lista
     return {
       dateLabel,
       sliced: sliced.map((m) => ({ ...m, created_at: undefined })),
@@ -122,7 +123,8 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
       setError(null);
 
       try {
-        const res = await fetch(`/api/public/share/${cleanShareId}`, { cache: "no-store" });
+        const qs = cleanMessageId ? `?m=${encodeURIComponent(cleanMessageId)}` : "";
+        const res = await fetch(`/api/public/share/${cleanShareId}${qs}`, { cache: "no-store" });
         const json = (await res.json().catch(() => null)) as any;
 
         if (!res.ok) {
@@ -152,7 +154,7 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
     return () => {
       cancelled = true;
     };
-  }, [cleanShareId]);
+  }, [cleanShareId, cleanMessageId]); // ✅ FIX warning
 
   async function handleCopyDisplayed() {
     if (!selected.assistantId) return;
@@ -170,7 +172,6 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
 
   return (
     <div className="min-h-screen bg-[#2f4f67]">
-      {/* Barra de ações no topo */}
       <header className="border-b border-white/10 bg-[#1b3a56] px-4 py-3">
         <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-3">
           <div className="text-sm font-semibold text-white">Publ.IA — Compartilhamento</div>
@@ -222,13 +223,11 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
 
         {!loading && !error && data && (
           <>
-            {/* Data da mensagem (sem balão) */}
             <div className="mb-4 text-[12px] text-white/80">
               Data da mensagem:{" "}
               <span className="font-semibold text-white">{selected.dateLabel || "—"}</span>
             </div>
 
-            {/* Conteúdo */}
             {hasSlice ? (
               <ChatMessagesList messages={selected.sliced} isSending={false} variant="share" />
             ) : (
@@ -237,9 +236,9 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
               </div>
             )}
 
-            {/* Mini rodapé */}
             <div className="mt-5 border-t border-white/10 pt-3 text-center text-[11px] text-white/70">
-              Gerado por <span className="font-semibold text-white/80">Publ.IA</span> — Nexus Pública
+              Gerado por <span className="font-semibold text-white/80">Publ.IA</span> — Nexus
+              Pública
             </div>
           </>
         )}

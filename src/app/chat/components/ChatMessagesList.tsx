@@ -33,6 +33,10 @@ type ChatMessagesListProps = {
   onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
 
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
+
+  // ✅ NOVO (botão "Fazer OCR" ao lado do Regenerar)
+  onDoOcr?: () => void | Promise<void>;
+
   isSending: boolean;
   activePdfName?: string | null;
 
@@ -308,11 +312,25 @@ function splitMarkdownFooter(md: string): { main: string; footer: string } {
   return { main, footer };
 }
 
+// ✅ FIX ESLINT: Hooks em componentes com letra maiúscula
+function ThCell(props: any) {
+  const theme = useMdTheme();
+  const { isWide } = useTableLayout();
+  return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
+}
+
+function TdCell(props: any) {
+  const theme = useMdTheme();
+  const { isWide } = useTableLayout();
+  return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
+}
+
 export function ChatMessagesList({
   messages,
   onCopyAnswer,
   onShareConversation,
   onRegenerateLast,
+  onDoOcr,
   isSending,
   variant = "chat",
   scrollContainerRef,
@@ -404,6 +422,14 @@ export function ChatMessagesList({
     activeConversationId.trim().length > 0 &&
     typeof onShareConversation === "function";
 
+  // ✅ heurística simples: se a última resposta tem o texto de OCR, mostra botão
+  const showOcrButton =
+  typeof onDoOcr === "function" &&
+  !!lastAssistant &&
+  !!lastUser &&
+  !isSending &&
+  String(lastAssistant.content ?? "").toLowerCase().includes("faça ocr");
+
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
@@ -414,7 +440,8 @@ export function ChatMessagesList({
 
           let tableIndex = 0;
 
-          const userBubble = variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#1c4561] text-white";
+          const userBubble =
+            variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#5d5d5d] text-white";
 
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
@@ -463,14 +490,10 @@ export function ChatMessagesList({
               );
             },
             thead: ({ node, ...props }: any) => <thead {...props} className={theme.theadBg} />,
-            th: ({ node, ...props }: any) => {
-              const { isWide } = useTableLayout();
-              return <th {...props} className={isWide ? theme.thWide : theme.thNormal} />;
-            },
-            td: ({ node, ...props }: any) => {
-              const { isWide } = useTableLayout();
-              return <td {...props} className={isWide ? theme.tdWide : theme.tdNormal} />;
-            },
+
+            // ✅ FIX: usa componentes válidos (Hooks ok)
+            th: (props: any) => <ThCell {...props} />,
+            td: (props: any) => <TdCell {...props} />,
 
             code: (p: any) => {
               const { inline, className, children, ...props } = p as any;
@@ -576,7 +599,6 @@ export function ChatMessagesList({
                         </div>
                       )}
 
-                    {/* ✅ NÃO bloqueia o conteúdo durante streaming */}
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
                         {main}
@@ -591,7 +613,6 @@ export function ChatMessagesList({
                       </div>
                     )}
 
-                    {/* Indicador “gerando” sem esconder texto */}
                     {isGeneratingThis && (
                       <div className="mt-3 flex items-center gap-2 text-xs text-slate-100">
                         <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
@@ -600,7 +621,7 @@ export function ChatMessagesList({
                     )}
                   </div>
 
-                  {(onCopyAnswer || onRegenerateLast || canShare) && (
+                  {(onCopyAnswer || onRegenerateLast || canShare || showOcrButton) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
                       {actionToast?.messageId === msg.id && (
                         <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
@@ -639,6 +660,18 @@ export function ChatMessagesList({
                             className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
                           >
                             Regenerar
+                          </button>
+                        )}
+
+                        {/* ✅ Depois do Regenerar */}
+                        {showOcrButton && onDoOcr && lastAssistant && msg.id === lastAssistant.id && (
+                          <button
+                            type="button"
+                            disabled={isGeneratingThis}
+                            onClick={() => onDoOcr()}
+                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
+                          >
+                            Fazer OCR
                           </button>
                         )}
                       </div>

@@ -1,7 +1,7 @@
-
 # Publ.IA — Módulo 1 (Auth)
 
 ## Como extrair direto da pasta Downloads (PowerShell)
+
 ```powershell
 # 1) Criar pasta destino
 New-Item -ItemType Directory -Force -Path "C:\meus-projetos\publia-modulo1-auth" | Out-Null
@@ -18,6 +18,7 @@ npm run dev
 ```
 
 ## URLs
+
 - Criar conta (com token): `http://localhost:3000/criar-conta?tk=SEU_TOKEN_EXATO`
 - Login: `http://localhost:3000/login`
 - Recuperar senha: `http://localhost:3000/recuperar-senha`

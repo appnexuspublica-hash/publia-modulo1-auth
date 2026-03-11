@@ -59,17 +59,13 @@ export default function RecuperarSenhaPage() {
 
       {status === "ok" && (
         <Alert type="success">
-          Enviamos para o e-mail cadastrado instruções para redefinir nova senha de acesso. Pode levar alguns instantes ou mesmo cair no spam. 
+          Enviamos para o e-mail cadastrado instruções para redefinir nova senha de acesso. Pode
+          levar alguns instantes ou mesmo cair no spam.
         </Alert>
       )}
 
       <form onSubmit={onSubmit} className="mt-2 space-y-4">
-        <AuthInput
-          name="cpf_cnpj"
-          label="CPF/CNPJ"
-          placeholder="Digite seu CPF ou CNPJ"
-          required
-        />
+        <AuthInput name="cpf_cnpj" label="CPF/CNPJ" placeholder="Digite seu CPF ou CNPJ" required />
 
         <button
           type="submit"

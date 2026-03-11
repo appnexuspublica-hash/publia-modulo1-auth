@@ -20,7 +20,7 @@ function SubmitButton() {
 
 export default function LoginForm() {
   const [state, formAction] = useFormState<LoginState, FormData>(
-    login,           // 👈 usa a mesma action do page.tsx
+    login, // 👈 usa a mesma action do page.tsx
     { ok: false }
   );
 
@@ -30,19 +30,15 @@ export default function LoginForm() {
       <div className="mb-6 flex flex-col items-center">
         <Image
           src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
-          alt="Publ.IA"
+          alt=""
           width={40}
           height={40}
           className="mb-2"
         />
 
-        <h1 className="text-lg font-semibold text-center">
-          Publ.IA - Nexus Pública
-        </h1>
+        <h1 className="text-lg font-semibold text-center">Publ.IA - Nexus Pública</h1>
 
-        <p className="text-sm text-gray-600 text-center">
-          Faça login para acessar o painel.
-        </p>
+        <p className="text-sm text-gray-600 text-center">Faça login para acessar o painel.</p>
       </div>
 
       {/* Mensagem de erro */}
@@ -79,10 +75,7 @@ export default function LoginForm() {
       </form>
 
       <div className="mt-4 text-center">
-        <Link
-          href="/recuperar-senha"
-          className="text-sm font-medium text-blue-700 underline"
-        >
+        <Link href="/recuperar-senha" className="text-sm font-medium text-blue-700 underline">
           Esqueceu a senha?
         </Link>
       </div>

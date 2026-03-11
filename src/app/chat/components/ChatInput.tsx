@@ -63,7 +63,9 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
         <div className="flex w-full max-w-3xl items-center rounded-2xl bg-white px-4 py-2 shadow-md">
           <textarea
             ref={textareaRef}
-            placeholder={isSending ? "Gerando resposta… (você pode PARAR)" : "Envie sua pergunta..."}
+            placeholder={
+              isSending ? "Gerando resposta… (você pode PARAR)" : "Envie sua pergunta..."
+            }
             value={value}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
@@ -100,9 +102,10 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
       {/* Rodapé */}
       <div className="w-full bg-[#2b4e67] text-white text-[12px] leading-snug text-center px-4 py-3">
         <p className="mx-auto">
-          IMPORTANTE: Publ.IA é uma ferramenta de apoio técnico e informativo. Não substitui a assessoria jurídica,
-          contábil ou de controle interno. As informações são baseadas na legislação vigente e devem ser revisadas
-          antes de uso oficial - Nexus Pública @2026 - Todos os direitos reservados |{" "}
+          IMPORTANTE: Publ.IA é uma ferramenta de apoio técnico e informativo. Não substitui a
+          assessoria jurídica, contábil ou de controle interno. As informações são baseadas na
+          legislação vigente e devem ser revisadas antes de uso oficial - Nexus Pública @2026 -
+          Todos os direitos reservados |{" "}
           <a
             href="https://www.nexuspublica.com.br"
             target="_blank"

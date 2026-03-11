@@ -16,10 +16,7 @@ const initialState: LoginState = { ok: false };
 
 export default function LoginPage() {
   const router = useRouter();
-  const [state, formAction] = useFormState<LoginState, FormData>(
-    login,
-    initialState
-  );
+  const [state, formAction] = useFormState<LoginState, FormData>(login, initialState);
 
   const [creating, setCreating] = React.useState(false);
 
@@ -50,38 +47,20 @@ export default function LoginPage() {
   }
 
   return (
-    <AuthShell
-      title="Publ.IA - Nexus Pública"
-      subtitle="Faça login para acessar o painel."
-    >
+    <AuthShell title="Publ.IA - Nexus Pública" subtitle="Faça login para acessar o painel.">
       {state?.error && <Alert type="error">{state.error}</Alert>}
 
       {state.ok && !state.error && (
-        <Alert type="success">
-          Login realizado com sucesso! Redirecionando para o painel…
-        </Alert>
+        <Alert type="success">Login realizado com sucesso! Redirecionando para o painel…</Alert>
       )}
 
       <form action={formAction} className="mt-2 space-y-4">
-        <AuthInput
-          name="cpf_cnpj"
-          label="CPF/CNPJ"
-          placeholder="Digite seu CPF ou CNPJ"
-          required
-        />
+        <AuthInput name="cpf_cnpj" label="CPF/CNPJ" placeholder="Digite seu CPF ou CNPJ" required />
 
-        <AuthPasswordInput
-          name="senha"
-          label="Senha"
-          placeholder="••••••••"
-          required
-        />
+        <AuthPasswordInput name="senha" label="Senha" placeholder="••••••••" required />
 
         <div className="flex justify-end -mt-1">
-          <Link
-            href="/recuperar-senha"
-            className="text-xs text-blue-600 hover:underline"
-          >
+          <Link href="/recuperar-senha" className="text-xs text-blue-600 hover:underline">
             Esqueceu a senha?
           </Link>
         </div>
@@ -96,9 +75,7 @@ export default function LoginPage() {
 
       {/* BLOCO: ainda não é cadastrado? */}
       <div className="text-center">
-        <div className="text-[15px] font-bold text-slate-800">
-          Ainda não é cadastrado?
-        </div>
+        <div className="text-[15px] font-bold text-slate-800">Ainda não é cadastrado?</div>
 
         <button
           type="button"

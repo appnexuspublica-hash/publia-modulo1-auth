@@ -1,98 +1,116 @@
 // src/lib/pdf/chunking.ts
 
-type Chunk = { text: string; index: number };
+export type TextChunk = {
+  index: number;
+  text: string;
+};
 
-function normalize(s: string) {
-  return s
+type ChunkOptions = {
+  chunkSize?: number;
+  overlap?: number;
+  maxChunks?: number;
+};
+
+type PickOptions = {
+  maxChunks?: number;
+  maxChars?: number;
+  minScore?: number;
+};
+
+function normalizeForSearch(text: string) {
+  return String(text ?? "")
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function tokenize(query: string) {
-  const stop = new Set([
-    "a","o","os","as","de","do","da","dos","das","e","em","no","na","nos","nas",
-    "um","uma","uns","umas","para","por","com","sem","que","se","ao","à","às",
-    "é","ser","como","mais","menos","ja","não","sim","sua","seu","suas","seus",
-    "sobre","entre","ate","desde","quando","onde","qual","quais","quanto","quantos"
-  ]);
-
-  return normalize(query)
+function tokenize(text: string) {
+  return normalizeForSearch(text)
     .split(" ")
-    .filter((t) => t.length >= 3 && !stop.has(t));
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
 }
 
-export function chunkText(
-  text: string,
-  opts?: { chunkSize?: number; overlap?: number; maxChunks?: number }
-): Chunk[] {
-  const chunkSize = opts?.chunkSize ?? 1400; // chars
-  const overlap = opts?.overlap ?? 200;
-  const maxChunks = opts?.maxChunks ?? 400;
+export function chunkText(text: string, options: ChunkOptions = {}): TextChunk[] {
+  const chunkSize = Math.max(300, options.chunkSize ?? 1200);
+  const overlap = Math.max(0, options.overlap ?? 200);
+  const maxChunks = Math.max(1, options.maxChunks ?? 200);
 
-  const clean = text.replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
-  if (!clean) return [];
+  const source = String(text ?? "").trim();
+  if (!source) return [];
 
-  const chunks: Chunk[] = [];
-  let i = 0;
-  let idx = 0;
+  const chunks: TextChunk[] = [];
+  let start = 0;
+  let index = 0;
 
-  while (i < clean.length && chunks.length < maxChunks) {
-    const end = Math.min(i + chunkSize, clean.length);
-    const slice = clean.slice(i, end).trim();
-    if (slice) chunks.push({ text: slice, index: idx++ });
+  while (start < source.length && chunks.length < maxChunks) {
+    let end = Math.min(source.length, start + chunkSize);
 
-    if (end >= clean.length) break;
-    i = Math.max(0, end - overlap);
+    if (end < source.length) {
+      const lastParagraphBreak = source.lastIndexOf("\n\n", end);
+      const lastSentenceBreak = source.lastIndexOf(". ", end);
+      const lastSpace = source.lastIndexOf(" ", end);
+
+      const bestBreak = Math.max(lastParagraphBreak, lastSentenceBreak, lastSpace);
+
+      if (bestBreak > start + Math.floor(chunkSize * 0.6)) {
+        end = bestBreak;
+      }
+    }
+
+    const piece = source.slice(start, end).trim();
+    if (piece) {
+      chunks.push({ index, text: piece });
+      index += 1;
+    }
+
+    if (end >= source.length) break;
+
+    start = Math.max(start + 1, end - overlap);
   }
 
   return chunks;
 }
 
-function scoreChunk(chunkText: string, terms: string[]) {
-  if (terms.length === 0) return 0;
-  const hay = normalize(chunkText);
-  let score = 0;
-  for (const t of terms) if (hay.includes(t)) score += 1;
-  return score;
-}
-
 export function pickRelevantChunks(
-  chunks: Chunk[],
-  userQuestion: string,
-  opts?: { maxChunks?: number; maxChars?: number; minScore?: number }
-) {
-  const maxChunks = opts?.maxChunks ?? 6;
-  const maxChars = opts?.maxChars ?? 9000;
-  const minScore = opts?.minScore ?? 1;
+  chunks: TextChunk[],
+  query: string,
+  options: PickOptions = {}
+): TextChunk[] {
+  const maxChunks = Math.max(1, options.maxChunks ?? 5);
+  const maxChars = Math.max(500, options.maxChars ?? 6000);
+  const minScore = options.minScore ?? 1;
 
-  const terms = tokenize(userQuestion);
-  const ranked = chunks
-    .map((c) => ({ ...c, score: scoreChunk(c.text, terms) }))
-    .sort((a, b) => b.score - a.score);
+  const queryTokens = tokenize(query);
+  if (!chunks.length) return [];
 
-  const picked: Chunk[] = [];
-  let used = 0;
+  const scored = chunks
+    .map((chunk) => {
+      const chunkNorm = normalizeForSearch(chunk.text);
 
-  for (const r of ranked) {
-    if (picked.length >= maxChunks) break;
-    if (r.score < minScore) break;
+      let score = 0;
+      for (const token of queryTokens) {
+        if (chunkNorm.includes(token)) score += 1;
+      }
 
-    if (used + r.text.length > maxChars) continue;
-    picked.push({ text: r.text, index: r.index });
-    used += r.text.length;
+      return { ...chunk, score };
+    })
+    .filter((item) => item.score >= minScore)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  const result: TextChunk[] = [];
+  let usedChars = 0;
+
+  for (const item of scored) {
+    if (result.length >= maxChunks) break;
+    if (usedChars + item.text.length > maxChars) break;
+
+    result.push({ index: item.index, text: item.text });
+    usedChars += item.text.length;
   }
 
-  // fallback: nada relevante -> começo do doc
-  if (picked.length === 0 && chunks.length) {
-    picked.push({
-      text: chunks[0].text.slice(0, Math.min(chunks[0].text.length, maxChars)),
-      index: 0,
-    });
-  }
-
-  return picked;
+  return result;
 }

@@ -3,11 +3,7 @@ import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import CriarContaPageClient from "./CriarContaPageClient";
 
-export default function CriarContaPage({
-  searchParams,
-}: {
-  searchParams: { tk?: string };
-}) {
+export default function CriarContaPage({ searchParams }: { searchParams: { tk?: string } }) {
   const tk = (searchParams.tk ?? "").trim();
 
   // 🔒 Agora o cadastro é aberto, mas exige tk (gerado automaticamente)

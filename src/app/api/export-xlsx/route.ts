@@ -47,14 +47,12 @@ export async function POST(req: Request) {
     const filename = sanitizeFilename(body.filename || "planilha.xlsx");
 
     // ✅ Converte Buffer -> Uint8Array (BodyInit compatível)
-    const out =
-      buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as any);
+    const out = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as any);
 
     return new Response(out, {
       status: 200,
       headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${filename}"`,
         "Cache-Control": "no-store",
       },

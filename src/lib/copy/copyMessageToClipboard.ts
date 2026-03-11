@@ -1,8 +1,6 @@
 // src/lib/copy/copyMessageToClipboard.ts
 export async function copyMessageToClipboard(messageId: string) {
-  const root = document.querySelector(
-    `[data-copy-id="${messageId}"]`
-  ) as HTMLElement | null;
+  const root = document.querySelector(`[data-copy-id="${messageId}"]`) as HTMLElement | null;
 
   if (!root) throw new Error("Mensagem não encontrada para copiar.");
 

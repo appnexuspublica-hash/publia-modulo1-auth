@@ -26,10 +26,10 @@ function SubmitButton() {
 }
 
 export default function ResetForm() {
-  const [state, formAction] = useFormState<ResetState, FormData>(
-    resetAction,
-    { ok: false, error: "" }
-  );
+  const [state, formAction] = useFormState<ResetState, FormData>(resetAction, {
+    ok: false,
+    error: "",
+  });
 
   return (
     <div className="w-full max-w-md rounded-2xl border bg-gray-50 p-8 shadow-sm">
@@ -43,13 +43,9 @@ export default function ResetForm() {
           className="mb-2"
         />
 
-        <h1 className="text-lg font-semibold text-center">
-          Publ.IA - Nexus Pública
-        </h1>
+        <h1 className="text-lg font-semibold text-center">Publ.IA - Nexus Pública</h1>
 
-        <p className="text-sm text-gray-600 text-center">
-          Atualize sua senha de acesso.
-        </p>
+        <p className="text-sm text-gray-600 text-center">Atualize sua senha de acesso.</p>
       </div>
 
       {/* Sucesso */}
@@ -104,10 +100,7 @@ export default function ResetForm() {
       </form>
 
       <div className="mt-4 text-center">
-        <Link
-          href="/login"
-          className="text-sm font-medium text-blue-700 underline"
-        >
+        <Link href="/login" className="text-sm font-medium text-blue-700 underline">
           Voltar para login
         </Link>
       </div>

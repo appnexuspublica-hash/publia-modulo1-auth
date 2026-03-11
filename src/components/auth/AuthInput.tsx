@@ -11,11 +11,7 @@ const AuthInput = forwardRef<HTMLInputElement, AuthInputProps>(
   ({ label, error, className = "", ...rest }, ref) => {
     return (
       <div className="w-full space-y-1">
-        {label && (
-          <label className="block text-sm font-medium text-gray-700">
-            {label}
-          </label>
-        )}
+        {label && <label className="block text-sm font-medium text-gray-700">{label}</label>}
 
         <input
           ref={ref}
@@ -26,11 +22,7 @@ const AuthInput = forwardRef<HTMLInputElement, AuthInputProps>(
           {...rest}
         />
 
-        {error && (
-          <p className="text-xs text-red-600">
-            {error}
-          </p>
-        )}
+        {error && <p className="text-xs text-red-600">{error}</p>}
       </div>
     );
   }

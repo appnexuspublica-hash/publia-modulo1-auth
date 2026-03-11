@@ -3,10 +3,12 @@
 Este pacote substitui/insere arquivos para estabilizar a autenticação (Supabase) no projeto **publia-modulo1-auth**.
 
 ## O que entra
+
 - `src/lib/external/supabase.ts` — cliente público e admin com validação de ENV.
 - `src/app/debug/page.tsx` — diagnóstico rápido (`/debug`).
 
 ## Como aplicar (PowerShell)
+
 ```powershell
 # 1) Feche o dev server (Ctrl+C) e vá até o projeto
 cd "C:\meus-projetos\publia-modulo1-auth"
@@ -22,7 +24,9 @@ npm run dev
 ```
 
 ## Ajustes nos imports
+
 Nos seus actions, troque:
+
 ```ts
 // de
 import { supabaseAdmin, supabaseClient } from "@/lib/supabase";
@@ -32,13 +36,18 @@ import { supabaseAdmin, supabaseClient } from "@/src/lib/external/supabase";
 ```
 
 ## Exemplo de uso no sign-up (Server Action)
+
 ```ts
 "use server";
 import { supabaseAdmin } from "@/src/lib/external/supabase";
 
 export async function signUpAction(payload: {
-  email: string; password: string;
-  nome: string; cpf_cnpj: string; telefone: string; cidade_uf: string;
+  email: string;
+  password: string;
+  nome: string;
+  cpf_cnpj: string;
+  telefone: string;
+  cidade_uf: string;
 }) {
   const admin = supabaseAdmin();
 
@@ -66,6 +75,7 @@ export async function signUpAction(payload: {
 ```
 
 ## .env.local (exemplo)
+
 ```
 NEXT_PUBLIC_SUPABASE_URL=https://SEU_SUBDOMINIO.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOi...
@@ -73,4 +83,5 @@ SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi...
 SIGNUP_TOKEN=publia_nexus_2025_token_A1B2C3PATRIRACH8208
 REDIRECT_BLOCKED_SIGNUP=https://nexuspublica.com.br/
 ```
+
 Depois de subir o dev, abra `http://localhost:3000/debug`.

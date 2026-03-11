@@ -25,9 +25,7 @@ export default function AtualizarSenhaPage() {
     let isMounted = true;
 
     function getHashParams() {
-      const raw = window.location.hash?.startsWith("#")
-        ? window.location.hash.slice(1)
-        : "";
+      const raw = window.location.hash?.startsWith("#") ? window.location.hash.slice(1) : "";
       return new URLSearchParams(raw);
     }
 

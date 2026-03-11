@@ -10,9 +10,7 @@ export default function Error({
   return (
     <main style={{ padding: 24, fontFamily: "ui-sans-serif, system-ui" }}>
       <h1 style={{ fontSize: 18, fontWeight: 700 }}>Ocorreu um erro</h1>
-      <p style={{ marginTop: 8, opacity: 0.8 }}>
-        Algo deu errado ao carregar esta página.
-      </p>
+      <p style={{ marginTop: 8, opacity: 0.8 }}>Algo deu errado ao carregar esta página.</p>
 
       <pre
         style={{

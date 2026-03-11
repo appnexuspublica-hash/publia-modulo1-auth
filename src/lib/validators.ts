@@ -28,15 +28,14 @@ export function isValidCNPJ(cnpjRaw: string): boolean {
   const c = onlyDigits(cnpjRaw);
   if (c.length !== 14 || /^(\d)\1{13}$/.test(c)) return false;
 
-  const calc = (b: string, f: number[]) =>
-    f.reduce((a, x, i) => a + parseInt(b[i]) * x, 0);
+  const calc = (b: string, f: number[]) => f.reduce((a, x, i) => a + parseInt(b[i]) * x, 0);
 
   let b = c.slice(0, 12);
-  let d1 = 11 - (calc(b, [5,4,3,2,9,8,7,6,5,4,3,2]) % 11);
+  let d1 = 11 - (calc(b, [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]) % 11);
   d1 = d1 >= 10 ? 0 : d1;
 
   b += d1;
-  let d2 = 11 - (calc(b, [6,5,4,3,2,9,8,7,6,5,4,3,2]) % 11);
+  let d2 = 11 - (calc(b, [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]) % 11);
   d2 = d2 >= 10 ? 0 : d2;
 
   return c === b + String(d2);

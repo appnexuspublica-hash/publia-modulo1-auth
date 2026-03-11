@@ -2,7 +2,7 @@
 "use client";
 
 import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
-import { useEffect, useState, useRef, ChangeEvent } from "react";
+import { useEffect, useState, useRef, ChangeEvent, useCallback } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import Image from "next/image";
 
@@ -43,6 +43,7 @@ function markdownToPlainText(markdown: string): string {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const MAX_PDF_SIZE_MB = 48;
+const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 
 type Conversation = {
   id: string;
@@ -50,12 +51,22 @@ type Conversation = {
   created_at: string;
   is_shared?: boolean;
   share_id?: string | null;
+  active_pdf_file_id?: string | null;
+  pdf_enabled?: boolean;
 };
+
+type PdfExtractStatus = "pending" | "processing" | "ready" | "error" | "skipped_large" | string;
+type PdfVectorStatus = "pending" | "processing" | "ready" | "error" | "blocked_no_text" | string;
 
 type AttachedPdf = {
   id: string;
   fileName: string;
   fileSize: number;
+  extractedTextStatus?: PdfExtractStatus | null;
+  extractedTextError?: string | null;
+  vectorIndexStatus?: PdfVectorStatus | null;
+  vectorIndexError?: string | null;
+  vectorChunksCount?: number | null;
 };
 
 type QuickActionKind = "resumo" | "pontos" | "irregularidade";
@@ -67,17 +78,24 @@ type SSEParsed =
   | { event: "error"; data: { error?: string } }
   | { event: string; data: any };
 
+type PdfUiStatus =
+  | "none"
+  | "processing"
+  | "ready"
+  | "no_text"
+  | "technical_error"
+  | "large"
+  | "indexing"
+  | "index_error";
+
 function parseSSEBlock(block: string): SSEParsed | null {
   const lines = block.split("\n").map((l) => l.trimEnd());
   let eventName = "";
   let dataLine = "";
 
   for (const line of lines) {
-    if (line.startsWith("event:")) {
-      eventName = line.replace("event:", "").trim();
-    } else if (line.startsWith("data:")) {
-      dataLine = line.replace("data:", "").trim();
-    }
+    if (line.startsWith("event:")) eventName = line.replace("event:", "").trim();
+    else if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
   }
 
   if (!eventName) return null;
@@ -94,13 +112,90 @@ function parseSSEBlock(block: string): SSEParsed | null {
   return { event: eventName, data: parsedData } as SSEParsed;
 }
 
+function classifyPdfUiStatus(att: AttachedPdf | null): PdfUiStatus {
+  if (!att) return "none";
+
+  const e = String(att.extractedTextStatus ?? "").toLowerCase();
+  const v = String(att.vectorIndexStatus ?? "").toLowerCase();
+  const extractedError = String(att.extractedTextError ?? "").toLowerCase();
+
+  if (e === "pending" || e === "processing") return "processing";
+  if (e === "skipped_large") return "large";
+
+  if (e === "error") {
+    const noText =
+      extractedError.includes("sem texto detectável") ||
+      extractedError.includes("sem texto detectavel") ||
+      extractedError.includes("faça ocr e reenvie") ||
+      extractedError.includes("imagem/escaneado") ||
+      extractedError.includes("sem texto detectável para indexação") ||
+      extractedError.includes("sem texto detectavel para indexação");
+
+    return noText ? "no_text" : "technical_error";
+  }
+
+  if (e === "ready") {
+    if (v === "pending" || v === "processing") return "indexing";
+    if (v === "error") return "index_error";
+    return "ready";
+  }
+
+  return "none";
+}
+
+function getPdfBadge(att: AttachedPdf | null) {
+  const status = classifyPdfUiStatus(att);
+  const chunks = typeof att?.vectorChunksCount === "number" ? att.vectorChunksCount : 0;
+
+  switch (status) {
+    case "processing":
+      return "Lendo...";
+    case "indexing":
+      return "Indexando...";
+    case "ready":
+      return chunks > 0 ? "Pronto" : "PDF com texto";
+    case "no_text":
+      return "PDF sem texto";
+    case "technical_error":
+      return "Falha no PDF";
+    case "large":
+      return "PDF grande";
+    case "index_error":
+      return "Indexação falhou";
+    default:
+      return att ? "PDF anexado" : null;
+  }
+}
+
+function getPdfHint(att: AttachedPdf | null) {
+  const status = classifyPdfUiStatus(att);
+
+  switch (status) {
+    case "no_text":
+      return {
+        kind: "ocr" as const,
+        text: "Este PDF não tem texto para consulta. Ele pode ser uma imagem ou escaneado. Para ficar pesquisável, recomendo fazer OCR e reenviar.",
+      };
+    case "technical_error":
+      return {
+        kind: "info" as const,
+        text: "O PDF foi anexado, mas houve uma falha técnica no processamento. Você pode tentar reenviar ou reprocessar o arquivo.",
+      };
+    case "large":
+      return {
+        kind: "info" as const,
+        text: "O PDF é grande demais para processamento automático completo. Se possível, envie uma versão menor ou com OCR.",
+      };
+    default:
+      return null;
+  }
+}
+
 export default function ChatPageClient({ userId, userLabel }: ChatPageClientProps) {
   const [supabase] = useState(() => createBrowserClient(supabaseUrl, supabaseAnonKey));
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-
-  // ✅ Ref precisa ficar sincronizado IMEDIATAMENTE (não só via useEffect)
   const activeConversationIdRef = useRef<string | null>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -113,6 +208,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const [showPdfQuickActions, setShowPdfQuickActions] = useState(false);
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
 
+  const [showPdfHint, setShowPdfHint] = useState(false);
+
   const justCreatedConversationRef = useRef(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
@@ -120,11 +217,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const stoppedByUserRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
 
-  // ✅ Toast simples (sem alert) — mantém para erros/avisos gerais
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<any>(null);
 
-  // ✅ Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
   const [actionToast, setActionToast] = useState<{ messageId: string; text: string } | null>(null);
   const actionToastTimerRef = useRef<any>(null);
 
@@ -162,10 +257,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
     setMessages((prev) => {
       const idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
-
       const fallbackIdx =
         idx === -1 ? [...prev].reverse().findIndex((m) => m.role === "assistant") : -1;
-
       const realIdx = idx !== -1 ? idx : fallbackIdx === -1 ? -1 : prev.length - 1 - fallbackIdx;
 
       if (realIdx === -1) return prev;
@@ -184,6 +277,74 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       return next;
     });
   }
+
+  const fetchPdfStatus = useCallback(
+    async (pdfFileId: string, conversationId: string) => {
+      const { data, error } = await supabase
+        .from("pdf_files")
+        .select(
+          "id, file_name, file_size, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
+        )
+        .eq("id", pdfFileId)
+        .eq("conversation_id", conversationId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Erro ao buscar status do PDF:", error.message);
+        return null;
+      }
+      if (!data) return null;
+
+      return {
+        id: String((data as any).id),
+        fileName: String((data as any).file_name ?? "PDF"),
+        fileSize: Number((data as any).file_size ?? 0),
+        extractedTextStatus: (data as any).extracted_text_status ?? null,
+        extractedTextError: (data as any).extracted_text_error ?? null,
+        vectorIndexStatus: (data as any).vector_index_status ?? null,
+        vectorIndexError: (data as any).vector_index_error ?? null,
+        vectorChunksCount:
+          typeof (data as any).vector_chunks_count === "number"
+            ? (data as any).vector_chunks_count
+            : null,
+      } as AttachedPdf;
+    },
+    [supabase, userId]
+  );
+
+  const pollPdfUntilStable = useCallback(
+    async (pdfFileId: string, conversationId: string) => {
+      const start = Date.now();
+      const timeoutMs = 25000;
+      const intervalMs = 1500;
+
+      while (Date.now() - start < timeoutMs) {
+        if (activeConversationIdRef.current !== conversationId) return;
+
+        const status = await fetchPdfStatus(pdfFileId, conversationId);
+        if (status) {
+          setAttachedPdf(status);
+
+          const uiStatus = classifyPdfUiStatus(status);
+          if (uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large") {
+            setShowPdfHint(true);
+          }
+        }
+
+        const e = String(status?.extractedTextStatus ?? "").toLowerCase();
+        const v = String(status?.vectorIndexStatus ?? "").toLowerCase();
+
+        const extractedStable = e && !["pending", "processing"].includes(e);
+        const vectorStable = e !== "ready" ? true : v && !["pending", "processing"].includes(v);
+
+        if (extractedStable && vectorStable) break;
+
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
+    },
+    [fetchPdfStatus]
+  );
 
   useEffect(() => {
     async function loadConversations() {
@@ -213,7 +374,6 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     }
 
     loadConversations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, userId]);
 
   useEffect(() => {
@@ -222,6 +382,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
       setActionToast(null);
+      setShowPdfHint(false);
       return;
     }
 
@@ -230,17 +391,22 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       return;
     }
 
-    // ✅ FIX: evita “descasamento visual”
     setMessages([]);
     setLoadingMessages(true);
     setActionToast(null);
+
+    setAttachedPdf(null);
+    setShowPdfQuickActions(false);
+    setShowPdfHint(false);
+
+    const currentConversationId = activeConversationId;
 
     async function loadMessages() {
       try {
         const { data, error } = await supabase
           .from("messages")
           .select("id, role, content, created_at")
-          .eq("conversation_id", activeConversationId)
+          .eq("conversation_id", currentConversationId)
           .order("created_at", { ascending: true });
 
         if (error) {
@@ -256,23 +422,101 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
             created_at: m.created_at as string,
           })) || [];
 
+        if (activeConversationIdRef.current !== currentConversationId) return;
         setMessages(msgs);
       } finally {
-        setLoadingMessages(false);
+        if (activeConversationIdRef.current === currentConversationId) setLoadingMessages(false);
+      }
+    }
+
+    async function loadAttachedPdf() {
+      try {
+        const { data: conv, error: convError } = await supabase
+          .from("conversations")
+          .select("id, active_pdf_file_id, pdf_enabled")
+          .eq("id", currentConversationId)
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        if (convError) {
+          console.error("Erro ao carregar conversa (PDF state):", convError.message);
+          return;
+        }
+
+        if (activeConversationIdRef.current !== currentConversationId) return;
+
+        const pdfEnabled = Boolean((conv as any)?.pdf_enabled);
+        const activePdfId = (conv as any)?.active_pdf_file_id as string | null | undefined;
+
+        if (!pdfEnabled) {
+          setAttachedPdf(null);
+          setShowPdfHint(false);
+          return;
+        }
+
+        if (activePdfId) {
+          const status = await fetchPdfStatus(activePdfId, currentConversationId);
+          if (status) {
+            setAttachedPdf(status);
+            const uiStatus = classifyPdfUiStatus(status);
+            setShowPdfHint(uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large");
+          }
+          return;
+        }
+
+        const { data: lastPdf, error: lastPdfError } = await supabase
+          .from("pdf_files")
+          .select("id, created_at")
+          .eq("conversation_id", currentConversationId)
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (lastPdfError) {
+          console.error("Erro ao carregar último PDF:", lastPdfError.message);
+          setAttachedPdf(null);
+          return;
+        }
+
+        if (activeConversationIdRef.current !== currentConversationId) return;
+        if (!lastPdf?.id) {
+          setAttachedPdf(null);
+          setShowPdfHint(false);
+          return;
+        }
+
+        const status = await fetchPdfStatus(String((lastPdf as any).id), currentConversationId);
+        if (status) {
+          setAttachedPdf(status);
+          const uiStatus = classifyPdfUiStatus(status);
+          setShowPdfHint(uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large");
+        }
+
+        supabase
+          .from("conversations")
+          .update({ active_pdf_file_id: (lastPdf as any).id, pdf_enabled: true } as any)
+          .eq("id", currentConversationId)
+          .eq("user_id", userId)
+          .then(({ error }: any) => {
+            if (error) {
+              console.error("Falha ao setar active_pdf_file_id (fallback):", error.message);
+            }
+          });
+      } catch (e) {
+        console.error("Erro inesperado ao carregar PDF anexado:", e);
       }
     }
 
     loadMessages();
-  }, [activeConversationId, supabase]);
+    loadAttachedPdf();
+  }, [activeConversationId, supabase, userId, fetchPdfStatus]);
 
   async function createConversation(shouldResetState: boolean = false): Promise<string | null> {
     try {
       const { data, error } = await supabase
         .from("conversations")
-        .insert({
-          user_id: userId,
-          title: "Nova conversa",
-        })
+        .insert({ user_id: userId, title: "Nova conversa" })
         .select("id, title, created_at, is_shared, share_id")
         .single();
 
@@ -295,6 +539,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         setAttachedPdf(null);
         setShowPdfQuickActions(false);
         setActionToast(null);
+        setShowPdfHint(false);
       }
 
       return newConv.id;
@@ -332,6 +577,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     setAttachedPdf(null);
     setShowPdfQuickActions(false);
     setIsMobileSidebarOpen(false);
+    setShowPdfHint(false);
 
     setActionToast(null);
   }
@@ -358,6 +604,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
       setActionToast(null);
+      setShowPdfHint(false);
     }
   }
 
@@ -429,10 +676,7 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ac.signal,
-        body: JSON.stringify({
-          conversationId,
-          message: trimmed,
-        }),
+        body: JSON.stringify({ conversationId, message: trimmed }),
       });
 
       if (!res.ok || !res.body) {
@@ -590,7 +834,6 @@ Organize a resposta em tópicos, com explicações objetivas.
   async function handleCopyAnswer(messageId: string) {
     try {
       await copyMessageToClipboard(messageId);
-      // ✅ agora aparece acima dos botões da mensagem
       showActionToast(messageId, "Resposta copiada.");
       return;
     } catch (err) {
@@ -604,7 +847,6 @@ Organize a resposta em tópicos, com explicações objetivas.
       const plainText = markdownToPlainText(msg.content);
       await navigator.clipboard.writeText(plainText);
 
-      // ✅ agora aparece acima dos botões da mensagem
       showActionToast(messageId, "Resposta copiada.");
     } catch (err) {
       console.error("Erro ao copiar resposta:", err);
@@ -612,10 +854,6 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
   }
 
-  // ----------------------------------------------------
-  // ✅ Compartilhar por MENSAGEM (COPIAR LINK PÚBLICO)
-  // Recebe conversationId + messageId (UUIDs)
-  // ----------------------------------------------------
   async function handleShareConversation(conversationId: string, messageId: string) {
     const targetConversationId = String(conversationId ?? "").trim();
     const targetMessageId = String(messageId ?? "").trim();
@@ -650,11 +888,9 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      // ✅ link do recorte por mensagem
       const url = `${window.location.origin}/p/${shareId}?m=${encodeURIComponent(targetMessageId)}`;
       await navigator.clipboard.writeText(url);
 
-      // ✅ agora aparece acima dos botões da mensagem
       showActionToast(messageId, "Link público copiado.");
     } catch (err) {
       console.error("Erro inesperado ao compartilhar:", err);
@@ -679,6 +915,7 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
 
     setIsUploadingPdf(true);
+    setShowPdfHint(false);
 
     try {
       const conversationId = await ensureConversationId();
@@ -691,8 +928,8 @@ Organize a resposta em tópicos, com explicações objetivas.
       const safeName = file.name.normalize("NFKD").replace(/[^\w.-]+/g, "_");
       const storagePath = `${conversationId}/${Date.now()}-${safeName}`;
 
-      const { data: storageData, error: storageError } = await (supabase as any)
-        .storage.from("pdf-files")
+      const { data: storageData, error: storageError } = await (supabase as any).storage
+        .from("pdf-files")
         .upload(storagePath, file, {
           cacheControl: "3600",
           upsert: false,
@@ -724,9 +961,34 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      const data = (await res.json()) as { id: string; fileName: string; fileSize: number };
-      setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
-      showToast("PDF anexado.");
+      const data = (await res.json()) as {
+        id: string;
+        fileName: string;
+        fileSize: number;
+        warning?: string;
+      };
+
+      const status = await fetchPdfStatus(data.id, conversationId);
+      if (status) {
+        setAttachedPdf(status);
+      } else {
+        setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
+      }
+
+      fetch("/api/pdf/index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdfFileId: data.id }),
+      }).catch(() => {});
+
+      pollPdfUntilStable(data.id, conversationId).catch(() => {});
+
+      if (data.warning) {
+        console.warn("[upload-pdf] warning:", data.warning);
+        showToast("PDF anexado (atenção: verifique colunas do banco).");
+      } else {
+        showToast("PDF anexado.");
+      }
     } catch (error) {
       console.error("Erro inesperado ao enviar PDF:", error);
       showToast("Não foi possível enviar o PDF.");
@@ -736,138 +998,243 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
   }
 
-  function handleRemovePdf() {
-    setAttachedPdf(null);
-    setShowPdfQuickActions(false);
+  async function handleRemovePdf() {
+    try {
+      const conversationId = activeConversationIdRef.current;
+      if (!conversationId) {
+        setAttachedPdf(null);
+        setShowPdfQuickActions(false);
+        setShowPdfHint(false);
+        return;
+      }
+
+      const res = await fetch("/api/pdf/detach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId }),
+      });
+
+      if (!res.ok) {
+        console.error("Falha ao desanexar PDF:", await res.text());
+        showToast("Não foi possível desanexar o PDF.");
+        return;
+      }
+
+      setAttachedPdf(null);
+      setShowPdfQuickActions(false);
+      setShowPdfHint(false);
+      showToast("PDF desanexado.");
+    } catch (e) {
+      console.error("Erro ao desanexar PDF:", e);
+      showToast("Erro ao desanexar o PDF.");
+    }
   }
 
-  const renderMain = () => (
-    <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto px-8 py-6">
-        {messages.length > 0 ? (
-          <ChatMessagesList
-            messages={messages}
-            onCopyAnswer={handleCopyAnswer}
-            onShareConversation={handleShareConversation}
-            onRegenerateLast={handleRegenerateLast}
-            isSending={isSending}
-            variant="chat"
-            activeConversationId={activeConversationId}
-            actionToast={actionToast}
-          />
-        ) : loadingMessages && activeConversationId ? (
-          <div className="flex h-full items-center justify-center text-sm text-white">
-            Carregando conversa...
-          </div>
-        ) : (
-          <ChatEmptyState />
-        )}
-      </div>
+  async function handleDoOcr() {
+    const conversationId = activeConversationIdRef.current;
 
-      <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
-        <div className="mx-auto w-full max-w-3xl">
-          {/* ✅ Toast (sem alert) — mantém para erros/avisos gerais */}
-          {toast && (
-            <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
-              {toast}
-            </div>
-          )}
+    if (conversationId) {
+      try {
+        const res = await fetch("/api/pdf/detach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId }),
+        });
 
-          <div className="mb-2 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handlePdfButtonClick}
-              className="inline-flex items-center justify-center rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
-            >
-              ANEXAR PDF
-            </button>
+        if (!res.ok) {
+          console.error("Falha ao desanexar PDF:", await res.text());
+          showToast("Não consegui desanexar o PDF agora. Tente novamente.");
+          return;
+        }
+      } catch (e) {
+        console.error("Erro ao desanexar PDF:", e);
+        showToast("Não consegui desanexar o PDF agora. Tente novamente.");
+        return;
+      }
+    }
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={handlePdfChange}
+    setAttachedPdf(null);
+    setShowPdfQuickActions(false);
+    setShowPdfHint(false);
+
+    const w = window.open(OCR_URL, "_blank", "noopener,noreferrer");
+    if (!w) {
+      showToast("Pop-up bloqueado. Permita pop-ups ou abra: smallpdf.com/pt/pdf-ocr");
+    }
+  }
+
+  function handleDismissPdfHint() {
+    setShowPdfHint(false);
+  }
+
+  const renderMain = () => {
+    const badge = getPdfBadge(attachedPdf);
+    const hint = getPdfHint(attachedPdf);
+
+    const showHint =
+      !!attachedPdf &&
+      !!hint &&
+      showPdfHint &&
+      (hint.kind === "ocr" || hint.kind === "info");
+
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto px-8 py-6">
+          {messages.length > 0 ? (
+            <ChatMessagesList
+              messages={messages}
+              onCopyAnswer={handleCopyAnswer}
+              onShareConversation={handleShareConversation}
+              onRegenerateLast={handleRegenerateLast}
+              onDoOcr={handleDoOcr}
+              isSending={isSending}
+              variant="chat"
+              activeConversationId={activeConversationId}
+              actionToast={actionToast}
             />
+          ) : loadingMessages && activeConversationId ? (
+            <div className="flex h-full items-center justify-center text-sm text-white">
+              Carregando conversa...
+            </div>
+          ) : (
+            <ChatEmptyState />
+          )}
+        </div>
 
-            {attachedPdf && (
-              <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
-                <span className="max-w-[240px] truncate">{attachedPdf.fileName}</span>
-                <span className="opacity-80">{Math.round(attachedPdf.fileSize / 1024)} KB</span>
-                <button
-                  type="button"
-                  onClick={handleRemovePdf}
-                  className="ml-1 text-slate-100 hover:text-red-400"
-                >
-                  ×
-                </button>
+        <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
+          <div className="mx-auto w-full max-w-3xl">
+            {toast && (
+              <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+                {toast}
               </div>
             )}
 
-            <div className="relative">
+            {showHint && hint && (
+              <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+                <div className="leading-snug">{hint.text}</div>
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {hint.kind === "ocr" && (
+                    <button
+                      type="button"
+                      onClick={handleDoOcr}
+                      className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
+                    >
+                      FAZER OCR
+                    </button>
+                  )}
+
+                <button
+  type="button"
+  onClick={handleDismissPdfHint}
+  className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
+>
+  CONTINUAR
+</button>
+                </div>
+              </div>
+            )}
+
+            <div className="mb-2 flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                disabled={!attachedPdf}
-                onClick={() => attachedPdf && setShowPdfQuickActions((prev) => !prev)}
-                className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
-                  attachedPdf
-                    ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                    : "bg-[#1b3a56] text-slate-400 opacity-60 cursor-not-allowed"
-                }`}
+                onClick={handlePdfButtonClick}
+                className="inline-flex items-center justify-center rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
               >
-                AÇÕES RÁPIDAS COM O PDF ▾
+                ANEXAR PDF
               </button>
 
-              {showPdfQuickActions && attachedPdf && (
-                <div className="absolute left-0 z-10 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={handlePdfChange}
+              />
+
+              {attachedPdf && (
+                <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
+                  <span className="max-w-[220px] truncate">{attachedPdf.fileName}</span>
+                  <span className="opacity-80">{Math.round(attachedPdf.fileSize / 1024)} KB</span>
+
+                  {badge && (
+                    <span className="ml-1 rounded-full bg-black/20 px-2 py-1 text-[10px] opacity-95">
+                      {badge}
+                    </span>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => {
-                      setShowPdfQuickActions(false);
-                      handlePdfQuickAction("resumo");
-                    }}
-                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                    onClick={handleRemovePdf}
+                    className="ml-1 text-slate-100 hover:text-red-400"
                   >
-                    Resumir PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowPdfQuickActions(false);
-                      handlePdfQuickAction("pontos");
-                    }}
-                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                  >
-                    Pontos de Atenção (Obrigações, prazos e riscos)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowPdfQuickActions(false);
-                      handlePdfQuickAction("irregularidade");
-                    }}
-                    className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                  >
-                    Identificar irregularidades
+                    ×
                   </button>
                 </div>
               )}
+
+              <div className="relative">
+                <button
+                  type="button"
+                  disabled={!attachedPdf}
+                  onClick={() => attachedPdf && setShowPdfQuickActions((prev) => !prev)}
+                  className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
+                    attachedPdf
+                      ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
+                      : "bg-[#1b3a56] text-slate-400 opacity-60 cursor-not-allowed"
+                  }`}
+                >
+                  AÇÕES RÁPIDAS COM O PDF ▾
+                </button>
+
+                {showPdfQuickActions && attachedPdf && (
+                  <div className="absolute left-0 z-10 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPdfQuickActions(false);
+                        handlePdfQuickAction("resumo");
+                      }}
+                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                    >
+                      Resumir PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPdfQuickActions(false);
+                        handlePdfQuickAction("pontos");
+                      }}
+                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                    >
+                      Pontos de Atenção (Obrigações, prazos e riscos)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPdfQuickActions(false);
+                        handlePdfQuickAction("irregularidade");
+                      }}
+                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                    >
+                      Identificar irregularidades
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* ✅ Compartilhar foi removido daqui: agora fica junto do "Copiar" nas mensagens */}
+            {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
+
+            <ChatInput onSend={handleSend} isSending={isSending} onStop={handleStop} />
           </div>
-
-          {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
-
-          <ChatInput onSend={handleSend} isSending={isSending} onStop={handleStop} />
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="h-screen bg-[#2f4f67]">
-      {/* MOBILE */}
       <div className="flex h-full flex-col md:hidden">
         <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
           <div className="flex items-center gap-2">
@@ -915,9 +1282,9 @@ Organize a resposta em tópicos, com explicações objetivas.
             <ChatSidebar
               conversations={conversations}
               activeConversationId={activeConversationId}
-              onNewConversation={handleNewConversation}
-              onSelectConversation={handleSelectConversation}
-              onDeleteConversation={handleDeleteConversation}
+              onNewConversation={() => handleNewConversation()}
+              onSelectConversation={(id) => handleSelectConversation(id)}
+              onDeleteConversation={(id) => handleDeleteConversation(id)}
               userLabel={userLabel}
             />
           </div>
@@ -930,14 +1297,13 @@ Organize a resposta em tópicos, com explicações objetivas.
         </div>
       </div>
 
-      {/* DESKTOP */}
       <div className="hidden h-full flex-row md:flex">
         <ChatSidebar
           conversations={conversations}
           activeConversationId={activeConversationId}
-          onNewConversation={handleNewConversation}
-          onSelectConversation={handleSelectConversation}
-          onDeleteConversation={handleDeleteConversation}
+          onNewConversation={() => handleNewConversation()}
+          onSelectConversation={(id) => handleSelectConversation(id)}
+          onDeleteConversation={(id) => handleDeleteConversation(id)}
           userLabel={userLabel}
         />
 

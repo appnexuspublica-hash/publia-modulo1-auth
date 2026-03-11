@@ -22,9 +22,7 @@ export default function AuthShell({
         <div className="flex flex-col items-center text-center">
           {showBrand ? <Brand size={44} /> : null}
           <h1 className="mt-1 text-xl font-semibold text-slate-800">{title}</h1>
-          {subtitle ? (
-            <p className="mt-1 text-sm text-slate-500">{subtitle}</p>
-          ) : null}
+          {subtitle ? <p className="mt-1 text-sm text-slate-500">{subtitle}</p> : null}
         </div>
         <div className="mt-4">{children}</div>
       </AuthCard>

@@ -10,18 +10,20 @@ function admin() {
   return createClient(url, service, { auth: { autoRefreshToken: false, persistSession: false } });
 }
 
-const schema = z.object({
-  cpf_cnpj: z
-    .string()
-    .transform((v) => onlyDigits(v))
-    .refine((d) => /^\d+$/.test(d), "Informe apenas n�meros")
-    .refine((d) => d.length === 11 || d.length === 14, "Informe CPF (11) ou CNPJ (14)"),
-  senha: z.string().min(8, "A senha precisa ter 8+ caracteres"),
-  confirm: z.string().min(8, "A confirma��o precisa ter 8+ caracteres"),
-}).refine((data) => data.senha === data.confirm, {
-  message: "As senhas n�o conferem",
-  path: ["confirm"],
-});
+const schema = z
+  .object({
+    cpf_cnpj: z
+      .string()
+      .transform((v) => onlyDigits(v))
+      .refine((d) => /^\d+$/.test(d), "Informe apenas n�meros")
+      .refine((d) => d.length === 11 || d.length === 14, "Informe CPF (11) ou CNPJ (14)"),
+    senha: z.string().min(8, "A senha precisa ter 8+ caracteres"),
+    confirm: z.string().min(8, "A confirma��o precisa ter 8+ caracteres"),
+  })
+  .refine((data) => data.senha === data.confirm, {
+    message: "As senhas n�o conferem",
+    path: ["confirm"],
+  });
 
 export async function resetAction(prevState: any, formData: FormData) {
   try {

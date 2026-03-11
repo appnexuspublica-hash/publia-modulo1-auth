@@ -1,4 +1,3 @@
-// src/app/(auth)/criar-conta/CriarContaPageClient.tsx
 "use client";
 
 import * as React from "react";
@@ -17,7 +16,7 @@ type State = {
   ok: boolean;
   error?: string;
   redirect?: string;
-  code?: string; // ✅ novo (combina com o formActions)
+  code?: string;
 };
 
 const initialState: State = { ok: false };
@@ -26,7 +25,6 @@ export default function CriarContaPageClient() {
   const sp = useSearchParams();
   const tk = sp.get("tk") ?? "";
 
-  // ✅ quando tk mudar, remonta o "form" e reseta state do useFormState
   return <CriarContaInner key={tk} tk={tk} />;
 }
 
@@ -35,14 +33,10 @@ function CriarContaInner({ tk }: { tk: string }) {
 
   const ts = React.useMemo(() => String(Date.now()), []);
 
-  const [state, formAction] = useFormState<State, FormData>(
-    criarConta as any,
-    initialState
-  );
+  const [state, formAction] = useFormState<State, FormData>(criarConta as any, initialState);
 
   const [regenLoading, setRegenLoading] = React.useState(false);
 
-  // Redireciona automaticamente depois do sucesso (opcional)
   React.useEffect(() => {
     if (state?.ok && state?.redirect) {
       const t = setTimeout(() => router.push(state.redirect!), 1500);
@@ -81,11 +75,7 @@ function CriarContaInner({ tk }: { tk: string }) {
   }
 
   return (
-    <AuthShell
-      title="Publ.IA - Nexus Pública"
-      subtitle="Crie sua conta para acessar o painel."
-    >
-      {/* Erro geral do cadastro */}
+    <AuthShell title="Publ.IA - Nexus Pública" subtitle="Crie sua conta para acessar o painel.">
       {state.error && !state.ok && (
         <div className="space-y-2">
           <Alert type="error">{state.error}</Alert>
@@ -104,13 +94,9 @@ function CriarContaInner({ tk }: { tk: string }) {
       )}
 
       <form action={formAction} className="mt-2 space-y-4">
-        {/* token vindo da URL */}
         <input type="hidden" name="tk" value={tk} />
-
-        {/* Timestamp anti-bot */}
         <input type="hidden" name="ts" value={ts} />
 
-        {/* Honeypot */}
         <div
           style={{
             position: "absolute",
@@ -123,13 +109,7 @@ function CriarContaInner({ tk }: { tk: string }) {
           aria-hidden="true"
         >
           <label htmlFor="company">Company</label>
-          <input
-            id="company"
-            name="company"
-            type="text"
-            tabIndex={-1}
-            autoComplete="off"
-          />
+          <input id="company" name="company" type="text" tabIndex={-1} autoComplete="off" />
         </div>
 
         <AuthInput
@@ -166,9 +146,17 @@ function CriarContaInner({ tk }: { tk: string }) {
         />
 
         <AuthInput
-          name="cidade_uf"
-          label="Cidade / UF"
-          placeholder="Ex.: Santana do Itararé / PR"
+          name="municipio"
+          label="Município"
+          placeholder="Ex.: Santana do Itararé"
+          disabled={disabled}
+          required
+        />
+
+        <AuthInput
+          name="uf"
+          label="Estado / UF"
+          placeholder="Ex.: PR"
           disabled={disabled}
           required
         />
@@ -186,12 +174,9 @@ function CriarContaInner({ tk }: { tk: string }) {
           <SubmitButton disabled={disabled}>ENVIAR</SubmitButton>
         </div>
 
-        {/* BLOCO DE SUCESSO: mensagem + botão FAZER LOGIN */}
         {state.ok && (
           <div className="mt-4 space-y-2">
-            <Alert type="success">
-              Conta criada com sucesso! Você já pode fazer LOGIN.
-            </Alert>
+            <Alert type="success">Conta criada com sucesso! Você já pode fazer LOGIN.</Alert>
 
             <div className="text-center">
               <Link

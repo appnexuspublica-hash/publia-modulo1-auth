@@ -10,16 +10,10 @@ export const metadata: Metadata = {
   description: "Inteligência Artificial especializada em Gestão Pública, Licitações e Contratos.",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="pt-BR">
-      <body className={`${inter.className} bg-[#f4efea]`}>
-        {children}
-      </body>
+      <body className={`${inter.className} bg-[#f4efea]`}>{children}</body>
     </html>
   );
 }

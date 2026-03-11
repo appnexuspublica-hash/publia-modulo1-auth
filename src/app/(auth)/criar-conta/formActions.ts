@@ -42,20 +42,21 @@ const schema = z.object({
     .string()
     .transform((v) => onlyDigits(v))
     .refine((d) => /^\d+$/.test(d), "Informe apenas números")
-    .refine(
-      (d) => d.length === 11 || d.length === 14,
-      "Informe CPF (11) ou CNPJ (14) dígitos"
-    )
+    .refine((d) => d.length === 11 || d.length === 14, "Informe CPF (11) ou CNPJ (14) dígitos")
     .refine((d) => isValidCpfCnpj(d), "CPF/CNPJ inválido"),
   email: z.string().email("E-mail inválido"),
   telefone: z.string().min(8, "Telefone inválido"),
-  cidade_uf: z.string().min(2, "Cidade/UF inválido"),
+  municipio: z.string().min(2, "Município inválido"),
+  uf: z
+    .string()
+    .min(2, "Estado/UF inválido")
+    .max(2, "Estado/UF inválido")
+    .transform((v) => v.trim().toUpperCase()),
   senha: z.string().min(8, "A senha precisa ter 8+ caracteres"),
   tk: z.string().optional(),
 
-  // anti-spam
-  company: z.string().optional(), // honeypot
-  ts: z.string().optional(), // timestamp
+  company: z.string().optional(),
+  ts: z.string().optional(),
 });
 
 export async function criarConta(
@@ -64,19 +65,17 @@ export async function criarConta(
 ): Promise<SignUpState> {
   const supa = admin();
 
-  // 🔧 limpeza best-effort dos tokens (não pode quebrar o fluxo)
   async function cleanupBestEffort() {
-    // roda em ~10% das vezes, para não chamar sempre
     if (Math.random() > 0.1) return;
 
     try {
       await supa.rpc("cleanup_signup_tokens", {
-        p_expired_older_minutes: 60, // expirados há 1h+
-        p_used_older_minutes: 24 * 60, // usados há 24h+
+        p_expired_older_minutes: 60,
+        p_used_older_minutes: 24 * 60,
         p_batch: 200,
       });
     } catch {
-      // best-effort: ignora
+      // best-effort
     }
   }
 
@@ -96,15 +95,13 @@ export async function criarConta(
 
   try {
     const raw = Object.fromEntries(formData.entries());
-    const { nome, cpf_cnpj, email, telefone, cidade_uf, senha, tk, company, ts } =
+    const { nome, cpf_cnpj, email, telefone, municipio, uf, senha, tk, company, ts } =
       schema.parse(raw);
 
-    // Honeypot: se veio preenchido, é bot (não explique o motivo)
     if (company && company.trim().length > 0) {
       return { ok: false, error: "Não foi possível concluir o cadastro agora." };
     }
 
-    // Anti-bot "instantâneo"
     if (ts) {
       const started = Number(ts);
       if (Number.isFinite(started)) {
@@ -115,8 +112,6 @@ export async function criarConta(
       }
     }
 
-    // Rate limit no submit (por IP)
-    // Ex.: 10 tentativas por hora por IP
     const ip = getClientIpFromHeaders();
     const rlKey = `signup_submit:${ip}`;
 
@@ -133,7 +128,6 @@ export async function criarConta(
       }
     } else {
       console.error("[rate_limit] rpc error", rlErr);
-      // se falhar, não bloqueia o usuário (best-effort)
     }
 
     const emailNorm = email.trim().toLowerCase();
@@ -146,7 +140,6 @@ export async function criarConta(
       };
     }
 
-    // 1) Duplicidade no profiles
     const { data: existingCpf, error: existsCpfErr } = await supa
       .from("profiles")
       .select("user_id")
@@ -175,7 +168,6 @@ export async function criarConta(
       return { ok: false, error: "Já existe um cadastro com este e-mail." };
     }
 
-    // 2) Consome token temporário (uso único + expiração)
     const usedAtIso = new Date().toISOString();
 
     const { data: tokenRow, error: tokenErr } = await supa
@@ -190,12 +182,10 @@ export async function criarConta(
     if (tokenErr || !tokenRow) {
       return {
         ok: false,
-        error:
-          "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
+        error: "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
       };
     }
 
-    // 3) Cria usuário Auth
     const { data: created, error: authErr } = await supa.auth.admin.createUser({
       email: emailNorm,
       password: senha,
@@ -210,15 +200,16 @@ export async function criarConta(
 
     const userId = created.user.id;
 
-    // 4) Cria profile
-    const { error: profileErr } = await supa.from("profiles").insert({
-      user_id: userId,
-      nome,
-      cpf_cnpj,
-      email: emailNorm,
-      telefone,
-      cidade_uf,
-    });
+  const { error: profileErr } = await supa.from("profiles").insert({
+  user_id: userId,
+  nome,
+  cpf_cnpj,
+  email: emailNorm,
+  telefone,
+  municipio,
+  uf,
+  cidade_uf: `${municipio} / ${uf}`,
+});
 
     if (profileErr) {
       console.error("[signup] erro ao criar profile", profileErr);

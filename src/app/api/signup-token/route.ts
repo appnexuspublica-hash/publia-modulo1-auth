@@ -49,7 +49,7 @@ async function cleanupBestEffort(supa: ReturnType<typeof adminDb>) {
 
   try {
     await supa.rpc("cleanup_signup_tokens", {
-      p_expired_older_minutes: 60,  // expirados há 1h+
+      p_expired_older_minutes: 60, // expirados há 1h+
       p_used_older_minutes: 24 * 60, // usados há 24h+
       p_batch: 200,
     });

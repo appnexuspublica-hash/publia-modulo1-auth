@@ -10,14 +10,43 @@ export function shouldForceWebFirst(userText: string): boolean {
 
   // 1) Gatilhos “normativos sensíveis”
   const triggers = [
-    "valor", "valores", "limite", "teto", "faixa",
-    "percentual", "porcentagem", "aliquota", "indice",
-    "atualizado", "vigente", "hoje", "ultima atualizacao", "novo decreto",
-    "prazo", "prazos", "quantos dias", "dias", "data limite",
-    "art.", "artigo", "inciso", "paragrafo",
-    "lei", "decreto", "portaria", "instrucao normativa", "in ",
-    "dispensa", "inexigibilidade", "aditivo", "reajuste", "repactuacao",
-    "14.133", "14133", "licitacao", "contrato administrativo",
+    "valor",
+    "valores",
+    "limite",
+    "teto",
+    "faixa",
+    "percentual",
+    "porcentagem",
+    "aliquota",
+    "indice",
+    "atualizado",
+    "vigente",
+    "hoje",
+    "ultima atualizacao",
+    "novo decreto",
+    "prazo",
+    "prazos",
+    "quantos dias",
+    "dias",
+    "data limite",
+    "art.",
+    "artigo",
+    "inciso",
+    "paragrafo",
+    "lei",
+    "decreto",
+    "portaria",
+    "instrucao normativa",
+    "in ",
+    "dispensa",
+    "inexigibilidade",
+    "aditivo",
+    "reajuste",
+    "repactuacao",
+    "14.133",
+    "14133",
+    "licitacao",
+    "contrato administrativo",
   ];
 
   const hit = triggers.some((k) => t.includes(k));
@@ -30,7 +59,8 @@ export function shouldForceWebFirst(userText: string): boolean {
     /\b\d{1,3}\.\d{3}\b/.test(t);
 
   // 3) Pergunta curta do tipo “qual o valor/limite…”
-  const shortQuestion = t.length <= 80 && (t.startsWith("qual") || t.startsWith("quais") || t.includes("?"));
+  const shortQuestion =
+    t.length <= 80 && (t.startsWith("qual") || t.startsWith("quais") || t.includes("?"));
 
   return hit || numericSignals || shortQuestion;
 }

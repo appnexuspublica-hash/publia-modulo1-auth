@@ -29,10 +29,7 @@ const schema = z.object({
   ),
 });
 
-export async function login(
-  prevState: LoginState,
-  formData: FormData
-): Promise<LoginState> {
+export async function login(prevState: LoginState, formData: FormData): Promise<LoginState> {
   try {
     const parsed = schema.parse({
       cpf_cnpj: formData.get("cpf_cnpj"),

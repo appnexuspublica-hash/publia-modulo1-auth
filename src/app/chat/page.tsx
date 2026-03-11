@@ -56,10 +56,5 @@ export default async function ChatPage() {
 
   const userLabel = userCpfCnpj || "[ usuário ]";
 
-  return (
-    <ChatPageClient
-      userId={user.id}
-      userLabel={userLabel}
-    />
-  );
+  return <ChatPageClient userId={user.id} userLabel={userLabel} />;
 }

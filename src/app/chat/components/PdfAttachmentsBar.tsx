@@ -17,11 +17,7 @@ type PdfAttachmentsBarProps = {
   onRemovePdf: (id: string) => void;
 };
 
-export function PdfAttachmentsBar({
-  pdfs,
-  onUploadClick,
-  onRemovePdf,
-}: PdfAttachmentsBarProps) {
+export function PdfAttachmentsBar({ pdfs, onUploadClick, onRemovePdf }: PdfAttachmentsBarProps) {
   const hasPdfs = pdfs && pdfs.length > 0;
 
   return (
@@ -49,9 +45,7 @@ export function PdfAttachmentsBar({
                 {pdf.file_name}
               </span>
               {pdf.file_size_kb && (
-                <span className="text-[10px] text-slate-300">
-                  ~{pdf.file_size_kb} KB
-                </span>
+                <span className="text-[10px] text-slate-300">~{pdf.file_size_kb} KB</span>
               )}
               <button
                 type="button"

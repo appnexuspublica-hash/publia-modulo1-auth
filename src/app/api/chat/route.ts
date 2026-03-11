@@ -1,5 +1,4 @@
 // src/app/api/chat/route.ts
-import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
@@ -12,9 +11,14 @@ export const dynamic = "force-dynamic";
 
 // ---- Supabase & OpenAI ----
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const openaiApiKey = process.env.OPENAI_API_KEY;
+
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+const RAG_TOP_K = Math.max(2, Math.min(10, Number(process.env.RAG_TOP_K ?? 4)));
+
+const OPENAI_MODEL_WITH_PDF = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1";
+const OPENAI_MODEL_NO_PDF = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
 
 const SSE_HEADERS: HeadersInit = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -23,19 +27,7 @@ const SSE_HEADERS: HeadersInit = {
   "X-Accel-Buffering": "no",
 };
 
-let supabase: ReturnType<typeof createClient> | null = null;
 let openai: OpenAI | null = null;
-
-if (!supabaseUrl || !serviceRoleKey) {
-  console.error("[/api/chat] Variáveis de ambiente do Supabase não estão definidas.", {
-    hasUrl: !!supabaseUrl,
-    hasServiceRoleKey: !!serviceRoleKey,
-  });
-} else {
-  supabase = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
 
 if (!openaiApiKey) {
   console.error("[/api/chat] OPENAI_API_KEY não está definida.");
@@ -43,7 +35,113 @@ if (!openaiApiKey) {
   openai = new OpenAI({ apiKey: openaiApiKey });
 }
 
-// ---- Auth helpers (cookie -> user) ----
+type MessageRow = {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string;
+};
+
+type PdfFileRow = {
+  id: string;
+  conversation_id: string | null;
+  user_id: string;
+  file_name: string | null;
+  storage_path: string;
+  openai_file_id: string | null;
+  file_size: number | null;
+  created_at: string;
+  extracted_text: string | null;
+  extracted_text_status: string | null;
+  extracted_text_error: string | null;
+  vector_index_status: string | null;
+  vector_index_error: string | null;
+  vector_chunks_count: number | null;
+};
+
+type ConversationPdfState = {
+  pdf_enabled: boolean;
+  active_pdf_file_id: string | null;
+};
+
+type PdfChatState =
+  | {
+      kind: "none";
+      pdfRow: null;
+      pdfContext: "";
+      openaiFileId: null;
+      userError: null;
+      ocrSuggested: false;
+    }
+  | {
+      kind: "ready_context";
+      pdfRow: PdfFileRow;
+      pdfContext: string;
+      openaiFileId: null;
+      userError: null;
+      ocrSuggested: false;
+    }
+  | {
+      kind: "ready_file";
+      pdfRow: PdfFileRow;
+      pdfContext: "";
+      openaiFileId: string;
+      userError: null;
+      ocrSuggested: false;
+    }
+  | {
+      kind: "processing";
+      pdfRow: PdfFileRow;
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+    }
+  | {
+      kind: "no_text";
+      pdfRow: PdfFileRow;
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: true;
+    }
+  | {
+      kind: "error";
+      pdfRow: PdfFileRow;
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+    }
+  | {
+      kind: "skipped_large";
+      pdfRow: PdfFileRow;
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+    };
+
+// --------------------
+// LIMITES
+// --------------------
+const MAX_HISTORY = 4;
+const MAX_PDF_CONTEXT_CHARS = 6000;
+const MAX_TOTAL_CHARS = 10000;
+const MAX_EXTRACTED_TEXT_CHARS = 150000;
+const MAX_FULL_FILE_FALLBACK_MB = 20;
+
+const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
+const PDF_PROCESSING_MESSAGE =
+  "O PDF anexado ainda está sendo processado. Aguarde alguns instantes e tente novamente.";
+const PDF_TECHNICAL_MESSAGE =
+  "O PDF foi anexado, mas houve uma falha técnica no processamento. Tente reprocessar ou reenviar o arquivo.";
+const PDF_NO_TEXT_MESSAGE =
+  "Infelizmente não consigo acessar o PDF. Faça OCR e reenvie. Use o botão FAZER OCR abaixo para abrir aplicativo.";
+const PDF_LARGE_MESSAGE =
+  "O PDF é grande demais para processamento automático neste momento. Envie uma versão menor ou reprocessada.";
+
 function parseCookieHeader(cookieHeader: string | null) {
   const out: Record<string, string> = {};
   if (!cookieHeader) return out;
@@ -51,273 +149,174 @@ function parseCookieHeader(cookieHeader: string | null) {
   for (const part of cookieHeader.split(";")) {
     const p = part.trim();
     if (!p) continue;
+
     const eq = p.indexOf("=");
     if (eq === -1) continue;
+
     const k = p.slice(0, eq).trim();
     const v = p.slice(eq + 1).trim();
     out[k] = decodeURIComponent(v);
   }
+
   return out;
 }
 
 function createAuthClient(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) throw new Error("Supabase anon envs faltando");
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Supabase anon envs faltando");
+  }
 
   const jar = parseCookieHeader(req.headers.get("cookie"));
 
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      get(name) {
-        return jar[name];
-      },
+      get: (name) => jar[name],
       set() {},
       remove() {},
     },
   });
 }
 
-type MessageRow = {
-  id: string;
-  conversation_id: string;
-  role: "user" | "assistant";
-  content: string;
-  created_at: string;
-};
-
-type PdfFileRow = {
-  id: string;
-  conversation_id: string;
-  file_name: string | null;
-  storage_path: string;
-  openai_file_id: string | null;
-  created_at: string;
-};
-
-function formatAssistantText(text: string): string {
-  return text.replace(/\r\n/g, "\n").trim();
-}
-
 function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-// ===== Temperature helpers (DEFAULT 0.3) =====
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function parseTemperature(v: any, fallback = 0.3) {
-  const n = Number(v);
+function parseTemperature(input: unknown, fallback = 0.3) {
+  const n = typeof input === "number" ? input : Number(input);
   if (!Number.isFinite(n)) return fallback;
-  return clamp(n, 0, 2);
+  return Math.max(0, Math.min(2, n));
 }
 
-/**
- * ==========================
- * Detector “Web-First”
- * (menos agressivo)
- * ==========================
- */
-function stripAccents(s: string) {
-  return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+function formatAssistantText(text: string) {
+  return String(text || "").trim();
 }
 
-function shouldForceWebFirst(userText: string): boolean {
-  const raw = String(userText ?? "").trim();
-  if (!raw) return false;
+function shouldForceWebFirst(text: string) {
+  const t = String(text || "").toLowerCase();
 
-  const t = stripAccents(raw).toLowerCase();
-
-  const triggers = [
-    "valor",
-    "valores",
-    "limite",
-    "teto",
-    "faixa",
-    "percentual",
-    "porcentagem",
-    "aliquota",
-    "indice",
-    "atualizado",
-    "vigente",
-    "ultima atualizacao",
-    "última atualização",
-    "novo decreto",
-    "decreto atual",
-
+  const keywords = [
     "prazo",
-    "prazos",
-    "prazo legal",
-    "prazo de recurso",
-    "quantos dias",
-    "dias úteis",
-    "dias uteis",
-
-    "art.",
-    "artigo",
-    "inciso",
-    "paragrafo",
-    "parágrafo",
+    "limite",
+    "valor",
+    "multa",
     "lei",
     "decreto",
     "portaria",
-    "instrucao normativa",
+    "tce",
+    "tcm",
     "instrução normativa",
-    "resolucao",
     "resolução",
-
-    "dispensa",
-    "inexigibilidade",
-    "aditivo",
-    "reajuste",
-    "repactuacao",
-    "repactuação",
-    "licitacao",
-    "licitação",
-    "14.133",
-    "14133",
+    "vigente",
+    "atualizado",
   ];
 
-  const hit = triggers.some((k) => t.includes(stripAccents(k).toLowerCase()));
-
-  const numericSignals =
-    /\br\$\s*\d/i.test(t) ||
-    /\b\d+\s*%\b/.test(t) ||
-    /\b\d+\s*dias?\b/.test(t) ||
-    /\b\d{1,3}\.\d{3}\b/.test(t);
-
-  // ✅ sem “shortQuestion”: era o que fazia disparar “quase sempre”
-  return hit || numericSignals;
+  return keywords.some((k) => t.includes(k));
 }
 
-/**
- * Extrai texto final da Responses API (modo não-stream).
- */
-function extractResponseText(resp: any): string {
-  if (!resp) return "";
-
-  if (typeof resp.output_text === "string") return resp.output_text;
-
-  const out = resp.output;
-  if (Array.isArray(out)) {
-    let acc = "";
-    for (const item of out) {
-      const content = item?.content;
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (c?.type === "output_text" && typeof c?.text === "string") acc += c.text;
-        }
-      }
-      if (typeof item?.text === "string") acc += item.text;
-    }
-    return acc;
-  }
-
-  try {
-    return String(resp?.choices?.[0]?.message?.content ?? "");
-  } catch {
-    return "";
-  }
+function clampText(value: string, max: number) {
+  const text = String(value ?? "");
+  return text.length <= max ? text : text.slice(0, max);
 }
 
-function usedWebSearchTool(resp: any): boolean {
-  try {
-    const out = resp?.output;
-    if (Array.isArray(out)) {
-      for (const item of out) {
-        const t = String(item?.type ?? "").toLowerCase();
-        if (t.includes("web_search")) return true;
-
-        if (t.includes("tool") && String(item?.name ?? "").toLowerCase().includes("web_search"))
-          return true;
-
-        const toolCalls = item?.tool_calls;
-        if (Array.isArray(toolCalls)) {
-          for (const tc of toolCalls) {
-            const name = String(tc?.name ?? tc?.tool_name ?? "").toLowerCase();
-            if (name.includes("web_search")) return true;
-          }
-        }
-      }
-    }
-
-    const s = JSON.stringify(resp);
-    return /web_search/i.test(s);
-  } catch {
-    return false;
-  }
+function normalizeText(raw: string) {
+  let text = String(raw ?? "");
+  text = text.replace(/\u0000/g, " ");
+  text = text.replace(/[ \t]+\n/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  text = text.replace(/[ \t]{2,}/g, " ");
+  return text.trim();
 }
 
-function validateWebFirst(resp: any, text: string): { ok: boolean; reason?: string } {
-  const usedTool = usedWebSearchTool(resp);
-
-  const hasRefsSection =
-    /referências\s+oficiais\s+consultadas\s*:/i.test(text) ||
-    /^##\s*referências\s+oficiais\s+consultadas/mi.test(text);
-
-  const deniesWeb = /não houve consulta web/i.test(text);
-
-  if (!usedTool) return { ok: false, reason: "Tool web_search_preview não foi usado." };
-  if (!hasRefsSection) return { ok: false, reason: "Faltou seção 'Referências oficiais consultadas'." };
-  if (deniesWeb) return { ok: false, reason: "Texto declarou que não houve consulta web." };
-
-  return { ok: true };
-}
-
-async function getLatestPdfForConversation(
+async function getConversationPdfState(
+  client: any,
   conversationId: string,
   userId: string
-): Promise<PdfFileRow | null> {
-  if (!supabase) return null;
-
-  const client = supabase as any;
-
+): Promise<ConversationPdfState> {
   const { data, error } = await client
+    .from("conversations")
+    .select("pdf_enabled, active_pdf_file_id")
+    .eq("id", conversationId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error || !data) {
+    return { pdf_enabled: false, active_pdf_file_id: null };
+  }
+
+  return {
+    pdf_enabled: (data as any).pdf_enabled !== false,
+    active_pdf_file_id: ((data as any).active_pdf_file_id as string | null) ?? null,
+  };
+}
+
+async function getPdfForConversation(
+  client: any,
+  conversationId: string,
+  userId: string,
+  state: ConversationPdfState
+) {
+  if (!state.pdf_enabled) return null;
+
+  if (state.active_pdf_file_id) {
+    const { data } = await client
+      .from("pdf_files")
+      .select(
+        "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
+      )
+      .eq("id", state.active_pdf_file_id)
+      .eq("conversation_id", conversationId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!data) return null;
+    if (!data.storage_path || String(data.storage_path).includes("..")) return null;
+
+    return data as PdfFileRow;
+  }
+
+  const { data: latest } = await client
     .from("pdf_files")
-    .select("id, conversation_id, file_name, storage_path, openai_file_id, created_at")
+    .select(
+      "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
+    )
     .eq("conversation_id", conversationId)
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
 
-  if (error || !data?.length) return null;
-  if (!data[0].storage_path || data[0].storage_path.includes("..")) return null;
+  if (!latest) return null;
+  if (!latest.storage_path || String(latest.storage_path).includes("..")) return null;
 
-  return data[0] as PdfFileRow;
+  client
+    .from("conversations")
+    .update({ active_pdf_file_id: latest.id, pdf_enabled: true } as any)
+    .eq("id", conversationId)
+    .eq("user_id", userId)
+    .then(() => {});
+
+  return latest as PdfFileRow;
 }
 
-async function downloadPdfBuffer(pdfRow: PdfFileRow): Promise<Buffer | null> {
-  if (!supabase) return null;
-  const client = supabase as any;
-
-  const { data: fileData, error } = await client.storage.from("pdf-files").download(pdfRow.storage_path);
-
-  if (error || !fileData) return null;
+async function getQueryEmbedding(query: string): Promise<number[] | null> {
+  if (!openai) return null;
 
   try {
-    return Buffer.from(await fileData.arrayBuffer());
+    const resp = await openai.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input: query,
+      encoding_format: "float",
+    } as any);
+
+    const emb = (resp as any)?.data?.[0]?.embedding;
+    return Array.isArray(emb) ? emb : null;
   } catch {
     return null;
   }
 }
 
-async function extractPdfText(buffer: Buffer): Promise<string | null> {
-  try {
-    const mod: any = await import("pdf-parse");
-    const fn: any = mod?.default ?? mod;
-    const parsed = await fn(buffer);
-    const text = (parsed?.text || "").trim();
-    return text || null;
-  } catch (e) {
-    console.warn("[/api/chat] Falha ao extrair texto do PDF (pdf-parse).", e);
-    return null;
-  }
-}
-
-async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
-  if (!supabase || !openai) return null;
-
-  const client = supabase as any;
+async function uploadPdfToOpenAI(client: any, pdfRow: PdfFileRow): Promise<string | null> {
+  if (!openai) return null;
 
   const { data: fileData, error: downloadError } = await client.storage
     .from("pdf-files")
@@ -328,10 +327,7 @@ async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
   try {
     const buffer = Buffer.from(await fileData.arrayBuffer());
     const filename = pdfRow.file_name || "documento.pdf";
-
-    const fileForOpenAI = await toFile(buffer, filename, {
-      type: "application/pdf",
-    });
+    const fileForOpenAI = await toFile(buffer, filename, { type: "application/pdf" });
 
     const uploaded = await openai.files.create({
       file: fileForOpenAI,
@@ -344,23 +340,223 @@ async function uploadPdfToOpenAI(pdfRow: PdfFileRow): Promise<string | null> {
   }
 }
 
-export async function POST(req: Request) {
-  if (!supabase || !openai) {
-    return new Response(
-      sseEvent("error", {
-        error: "Configuração do servidor incompleta. Verifique envs do Supabase e OpenAI.",
-      }),
-      { status: 500, headers: SSE_HEADERS }
-    );
+function isNoTextPdfError(errorText: string | null | undefined) {
+  const msg = String(errorText ?? "").toLowerCase();
+
+  return (
+    msg.includes("sem texto detectável") ||
+    msg.includes("sem texto detectavel") ||
+    msg.includes("faça ocr e reenvie") ||
+    msg.includes("imagem/escaneado") ||
+    msg.includes("sem texto detectável para indexação") ||
+    msg.includes("sem texto detectavel para indexação")
+  );
+}
+
+async function buildPdfContextFromExtractedText(pdfRow: PdfFileRow, message: string) {
+  if (String(pdfRow.extracted_text_status ?? "").toLowerCase() !== "ready") return "";
+  if (!pdfRow.extracted_text) return "";
+
+  const text = clampText(normalizeText(pdfRow.extracted_text), MAX_EXTRACTED_TEXT_CHARS);
+
+  const chunks = chunkText(text, {
+    chunkSize: 1200,
+    overlap: 200,
+    maxChunks: 320,
+  });
+
+  const picked = pickRelevantChunks(chunks, message, {
+    maxChunks: 5,
+    maxChars: MAX_PDF_CONTEXT_CHARS,
+    minScore: 1,
+  });
+
+  if (!picked.length) return "";
+
+  const raw = picked
+    .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
+    .join("\n\n---\n\n");
+
+  return clampText(raw, MAX_PDF_CONTEXT_CHARS);
+}
+
+async function buildPdfContextFromVector(
+  client: any,
+  pdfRow: PdfFileRow,
+  message: string
+): Promise<string> {
+  const vectorReady =
+    String(pdfRow.vector_index_status ?? "").toLowerCase() === "ready" &&
+    (pdfRow.vector_chunks_count ?? 0) > 0;
+
+  if (!vectorReady) return "";
+
+  const qEmb = await getQueryEmbedding(message);
+  if (!qEmb) return "";
+
+  const { data: matches, error: matchErr } = await client.rpc("match_pdf_chunks", {
+    query_embedding: qEmb,
+    match_count: RAG_TOP_K,
+    filter_pdf_file_id: pdfRow.id,
+  });
+
+  if (matchErr || !Array.isArray(matches) || !matches.length) return "";
+
+  const raw = matches
+    .map(
+      (m: any, i: number) => `Trecho ${i + 1} (chunk #${m.chunk_index}):\n${m.content}`
+    )
+    .join("\n\n---\n\n");
+
+  return clampText(raw, MAX_PDF_CONTEXT_CHARS);
+}
+
+async function resolvePdfChatState(
+  client: any,
+  pdfRow: PdfFileRow | null,
+  userId: string,
+  message: string
+): Promise<PdfChatState> {
+  if (!pdfRow) {
+    return {
+      kind: "none",
+      pdfRow: null,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: null,
+      ocrSuggested: false,
+    };
   }
 
-  const client = supabase as any;
+  const extractedStatus = String(pdfRow.extracted_text_status ?? "").toLowerCase();
+  const vectorStatus = String(pdfRow.vector_index_status ?? "").toLowerCase();
+
+  const vectorContext = await buildPdfContextFromVector(client, pdfRow, message);
+  if (vectorContext) {
+    return {
+      kind: "ready_context",
+      pdfRow,
+      pdfContext: vectorContext,
+      openaiFileId: null,
+      userError: null,
+      ocrSuggested: false,
+    };
+  }
+
+  const extractedContext = await buildPdfContextFromExtractedText(pdfRow, message);
+  if (extractedContext) {
+    return {
+      kind: "ready_context",
+      pdfRow,
+      pdfContext: extractedContext,
+      openaiFileId: null,
+      userError: null,
+      ocrSuggested: false,
+    };
+  }
+
+  if (extractedStatus === "pending" || extractedStatus === "processing") {
+    return {
+      kind: "processing",
+      pdfRow,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_PROCESSING_MESSAGE,
+      ocrSuggested: false,
+    };
+  }
+
+  if (extractedStatus === "error") {
+    if (isNoTextPdfError(pdfRow.extracted_text_error)) {
+      return {
+        kind: "no_text",
+        pdfRow,
+        pdfContext: "",
+        openaiFileId: null,
+        userError: PDF_NO_TEXT_MESSAGE,
+        ocrSuggested: true,
+      };
+    }
+
+    return {
+      kind: "error",
+      pdfRow,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_TECHNICAL_MESSAGE,
+      ocrSuggested: false,
+    };
+  }
+
+  if (extractedStatus === "skipped_large") {
+    return {
+      kind: "skipped_large",
+      pdfRow,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_LARGE_MESSAGE,
+      ocrSuggested: false,
+    };
+  }
+
+  if (extractedStatus === "ready" && vectorStatus !== "ready") {
+    const sizeMb = (pdfRow.file_size ?? 0) / (1024 * 1024);
+    const allowFullFile = sizeMb > 0 && sizeMb <= MAX_FULL_FILE_FALLBACK_MB;
+
+    if (allowFullFile) {
+      let openaiFileId = pdfRow.openai_file_id ?? null;
+
+      if (!openaiFileId) {
+        const uploadedId = await uploadPdfToOpenAI(client, pdfRow);
+        if (uploadedId) {
+          openaiFileId = uploadedId;
+
+          await client
+            .from("pdf_files")
+            .update({ openai_file_id: uploadedId } as any)
+            .eq("id", pdfRow.id)
+            .eq("user_id", userId);
+        }
+      }
+
+      if (openaiFileId) {
+        return {
+          kind: "ready_file",
+          pdfRow,
+          pdfContext: "",
+          openaiFileId,
+          userError: null,
+          ocrSuggested: false,
+        };
+      }
+    }
+  }
+
+  return {
+    kind: "error",
+    pdfRow,
+    pdfContext: "",
+    openaiFileId: null,
+    userError: PDF_TECHNICAL_MESSAGE,
+    ocrSuggested: false,
+  };
+}
+
+export async function POST(req: Request) {
+  if (!openai || !supabaseUrl || !supabaseAnonKey) {
+    return new Response(sseEvent("error", { error: "Servidor incompleto. Verifique envs." }), {
+      status: 500,
+      headers: SSE_HEADERS,
+    });
+  }
+
+  const client = createAuthClient(req) as any;
 
   let body: any;
   try {
     body = await req.json();
   } catch {
-    return new Response(sseEvent("error", { error: "Corpo da requisição inválido. JSON era esperado." }), {
+    return new Response(sseEvent("error", { error: "Corpo inválido. JSON era esperado." }), {
       status: 400,
       headers: SSE_HEADERS,
     });
@@ -388,26 +584,16 @@ export async function POST(req: Request) {
     });
   }
 
-  // ✅ auth
-  let userId: string | null = null;
-  try {
-    const auth = createAuthClient(req);
-    const { data, error } = await auth.auth.getUser();
-    if (error || !data?.user) {
-      return new Response(sseEvent("error", { error: "Não autenticado." }), {
-        status: 401,
-        headers: SSE_HEADERS,
-      });
-    }
-    userId = data.user.id;
-  } catch {
+  const { data: authData } = await client.auth.getUser();
+  if (!authData?.user) {
     return new Response(sseEvent("error", { error: "Não autenticado." }), {
       status: 401,
       headers: SSE_HEADERS,
     });
   }
 
-  // ✅ ownership
+  const userId = authData.user.id;
+
   const { data: conv } = await client
     .from("conversations")
     .select("id")
@@ -426,54 +612,109 @@ export async function POST(req: Request) {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const sendRaw = (raw: string) => controller.enqueue(encoder.encode(raw));
-      const send = (event: string, data: unknown) => sendRaw(sseEvent(event, data));
+      let closed = false;
+      let aborted = false;
 
-      // ✅ anti-buffer: força “primeiro flush”
-      sendRaw(":" + " ".repeat(2048) + "\n\n");
-      const ka = setInterval(() => {
-        // comentário SSE: o client ignora
-        try {
-          sendRaw(":ka\n\n");
-        } catch {}
-      }, 15000);
+      let keepAliveTimer: NodeJS.Timeout | null = null;
+      let flushTimer: NodeJS.Timeout | null = null;
 
-      // ✅ agrega deltas pequenos (anti-buffer)
-      let pending = "";
-      let flushTimer: any = null;
       const FLUSH_MIN_CHARS = 900;
       const FLUSH_MAX_DELAY_MS = 70;
 
-      const flush = () => {
-        if (!pending) return;
-        const out = pending;
-        pending = "";
+      let pending = "";
+
+      const cleanup = () => {
+        if (keepAliveTimer) {
+          clearInterval(keepAliveTimer);
+          keepAliveTimer = null;
+        }
+
         if (flushTimer) {
           clearTimeout(flushTimer);
           flushTimer = null;
         }
-        send("delta", { text: out });
+      };
+
+      const safeEnqueueRaw = (raw: string) => {
+        if (closed || aborted) return false;
+
+        try {
+          controller.enqueue(encoder.encode(raw));
+          return true;
+        } catch {
+          closed = true;
+          cleanup();
+          return false;
+        }
+      };
+
+      const safeSend = (event: string, data: unknown) => {
+        return safeEnqueueRaw(sseEvent(event, data));
+      };
+
+      const safeClose = () => {
+        if (closed) return;
+
+        closed = true;
+        cleanup();
+
+        try {
+          controller.close();
+        } catch {}
+      };
+
+      const flush = () => {
+        if (!pending || closed || aborted) return;
+
+        const out = pending;
+        pending = "";
+
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+
+        safeSend("delta", { text: out });
       };
 
       const scheduleFlush = () => {
-        if (flushTimer) return;
+        if (flushTimer || closed || aborted) return;
+
         flushTimer = setTimeout(() => {
           flushTimer = null;
           flush();
         }, FLUSH_MAX_DELAY_MS);
       };
 
-      const pushDelta = (t: string) => {
-        if (!t) return;
-        pending += t;
-        if (pending.length >= FLUSH_MIN_CHARS) flush();
-        else scheduleFlush();
+      const pushDelta = (text: string) => {
+        if (!text || closed || aborted) return;
+
+        pending += text;
+
+        if (pending.length >= FLUSH_MIN_CHARS) {
+          flush();
+        } else {
+          scheduleFlush();
+        }
       };
 
-      try {
-        const forceWebFirst = shouldForceWebFirst(message);
+      const onAbort = () => {
+        aborted = true;
+        cleanup();
+        safeClose();
+      };
 
-        const MAX_HISTORY = 8;
+      req.signal.addEventListener("abort", onAbort, { once: true });
+
+      try {
+        safeEnqueueRaw(":" + " ".repeat(2048) + "\n\n");
+
+        keepAliveTimer = setInterval(() => {
+          safeEnqueueRaw(":ka\n\n");
+        }, 15000);
+
+        const forceWebFirstRequested = shouldForceWebFirst(message);
+
         const { data: historyData } = await client
           .from("messages")
           .select("id, role, content, created_at")
@@ -481,207 +722,140 @@ export async function POST(req: Request) {
           .order("created_at", { ascending: false })
           .limit(MAX_HISTORY);
 
+        if (aborted || closed) {
+          safeClose();
+          return;
+        }
+
         const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
         historyRows.reverse();
 
         const { data: userMessageRow, error: insertUserError } = await client
           .from("messages")
-          .insert({
-            conversation_id: conversationId,
-            role: "user",
-            content: message,
-          } as any)
+          .insert({ conversation_id: conversationId, role: "user", content: message } as any)
           .select("*")
           .single();
 
-        if (insertUserError || !userMessageRow) {
-          send("error", { error: "Não foi possível salvar a mensagem do usuário." });
-          controller.close();
+        if (aborted || closed) {
+          safeClose();
           return;
         }
 
-        send("meta", { userMessage: userMessageRow, forceWebFirst });
+        if (insertUserError || !userMessageRow) {
+          safeSend("error", { error: "Não foi possível salvar a mensagem do usuário." });
+          safeClose();
+          return;
+        }
 
-        // 2) PDF context
-        let openaiFileId: string | null = null;
-        let pdfContext = "";
+        const pdfState = await getConversationPdfState(client, conversationId, userId);
+        const pdfRow = await getPdfForConversation(client, conversationId, userId, pdfState);
 
-        const latestPdf = await getLatestPdfForConversation(conversationId, userId!);
+        if (aborted || closed) {
+          safeClose();
+          return;
+        }
 
-        if (latestPdf) {
-          const buf = await downloadPdfBuffer(latestPdf);
-          if (buf) {
-            const textRaw = await extractPdfText(buf);
+        const pdfChatState = await resolvePdfChatState(client, pdfRow, userId, message);
 
-            if (textRaw) {
-              const HARD_LIMIT = 250_000;
-              const text = textRaw.length > HARD_LIMIT ? textRaw.slice(0, HARD_LIMIT) : textRaw;
+        if (aborted || closed) {
+          safeClose();
+          return;
+        }
 
-              const chunks = chunkText(text, { chunkSize: 1400, overlap: 200, maxChunks: 400 });
-              const picked = pickRelevantChunks(chunks, message, {
-                maxChunks: 6,
-                maxChars: 9000,
-                minScore: 1,
-              });
+        const forceWebFirst = forceWebFirstRequested && pdfChatState.kind === "none";
 
-              pdfContext = picked
-                .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
-                .join("\n\n---\n\n");
-            }
-          }
+        safeSend("meta", {
+          userMessage: userMessageRow,
+          forceWebFirst,
+          pdfFound: pdfChatState.kind !== "none",
+          extractedTextStatus: pdfChatState.pdfRow?.extracted_text_status ?? null,
+          vectorIndexStatus: pdfChatState.pdfRow?.vector_index_status ?? null,
+          ocrUrl: OCR_URL,
+        });
 
-          if (!pdfContext) {
-            if (latestPdf.openai_file_id) {
-              openaiFileId = latestPdf.openai_file_id;
-            } else {
-              const uploadedId = await uploadPdfToOpenAI(latestPdf);
-              if (uploadedId) {
-                openaiFileId = uploadedId;
-
-                await client
-                  .from("pdf_files")
-                  .update({ openai_file_id: uploadedId } as any)
-                  .eq("id", latestPdf.id)
-                  .eq("user_id", userId!);
-              }
-            }
-          }
+        if (
+          pdfChatState.kind === "processing" ||
+          pdfChatState.kind === "no_text" ||
+          pdfChatState.kind === "error" ||
+          pdfChatState.kind === "skipped_large"
+        ) {
+          safeSend("error", {
+            error: pdfChatState.userError,
+            ...(pdfChatState.ocrSuggested ? { ocrUrl: OCR_URL } : {}),
+          });
+          safeClose();
+          return;
         }
 
         let combinedText = message.trim();
 
         if (historyRows.length > 0) {
           const historyText = historyRows
-            .map((m) => {
-              const prefix = m.role === "user" ? "Usuário" : "Publ.IA";
-              return `${prefix}: ${m.content}`;
-            })
+            .map(
+              (m) => `${m.role === "user" ? "Usuário" : "Publ.IA"}: ${clampText(m.content, 1200)}`
+            )
             .join("\n\n");
 
           combinedText =
-            "Histórico recente da conversa (não repita literalmente, use apenas como contexto):\n\n" +
-            historyText +
-            "\n\nNova pergunta do usuário:\n" +
+            "Histórico recente (use só como contexto):\n\n" +
+            clampText(historyText, 4500) +
+            "\n\nNova pergunta:\n" +
             message.trim();
         }
 
-        if (pdfContext) {
+        if (pdfChatState.kind === "ready_context" && pdfChatState.pdfContext) {
           combinedText =
-            "CONTEXTO DO PDF (trechos selecionados; se não estiver aqui, diga que não encontrou no PDF):\n\n" +
-            pdfContext +
+            "CONTEXTO DO PDF (trechos selecionados):\n\n" +
+            pdfChatState.pdfContext +
             "\n\n" +
             combinedText;
         }
 
         if (forceWebFirst) {
           combinedText =
-            "⚠️ BACKEND: WEB-FIRST OBRIGATÓRIO NESTA PERGUNTA.\n" +
-            "- Antes de responder com números/prazos/limites/dispositivos, use web_search_preview em fonte oficial.\n" +
-            "- Inclua no final: (1) Base legal; (2) Referências oficiais consultadas.\n" +
-            "- PROIBIDO: escrever “Não houve consulta web…” nesta resposta.\n" +
-            "- Se não conseguir confirmar em fonte oficial, diga explicitamente que não foi possível confirmar e NÃO forneça número/prazo como certo.\n\n" +
+            "WEB-FIRST recomendado: confirme em fonte oficial via web_search_preview.\n\n" +
             combinedText;
         }
 
-        const MAX_TOTAL_CHARS = 18000;
-        if (combinedText.length > MAX_TOTAL_CHARS) combinedText = combinedText.slice(-MAX_TOTAL_CHARS);
+        combinedText = clampText(combinedText, MAX_TOTAL_CHARS);
 
         const userContent: any[] = [{ type: "input_text", text: combinedText }];
-        if (openaiFileId) userContent.push({ type: "input_file", file_id: openaiFileId });
+
+        if (pdfChatState.kind === "ready_file" && pdfChatState.openaiFileId) {
+          userContent.push({ type: "input_file", file_id: pdfChatState.openaiFileId });
+        }
 
         const input: any[] = [{ role: "user", content: userContent }];
 
-        const modelWithPdf = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1-mini";
-        const modelNoPdf = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
-        const model = openaiFileId ? modelWithPdf : modelNoPdf;
+        const model =
+          pdfChatState.kind === "ready_file" && pdfChatState.openaiFileId
+            ? OPENAI_MODEL_WITH_PDF
+            : OPENAI_MODEL_NO_PDF;
 
         let assistantText = "";
 
-        if (forceWebFirst) {
-          const strictInstructions =
-            publiaPrompt +
-            `
-
-[BACKEND HARD GATE — WEB-FIRST OBRIGATÓRIO]
-Esta pergunta exige Web-First (valores/prazos/limites/dispositivo vigente).
-Você DEVE:
-1) usar web_search_preview em fonte oficial;
-2) responder com a norma VIGENTE;
-3) incluir no final:
-   - Base legal
-   - Referências oficiais consultadas (lista em tópicos)
-PROIBIDO: escrever "Não houve consulta web..." nesta resposta.
-`;
-
-          const resp1 = await openai.responses.create({
-            model,
-            instructions: strictInstructions,
-            tools: [{ type: "web_search_preview" }],
-            tool_choice: { type: "web_search_preview" },
-            input,
-            temperature: temp,
-            stream: false,
-          } as any);
-
-          assistantText = formatAssistantText(extractResponseText(resp1));
-          const v1 = validateWebFirst(resp1, assistantText);
-
-          if (!v1.ok) {
-            const retryInstructions =
-              strictInstructions +
-              `
-
-[RETRY — FALHA DE COMPLIANCE]
-Você falhou em cumprir Web-First. Motivo detectado: ${v1.reason}
-Refaça usando web_search_preview e entregue o rodapé completo com referências oficiais.
-`;
-
-            const resp2 = await openai.responses.create({
-              model,
-              instructions: retryInstructions,
-              tools: [{ type: "web_search_preview" }],
-              tool_choice: { type: "web_search_preview" },
-              input,
-              temperature: temp,
-              stream: false,
-            } as any);
-
-            assistantText = formatAssistantText(extractResponseText(resp2));
-            const v2 = validateWebFirst(resp2, assistantText);
-
-            if (!v2.ok) {
-              send("error", {
-                error:
-                  "Web-First obrigatório: não consegui confirmar em fonte oficial agora. Tente novamente em instantes ou refine com município/UF e TCE/TCM.",
-                debug: { reason: v2.reason },
-              });
-              controller.close();
-              return;
-            }
-          }
-
-          // ✅ efeito “digitando” também no Web-First
-          const CHUNK = 1200;
-          for (let i = 0; i < assistantText.length; i += CHUNK) {
-            pushDelta(assistantText.slice(i, i + CHUNK));
-            await new Promise((r) => setTimeout(r, 18));
-          }
-          flush();
-        } else {
-          const request: any = {
+        try {
+          const reqObj: any = {
             model,
             instructions: publiaPrompt,
-            tools: [{ type: "web_search_preview" }],
             input,
             temperature: temp,
             stream: true,
           };
 
-          const responseStream = await openai.responses.create(request);
+          if (forceWebFirst) {
+            reqObj.tools = [{ type: "web_search_preview" }];
+            reqObj.tool_choice = { type: "web_search_preview" };
+          }
 
-          for await (const event of responseStream as any) {
+          const resp = await openai.responses.create(reqObj);
+
+          for await (const event of resp as any) {
+            if (aborted || closed) break;
+
             if (event?.type === "response.output_text.delta") {
               const delta = event.delta as string;
+
               if (delta) {
                 assistantText += delta;
                 pushDelta(delta);
@@ -691,11 +865,16 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
 
           flush();
           assistantText = formatAssistantText(assistantText);
+        } catch (error) {
+          console.error("Erro OpenAI em /api/chat:", error);
+          safeSend("error", { error: "Erro ao gerar resposta da IA." });
+          safeClose();
+          return;
         }
 
         if (!assistantText.trim()) {
-          send("error", { error: "Não foi possível obter uma resposta da IA." });
-          controller.close();
+          safeSend("error", { error: "Não foi possível obter uma resposta da IA." });
+          safeClose();
           return;
         }
 
@@ -710,24 +889,24 @@ Refaça usando web_search_preview e entregue o rodapé completo com referências
           .single();
 
         if (insertAssistantError || !assistantMessageRow) {
-          send("error", { error: "Não foi possível salvar a resposta da IA." });
-          controller.close();
+          safeSend("error", { error: "Não foi possível salvar a resposta da IA." });
+          safeClose();
           return;
         }
 
-        send("done", { assistantMessage: assistantMessageRow });
-        clearInterval(ka);
-        controller.close();
-      } catch (err) {
-        console.error("Erro inesperado em /api/chat:", err);
-        try {
-          sendRaw(sseEvent("error", { error: "Erro inesperado ao processar a requisição." }));
-        } catch {}
-        try {
-          clearInterval(ka);
-        } catch {}
-        controller.close();
+        safeSend("done", { assistantMessage: assistantMessageRow });
+        safeClose();
+      } catch (error) {
+        console.error("Erro inesperado em /api/chat:", error);
+        safeSend("error", { error: "Erro inesperado ao processar a requisição." });
+        safeClose();
+      } finally {
+        req.signal.removeEventListener("abort", onAbort);
       }
+    },
+
+    cancel() {
+      // cleanup principal feito via abort/safeClose
     },
   });
 

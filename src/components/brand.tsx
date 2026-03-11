@@ -1,27 +1,16 @@
-"use client";
-import * as React from "react";
+// src/components/brand.tsx
+import Image from "next/image";
 
-export function Brand({
-  size = 44,
-  className = "",
-}: {
-  size?: number;
-  className?: string;
-}) {
+export default function Brand({ size = 28 }: { size?: number }) {
   return (
-    <div className={`flex items-center justify-center mb-1 ${className}`}>
-      <img
-        src="/logos/nexus.png"
+    <div className="flex items-center gap-2">
+      <Image
+        src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
         alt="Nexus Pública"
         width={size}
         height={size}
-        onError={(e) => {
-          (e.target as HTMLImageElement).src = "/logos/logo-nexus.png";
-        }}
+        className="rounded"
       />
-    </div>
+      </div>
   );
 }
-
-export default Brand;
-

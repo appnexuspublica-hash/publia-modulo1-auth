@@ -30,36 +30,31 @@ export async function GET(req: Request, { params }: { params: { shareId: string 
       return NextResponse.json({ error: "Env NEXT_PUBLIC_SUPABASE_URL ausente." }, { status: 500 });
     }
     if (!serviceRoleKey) {
-      return NextResponse.json({ error: "Env SUPABASE_SERVICE_ROLE_KEY ausente." }, { status: 500 });
+      return NextResponse.json(
+        { error: "Env SUPABASE_SERVICE_ROLE_KEY ausente." },
+        { status: 500 }
+      );
     }
 
+    // Admin (service role) para permitir leitura pública SEM abrir RLS
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
 
-    // shareId -> conversation_id
-    const { data: shareRow, error: shareErr } = await admin
-      .from("conversation_shares")
-      .select("conversation_id")
-      .eq("share_id", shareId)
-      .maybeSingle<{ conversation_id: string }>();
-
-    if (shareErr) return NextResponse.json({ error: shareErr.message }, { status: 500 });
-
-    const conversationId = String(shareRow?.conversation_id ?? "").trim();
-    if (!conversationId || !isUuid(conversationId)) {
-      return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
-    }
-
-    // Metadados da conversa
+    // shareId -> conversa compartilhada
     const { data: conv, error: convErr } = await admin
       .from("conversations")
       .select("id, title, created_at")
-      .eq("id", conversationId)
+      .eq("share_id", shareId)
+      .eq("is_shared", true)
+      .is("deleted_at", null)
       .maybeSingle<{ id: string; title: string | null; created_at: string }>();
 
     if (convErr) return NextResponse.json({ error: convErr.message }, { status: 500 });
-    if (!conv) return NextResponse.json({ error: "Conversa não encontrada." }, { status: 404 });
+    if (!conv?.id)
+      return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
+
+    const conversationId = String(conv.id).trim();
 
     // ✅ Se tem messageId: retorna só recorte
     if (messageId) {
@@ -68,10 +63,16 @@ export async function GET(req: Request, { params }: { params: { shareId: string 
         .select("id, role, content, created_at")
         .eq("conversation_id", conversationId)
         .eq("id", messageId)
-        .maybeSingle<{ id: string; role: "user" | "assistant"; content: string; created_at: string }>();
+        .maybeSingle<{
+          id: string;
+          role: "user" | "assistant";
+          content: string;
+          created_at: string;
+        }>();
 
       if (targetErr) return NextResponse.json({ error: targetErr.message }, { status: 500 });
-      if (!target) return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
+      if (!target)
+        return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
 
       // pega a pergunta imediatamente anterior (se existir)
       const { data: prevUser, error: prevErr } = await admin
@@ -102,7 +103,7 @@ export async function GET(req: Request, { params }: { params: { shareId: string 
           conversationId,
           messages,
           __debug: {
-            version: "share-message-slice-v1",
+            version: "share-message-slice-v2",
             shareId,
             conversationId,
             messageId,
@@ -135,7 +136,7 @@ export async function GET(req: Request, { params }: { params: { shareId: string 
         conversationId,
         messages,
         __debug: {
-          version: "share-full-v1",
+          version: "share-full-v2",
           shareId,
           conversationId,
           returnedCount: messages.length,

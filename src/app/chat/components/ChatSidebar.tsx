@@ -43,11 +43,7 @@ export function ChatSidebar({
       <div className="bg-white px-4 pt-4 pb-4">
         <div className="flex items-center gap-2">
           {/* Logo com link para o site da Nexus Pública */}
-          <a
-            href="https://nexuspublica.com.br/"
-            target="_blank"
-            rel="noreferrer noopener"
-          >
+          <a href="https://nexuspublica.com.br/" target="_blank" rel="noreferrer noopener">
             <Image
               src="/logos/nexus.png"
               alt="Logo Publ.IA"
@@ -58,27 +54,17 @@ export function ChatSidebar({
           </a>
 
           <div className="flex flex-col">
-            <span className="text-sm font-semibold text-slate-900">
-              Publ.IA 1.7
-            </span>
-            <span className="text-[11px] text-slate-500">
-              Nexus Pública
-            </span>
+            <span className="text-sm font-semibold text-slate-900">Publ.IA 1.7</span>
+            <span className="text-[11px] text-slate-500">Nexus Pública</span>
           </div>
         </div>
       </div>
 
       {/* Botão NOVA CONVERSA */}
       <div className="px-4 pt-4 pb-3">
-        <button
-          type="button"
-          onClick={onNewConversation}
-          className="flex justify-start"
-        >
-          <div className="inline-flex items-center gap-2 rounded-full bg-[#fbbf24] px-3 py-2 shadow transition hover:shadow-md hover:brightness-105">
-            <span className="leading-none text-lg font-bold text-white">
-              +
-            </span>
+        <button type="button" onClick={onNewConversation} className="flex justify-start">
+          <div className="inline-flex items-center gap-2 rounded-full bg-[#696969] px-3 py-2 shadow transition hover:shadow-md hover:brightness-105">
+            <span className="leading-none text-lg font-bold text-white">+</span>
             <span className="text-[11px] font-semibold tracking-wide text-white">
               NOVA CONVERSA
             </span>
@@ -88,22 +74,19 @@ export function ChatSidebar({
 
       {/* Corpo: histórico de conversas */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 pb-4">
-        <div className="mb-2 text-xs font-semibold text-slate-600">
-          HISTÓRICO
-        </div>
+        <div className="mb-2 text-xs font-semibold text-slate-600">HISTÓRICO</div>
 
         <div className="space-y-1 pr-1">
           {conversations.length === 0 && (
             <div className="text-[12px] text-slate-500">
-              Nenhuma conversa ainda. Clique em{" "}
-              <span className="font-semibold">NOVA CONVERSA</span> para começar.
+              Nenhuma conversa ainda. Clique em <span className="font-semibold">NOVA CONVERSA</span>{" "}
+              para começar.
             </div>
           )}
 
           {conversations.map((conv) => {
             const dateLabel = formatDateShort(conv.created_at);
-            const showDate =
-              dateLabel && dateLabel !== "" && dateLabel !== lastRenderedDate;
+            const showDate = dateLabel && dateLabel !== "" && dateLabel !== lastRenderedDate;
 
             if (showDate) {
               lastRenderedDate = dateLabel;
@@ -111,9 +94,7 @@ export function ChatSidebar({
 
             const isActive = conv.id === activeConversationId;
             const title =
-              conv.title && conv.title.trim().length > 0
-                ? conv.title.trim()
-                : "Nova conversa";
+              conv.title && conv.title.trim().length > 0 ? conv.title.trim() : "Nova conversa";
 
             return (
               <React.Fragment key={conv.id}>
@@ -137,9 +118,7 @@ export function ChatSidebar({
                     onClick={() => onSelectConversation(conv.id)}
                     className="flex-1 max-w-full text-left"
                   >
-                    <div className="line-clamp-2 break-words leading-snug">
-                      {title}
-                    </div>
+                    <div className="line-clamp-2 break-words leading-snug">{title}</div>
                   </button>
 
                   {/* excluir conversa */}
@@ -161,10 +140,7 @@ export function ChatSidebar({
       {/* Área 2: rodapé com usuário + botão SAIR */}
       <div className="mt-auto border-t border-slate-200 bg-white px-4 py-3 text-[12px] text-slate-700">
         <div>
-          Usuário:{" "}
-          <span className="font-semibold">
-            {userLabel}
-          </span>
+          Usuário: <span className="font-semibold">{userLabel}</span>
         </div>
         <button
           type="button"

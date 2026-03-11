@@ -33,15 +33,11 @@ export function ChatHeader({ userLabel }: ChatHeaderProps) {
       {/* Usuário + sair */}
       <div className="flex items-center gap-4 text-xs">
         <span className="text-slate-700">
-          Usuário:{" "}
-          <span className="font-semibold text-slate-900">{userLabel}</span>
+          Usuário: <span className="font-semibold text-slate-900">{userLabel}</span>
         </span>
 
         {/* Ajuste o href se sua rota de logout for outra */}
-        <Link
-          href="/logout"
-          className="text-xs font-semibold text-red-600 hover:text-red-700"
-        >
+        <Link href="/logout" className="text-xs font-semibold text-red-600 hover:text-red-700">
           [ SAIR ]
         </Link>
       </div>

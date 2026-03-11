@@ -8,7 +8,7 @@ export default function AuthTitle({
 }: {
   title: string;
   subtitle?: string;
-  brand?: ReactNode;  // passe <Brand /> aqui
+  brand?: ReactNode; // passe <Brand /> aqui
 }) {
   return (
     <div className="flex flex-col items-center text-center mb-6">

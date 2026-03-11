@@ -15,9 +15,7 @@ function getOrigin(req: Request) {
   // - Em dev, cai no host do próprio request
   const proto = req.headers.get("x-forwarded-proto") ?? "https";
   const host =
-    req.headers.get("x-forwarded-host") ??
-    req.headers.get("host") ??
-    new URL(req.url).host;
+    req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
 
   return `${proto}://${host}`;
 }
@@ -140,8 +138,7 @@ export async function POST(req: Request) {
         return NextResponse.json(
           {
             ok: false,
-            error:
-              "Limite de envio de e-mail excedido. Aguarde alguns minutos e tente novamente.",
+            error: "Limite de envio de e-mail excedido. Aguarde alguns minutos e tente novamente.",
           },
           { status: 429 }
         );
@@ -156,8 +153,7 @@ export async function POST(req: Request) {
         return NextResponse.json(
           {
             ok: false,
-            error:
-              "Redirect URL não permitido no Supabase. Verifique Auth → URL Configuration.",
+            error: "Redirect URL não permitido no Supabase. Verifique Auth → URL Configuration.",
           },
           { status: 500 }
         );
@@ -166,8 +162,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           ok: false,
-          error:
-            "Não foi possível enviar o e-mail agora. Tente novamente em instantes.",
+          error: "Não foi possível enviar o e-mail agora. Tente novamente em instantes.",
         },
         { status: 500 }
       );

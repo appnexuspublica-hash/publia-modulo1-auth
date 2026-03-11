@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
@@ -20,38 +19,31 @@ export async function POST(req: Request) {
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl || !supabaseAnonKey) {
       return NextResponse.json({ error: "Env do Supabase ausente." }, { status: 500 });
     }
-    if (!serviceRoleKey) {
-      return NextResponse.json({ error: "Env SUPABASE_SERVICE_ROLE_KEY ausente." }, { status: 500 });
-    }
 
-    // Auth do usuário via cookies (pra validar dono da conversa)
+    // Auth do usuário via cookies
     const cookieStore = cookies();
-    const auth = createServerClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
       cookies: {
         get(name) {
           return cookieStore.get(name)?.value;
         },
-        set() {},
-        remove() {},
+        set(name, value, options) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name, options) {
+          cookieStore.set({ name, value: "", ...options, maxAge: 0 });
+        },
       },
     });
 
-    const { data: u, error: uErr } = await auth.auth.getUser();
+    const { data: u, error: uErr } = await supabase.auth.getUser();
     if (uErr || !u?.user) {
       return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
     }
-
-    const userId = u.user.id;
-
-    // Admin (service role) para ignorar RLS no share público
-    const admin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
 
     // ✅ resolve conversationId
     let conversationId = "";
@@ -59,8 +51,8 @@ export async function POST(req: Request) {
     if (conversationIdRaw && isUuid(conversationIdRaw)) {
       conversationId = conversationIdRaw;
     } else if (messageIdRaw && isUuid(messageIdRaw)) {
-      // 🔁 legado: descobrir a conversation pelo messageId
-      const { data: msgRow, error: msgErr } = await admin
+      // 🔁 legado: descobrir a conversation pelo messageId (RLS garante que é do usuário)
+      const { data: msgRow, error: msgErr } = await supabase
         .from("messages")
         .select("conversation_id")
         .eq("id", messageIdRaw)
@@ -75,61 +67,52 @@ export async function POST(req: Request) {
 
       conversationId = cid;
     } else {
-      return NextResponse.json(
-        { error: "conversationId inválido." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "conversationId inválido." }, { status: 400 });
     }
 
-    // Confirma que a conversa é do usuário
-    const { data: conv, error: convErr } = await admin
+    // ✅ Busca conversa (RLS garante que é do usuário)
+    const { data: conv, error: convErr } = await supabase
       .from("conversations")
-      .select("id, user_id")
+      .select("id, is_shared, share_id")
       .eq("id", conversationId)
-      .eq("user_id", userId)
-      .maybeSingle<{ id: string; user_id: string }>();
+      .maybeSingle<{ id: string; is_shared: boolean; share_id: string | null }>();
 
     if (convErr) return NextResponse.json({ error: convErr.message }, { status: 500 });
-    if (!conv) return NextResponse.json({ error: "Sem permissão para esta conversa." }, { status: 403 });
+    if (!conv)
+      return NextResponse.json({ error: "Sem permissão para esta conversa." }, { status: 403 });
 
-    // Se já existe share para essa conversa, devolve o mesmo
-    const { data: existing, error: exErr } = await admin
-      .from("conversation_shares")
-      .select("share_id")
-      .eq("conversation_id", conversationId)
-      .maybeSingle<{ share_id: string }>();
+    const existingShareId = String(conv.share_id ?? "").trim();
 
-    if (exErr) return NextResponse.json({ error: exErr.message }, { status: 500 });
+    // ✅ Se já tem share_id válido
+    if (existingShareId && isUuid(existingShareId)) {
+      if (conv.is_shared) {
+        return NextResponse.json({ shareId: existingShareId }, { status: 200 });
+      }
 
-    if (existing?.share_id && isUuid(existing.share_id)) {
-      return NextResponse.json({ shareId: existing.share_id }, { status: 200 });
+      // Reativa share mantendo o mesmo share_id
+      const { error: upErr } = await supabase
+        .from("conversations")
+        .update({ is_shared: true })
+        .eq("id", conversationId);
+
+      if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+
+      return NextResponse.json({ shareId: existingShareId }, { status: 200 });
     }
 
-    // Cria novo share
+    // ✅ Gera novo shareId e marca como compartilhada
     const shareId = crypto.randomUUID();
 
-    const { data: inserted, error: insErr } = await admin
-      .from("conversation_shares")
-      .insert({ conversation_id: conversationId, share_id: shareId })
+    const { data: updated, error: updateErr } = await supabase
+      .from("conversations")
+      .update({ is_shared: true, share_id: shareId })
+      .eq("id", conversationId)
       .select("share_id")
       .single<{ share_id: string }>();
 
-    if (insErr) {
-      // Em caso de corrida, tenta buscar novamente
-      const { data: retry, error: retryErr } = await admin
-        .from("conversation_shares")
-        .select("share_id")
-        .eq("conversation_id", conversationId)
-        .maybeSingle<{ share_id: string }>();
+    if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
 
-      if (retryErr) return NextResponse.json({ error: retryErr.message }, { status: 500 });
-      const retryId = String(retry?.share_id ?? "").trim();
-      if (retryId && isUuid(retryId)) return NextResponse.json({ shareId: retryId }, { status: 200 });
-
-      return NextResponse.json({ error: insErr.message }, { status: 500 });
-    }
-
-    const finalShareId = String(inserted?.share_id ?? "").trim();
+    const finalShareId = String(updated?.share_id ?? "").trim();
     if (!finalShareId || !isUuid(finalShareId)) {
       return NextResponse.json({ error: "Falha ao gerar shareId." }, { status: 500 });
     }
