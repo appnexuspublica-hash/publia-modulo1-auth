@@ -10,10 +10,6 @@ const nextConfig = {
   },
 
   serverExternalPackages: ["pdfjs-dist"],
-
-  outputFileTracingIncludes: {
-    "/api/pdf/*": ["./scripts/extract-pdf.mjs"],
-  },
 };
 
 export default nextConfig;
