@@ -11,6 +11,7 @@ const nextConfig = {
   outputFileTracingIncludes: {
     "/api/pdf/*": [
       "./scripts/extract-pdf.mjs",
+      "./node_modules/pdfjs-dist/package.json",
       "./node_modules/pdfjs-dist/**/*",
     ],
   },
