@@ -1,5 +1,4 @@
-// src/lib/pdf/extract.ts
-import { getDocumentProxy } from "unpdf";
+import { extractText, getDocumentProxy } from "unpdf";
 
 export const DEFAULT_EXTRACT_TEXT_HARD_LIMIT = 250_000;
 
@@ -55,6 +54,54 @@ function normalizeBufferInput(buf: Buffer): Uint8Array {
   return new Uint8Array(buf);
 }
 
+async function extractByPages(pdf: any): Promise<string> {
+  let out = "";
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+
+    const strings = (content?.items ?? [])
+      .map((item: any) => {
+        if (typeof item?.str === "string") return item.str;
+        return "";
+      })
+      .filter(Boolean);
+
+    if (strings.length) {
+      out += strings.join(" ") + "\n";
+    }
+  }
+
+  return out;
+}
+
+function normalizeExtractTextResult(result: unknown): string {
+  if (!result || typeof result !== "object") {
+    return "";
+  }
+
+  const maybeText = (result as { text?: unknown }).text;
+
+  if (typeof maybeText === "string") {
+    return maybeText;
+  }
+
+  if (Array.isArray(maybeText)) {
+    return maybeText
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return "";
+}
+
+async function extractByUnpdfText(pdf: any): Promise<string> {
+  const result = await extractText(pdf, { mergePages: true });
+  return normalizeExtractTextResult(result);
+}
+
 export async function extractPdfTextFromBuffer(
   buf: Buffer,
   options: ExtractPdfTextOptions = {}
@@ -72,6 +119,11 @@ export async function extractPdfTextFromBuffer(
       : null;
 
   if (maxBytes && fileSizeBytes && fileSizeBytes > maxBytes) {
+    console.log("[extractPdfTextFromBuffer] skipped_large", {
+      fileSizeBytes,
+      maxBytes,
+    });
+
     return {
       kind: "skipped_large",
       error: getSkippedLargePdfMessage(options.maxMbLabel ?? null),
@@ -81,29 +133,45 @@ export async function extractPdfTextFromBuffer(
   try {
     const pdf = await getDocumentProxy(normalizeBufferInput(buf));
 
-    let out = "";
+    console.log("[extractPdfTextFromBuffer] pdf loaded", {
+      numPages: pdf?.numPages,
+      fileSizeBytes,
+    });
 
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
+    // Tentativa 1: leitura por página
+    const pageTextRaw = await extractByPages(pdf);
+    const pageText = sanitizeExtractedText(pageTextRaw, hardLimit);
 
-      const strings = (content.items ?? [])
-        .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
-        .filter(Boolean);
+    console.log("[extractPdfTextFromBuffer] page extraction", {
+      rawLength: pageTextRaw.length,
+      finalLength: pageText.length,
+      preview: pageText.slice(0, 200),
+    });
 
-      if (strings.length) {
-        out += strings.join(" ") + "\n";
-      }
+    if (pageText) {
+      return { kind: "ready", text: pageText };
     }
 
-    const text = sanitizeExtractedText(out, hardLimit);
+    // Tentativa 2: fallback do próprio unpdf
+    const fallbackRaw = await extractByUnpdfText(pdf);
+    const fallbackText = sanitizeExtractedText(fallbackRaw, hardLimit);
 
-    if (!text) {
-      return { kind: "no_text" };
+    console.log("[extractPdfTextFromBuffer] fallback extraction", {
+      rawLength: fallbackRaw.length,
+      finalLength: fallbackText.length,
+      preview: fallbackText.slice(0, 200),
+    });
+
+    if (fallbackText) {
+      return { kind: "ready", text: fallbackText };
     }
 
-    return { kind: "ready", text };
+    console.log("[extractPdfTextFromBuffer] no_text");
+
+    return { kind: "no_text" };
   } catch (error: any) {
+    console.error("[extractPdfTextFromBuffer] technical_error", error);
+
     return {
       kind: "technical_error",
       error: String(error?.message ?? error ?? "Falha técnica ao extrair texto do PDF."),

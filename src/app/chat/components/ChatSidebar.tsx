@@ -54,7 +54,7 @@ export function ChatSidebar({
           </a>
 
           <div className="flex flex-col">
-            <span className="text-sm font-semibold text-slate-900">Publ.IA 1.7</span>
+            <span className="text-sm font-semibold text-slate-900">Publ.IA ESSENCIAL 1.7</span>
             <span className="text-[11px] text-slate-500">Nexus Pública</span>
           </div>
         </div>

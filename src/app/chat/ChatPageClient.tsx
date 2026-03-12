@@ -1248,7 +1248,7 @@ Organize a resposta em tópicos, com explicações objetivas.
               />
             </a>
             <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA 1.7</div>
+              <div className="text-sm font-semibold leading-none">Publ.IA 1.7 ESSENCIAL</div>
               <div className="text-[11px] text-slate-500 leading-none">Nexus Pública</div>
             </div>
           </div>

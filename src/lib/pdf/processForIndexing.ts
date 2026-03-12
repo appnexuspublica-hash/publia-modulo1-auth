@@ -1,4 +1,3 @@
-// src/lib/pdf/processForIndexing.ts
 import OpenAI from "openai";
 
 import { chunkText } from "@/lib/pdf/chunking";
@@ -47,13 +46,16 @@ async function embedTexts(texts: string[]) {
   return data.map((d: any) => d.embedding) as number[][];
 }
 
-function isSafeStoragePath(conversationId: string | null, storagePath: string) {
-  if (!conversationId) return false;
-  if (!storagePath.startsWith(`${conversationId}/`)) return false;
+function isSafeStoragePath(storagePath: string) {
+  if (!storagePath) return false;
   if (storagePath.includes("..")) return false;
   if (storagePath.includes("\\")) return false;
   if (storagePath.startsWith("/")) return false;
   if (storagePath.length > 300) return false;
+
+  const parts = storagePath.split("/").filter(Boolean);
+  if (parts.length < 2) return false;
+
   return true;
 }
 
@@ -63,8 +65,11 @@ function errToString(error: any) {
 
   const msg = error?.message ? String(error.message) : "";
   const name = error?.name ? String(error.name) : "";
+  const details = error?.details ? String(error.details) : "";
+  const hint = error?.hint ? String(error.hint) : "";
+  const code = error?.code ? String(error.code) : "";
 
-  return [name, msg].filter(Boolean).join(": ") || "Erro desconhecido";
+  return [code, name, msg, details, hint].filter(Boolean).join(" | ") || "Erro desconhecido";
 }
 
 function errToDetail(error: any) {
@@ -74,13 +79,23 @@ function errToDetail(error: any) {
 }
 
 async function downloadPdfBuffer(client: any, storagePath: string): Promise<Buffer> {
+  console.log("[processPdfForIndexing] downloadPdfBuffer:start", { storagePath });
+
   const { data: fileData, error } = await client.storage.from("pdf-files").download(storagePath);
 
   if (error || !fileData) {
     throw new Error(`Falha ao baixar PDF do Storage: ${error?.message ?? "download falhou"}`);
   }
 
-  return Buffer.from(await fileData.arrayBuffer());
+  const arrayBuffer = await fileData.arrayBuffer();
+  const buf = Buffer.from(arrayBuffer);
+
+  console.log("[processPdfForIndexing] downloadPdfBuffer:done", {
+    storagePath,
+    bytes: buf.length,
+  });
+
+  return buf;
 }
 
 type ProcessPdfParams = {
@@ -103,6 +118,13 @@ export async function processPdfForIndexing({
   isDev = false,
   resetBeforeProcessing = false,
 }: ProcessPdfParams): Promise<ProcessPdfResult> {
+  console.log("[processPdfForIndexing] start", {
+    userId,
+    pdfFileId,
+    resetBeforeProcessing,
+    isDev,
+  });
+
   if (!openai) {
     return {
       status: 500,
@@ -119,6 +141,11 @@ export async function processPdfForIndexing({
     .eq("user_id", userId)
     .maybeSingle();
 
+  console.log("[processPdfForIndexing] pdf lookup", {
+    found: !!pdf,
+    pdfErr: pdfErr?.message ?? null,
+  });
+
   if (pdfErr) {
     return {
       status: 500,
@@ -133,11 +160,26 @@ export async function processPdfForIndexing({
     };
   }
 
-  const conversationId = (pdf as any).conversation_id as string | null;
+  const conversationId = ((pdf as any).conversation_id as string | null) ?? null;
   const storagePath = String((pdf as any).storage_path ?? "");
   const fileSize = Number((pdf as any).file_size ?? 0);
 
+  console.log("[processPdfForIndexing] pdf meta", {
+    fileName: (pdf as any).file_name ?? null,
+    conversationId,
+    storagePath,
+    fileSize,
+    extracted_text_status: (pdf as any).extracted_text_status ?? null,
+    vector_index_status: (pdf as any).vector_index_status ?? null,
+    extracted_text_len: String((pdf as any).extracted_text ?? "").length,
+  });
+
+  let extractedText = String((pdf as any).extracted_text ?? "");
+  let extractedStatus = String((pdf as any).extracted_text_status ?? "").toLowerCase();
+
   if (resetBeforeProcessing) {
+    console.log("[processPdfForIndexing] resetBeforeProcessing:resetting");
+
     await client
       .from("pdf_files")
       .update({
@@ -154,9 +196,24 @@ export async function processPdfForIndexing({
       .eq("user_id", userId);
 
     await client.from("pdf_chunks").delete().eq("pdf_file_id", pdfFileId).eq("user_id", userId);
+
+    // MUITO IMPORTANTE:
+    // após resetar no banco, resetar também o estado em memória
+    extractedText = "";
+    extractedStatus = "pending";
+
+    console.log("[processPdfForIndexing] resetBeforeProcessing:done");
   }
 
-  if (!isSafeStoragePath(conversationId, storagePath)) {
+  const safeStoragePath = isSafeStoragePath(storagePath);
+
+  console.log("[processPdfForIndexing] storagePath validation", {
+    conversationId,
+    storagePath,
+    safeStoragePath,
+  });
+
+  if (!safeStoragePath) {
     await client
       .from("pdf_files")
       .update({
@@ -172,6 +229,8 @@ export async function processPdfForIndexing({
       .eq("id", pdfFileId)
       .eq("user_id", userId);
 
+    console.log("[processPdfForIndexing] aborted: unsafe storage_path");
+
     return {
       status: 200,
       body: { ok: false, extracted_text_status: "error", vector_index_status: "blocked_no_text" },
@@ -179,6 +238,13 @@ export async function processPdfForIndexing({
   }
 
   const maxBytes = PDF_EXTRACT_MAX_MB * 1024 * 1024;
+
+  console.log("[processPdfForIndexing] size check", {
+    fileSize,
+    maxBytes,
+    maxMb: PDF_EXTRACT_MAX_MB,
+  });
+
   if (fileSize > 0 && fileSize > maxBytes) {
     const msg = getSkippedLargePdfMessage(PDF_EXTRACT_MAX_MB);
 
@@ -196,6 +262,8 @@ export async function processPdfForIndexing({
       .eq("id", pdfFileId)
       .eq("user_id", userId);
 
+    console.log("[processPdfForIndexing] aborted: skipped_large");
+
     return {
       status: 200,
       body: {
@@ -206,8 +274,11 @@ export async function processPdfForIndexing({
     };
   }
 
-  let extractedText = String((pdf as any).extracted_text ?? "");
-  let extractedStatus = String((pdf as any).extracted_text_status ?? "").toLowerCase();
+  console.log("[processPdfForIndexing] extraction gate", {
+    extractedStatus,
+    extractedTextLen: extractedText.length,
+    willExtract: extractedStatus !== "ready" || !extractedText.trim(),
+  });
 
   if (extractedStatus !== "ready" || !extractedText.trim()) {
     await client
@@ -223,11 +294,28 @@ export async function processPdfForIndexing({
     try {
       const buf = await downloadPdfBuffer(client, storagePath);
 
+      console.log("[processPdfForIndexing] calling extractPdfTextFromBuffer", {
+        bufferBytes: buf.length,
+        hardLimit: EXTRACT_TEXT_HARD_LIMIT,
+      });
+
       const extracted = await extractPdfTextFromBuffer(buf, {
         hardLimit: EXTRACT_TEXT_HARD_LIMIT,
         fileSizeBytes: fileSize,
         maxBytes,
         maxMbLabel: PDF_EXTRACT_MAX_MB,
+      });
+
+      console.log("[processPdfForIndexing] extract result", {
+        kind: extracted.kind,
+        ...(extracted.kind === "ready"
+          ? {
+              textLen: extracted.text.length,
+              preview: extracted.text.slice(0, 200),
+            }
+          : extracted.kind === "technical_error" || extracted.kind === "skipped_large"
+          ? { error: extracted.error }
+          : {}),
       });
 
       if (extracted.kind === "skipped_large") {
@@ -283,6 +371,8 @@ export async function processPdfForIndexing({
       if (extracted.kind === "no_text") {
         const msg = getNoTextPdfMessage();
 
+        console.log("[processPdfForIndexing] extract result: no_text");
+
         await client
           .from("pdf_files")
           .update({
@@ -321,6 +411,10 @@ export async function processPdfForIndexing({
         } as any)
         .eq("id", pdfFileId)
         .eq("user_id", userId);
+
+      console.log("[processPdfForIndexing] extracted text saved", {
+        extractedTextLen: extractedText.length,
+      });
     } catch (error: any) {
       const { msg, stack } = errToDetail(error);
       console.error("[processPdfForIndexing] Falha na extração:", msg);
@@ -351,6 +445,11 @@ export async function processPdfForIndexing({
   }
 
   if (extractedStatus !== "ready" || !extractedText.trim()) {
+    console.log("[processPdfForIndexing] abort after extraction gate", {
+      extractedStatus,
+      extractedTextLen: extractedText.length,
+    });
+
     return {
       status: 409,
       body: {
@@ -379,12 +478,22 @@ export async function processPdfForIndexing({
       maxChunks: CHUNK_MAX,
     }) as any[];
 
+    console.log("[processPdfForIndexing] chunkText result", {
+      rawChunks: Array.isArray(chunks) ? chunks.length : 0,
+      extractedTextLen: extractedText.length,
+    });
+
     const chunkItems = (chunks ?? [])
       .map((c, i) => ({
         index: typeof c?.index === "number" ? c.index : i,
         text: String(c?.text ?? "").trim(),
       }))
       .filter((c) => c.text.length > 0);
+
+    console.log("[processPdfForIndexing] chunkItems filtered", {
+      count: chunkItems.length,
+      firstPreview: chunkItems[0]?.text?.slice(0, 200) ?? null,
+    });
 
     if (!chunkItems.length) {
       await client
@@ -406,6 +515,12 @@ export async function processPdfForIndexing({
 
     for (let start = 0; start < chunkItems.length; start += EMBED_BATCH) {
       const slice = chunkItems.slice(start, start + EMBED_BATCH);
+
+      console.log("[processPdfForIndexing] embedding batch", {
+        start,
+        size: slice.length,
+      });
+
       const vectors = await embedTexts(slice.map((s) => s.text));
 
       const rowsToInsert = slice.map((s, i) => ({
@@ -417,6 +532,12 @@ export async function processPdfForIndexing({
         embedding: vectorLiteral(vectors[i]),
       }));
 
+      console.log("[processPdfForIndexing] inserting batch", {
+        start,
+        rows: rowsToInsert.length,
+        conversation_id: conversationId,
+      });
+
       const { error: insErr } = await client.from("pdf_chunks").insert(rowsToInsert as any);
       if (insErr) {
         throw insErr;
@@ -426,6 +547,7 @@ export async function processPdfForIndexing({
     await client
       .from("pdf_files")
       .update({
+        extracted_text_status: "ready",
         vector_index_status: "ready",
         vector_index_error: null,
         vector_chunks_count: chunkItems.length,
@@ -433,6 +555,13 @@ export async function processPdfForIndexing({
       } as any)
       .eq("id", pdfFileId)
       .eq("user_id", userId);
+
+    console.log("[processPdfForIndexing] success", {
+      pdfFileId,
+      conversation_id: conversationId,
+      vector_chunks_count: chunkItems.length,
+      embeddingModel: EMBEDDING_MODEL,
+    });
 
     return {
       status: 200,
