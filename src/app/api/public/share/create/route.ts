@@ -1,3 +1,4 @@
+// src/api/public/share/create/route.ts
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
@@ -9,13 +10,46 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
+async function registerPublicShareEvent(
+  supabase: any,
+  params: {
+    userId: string;
+    conversationId: string;
+    shareId: string;
+    source: "conversationId" | "messageId";
+    action: "existing" | "reactivated" | "created";
+  }
+) {
+  const { userId, conversationId, shareId, source, action } = params;
+
+  const { error } = await supabase.from("usage_events").insert({
+    user_id: userId,
+    event_type: "public_share",
+    conversation_id: conversationId,
+    input_tokens: 0,
+    output_tokens: 0,
+    metadata: {
+      shareId,
+      source,
+      action,
+    },
+  });
+
+  if (error) {
+    console.error("[/api/public/share/create] erro ao registrar usage_events", error);
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
 
-    // ✅ compat: aceita conversationId (novo) OU messageId (legado)
+    // compat: aceita conversationId (novo) OU messageId (legado)
     const conversationIdRaw = String(body?.conversationId ?? "").trim();
     const messageIdRaw = String(body?.messageId ?? "").trim();
+
+    const source: "conversationId" | "messageId" =
+      conversationIdRaw && isUuid(conversationIdRaw) ? "conversationId" : "messageId";
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -45,13 +79,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
     }
 
-    // ✅ resolve conversationId
+    const userId = u.user.id;
+
+    // resolve conversationId
     let conversationId = "";
 
     if (conversationIdRaw && isUuid(conversationIdRaw)) {
       conversationId = conversationIdRaw;
     } else if (messageIdRaw && isUuid(messageIdRaw)) {
-      // 🔁 legado: descobrir a conversation pelo messageId (RLS garante que é do usuário)
+      // legado: descobrir a conversation pelo messageId (RLS garante que é do usuário)
       const { data: msgRow, error: msgErr } = await supabase
         .from("messages")
         .select("conversation_id")
@@ -70,7 +106,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "conversationId inválido." }, { status: 400 });
     }
 
-    // ✅ Busca conversa (RLS garante que é do usuário)
+    // Busca conversa (RLS garante que é do usuário)
     const { data: conv, error: convErr } = await supabase
       .from("conversations")
       .select("id, is_shared, share_id")
@@ -78,14 +114,23 @@ export async function POST(req: Request) {
       .maybeSingle<{ id: string; is_shared: boolean; share_id: string | null }>();
 
     if (convErr) return NextResponse.json({ error: convErr.message }, { status: 500 });
-    if (!conv)
+    if (!conv) {
       return NextResponse.json({ error: "Sem permissão para esta conversa." }, { status: 403 });
+    }
 
     const existingShareId = String(conv.share_id ?? "").trim();
 
-    // ✅ Se já tem share_id válido
+    // Se já tem share_id válido
     if (existingShareId && isUuid(existingShareId)) {
       if (conv.is_shared) {
+        await registerPublicShareEvent(supabase, {
+          userId,
+          conversationId,
+          shareId: existingShareId,
+          source,
+          action: "existing",
+        });
+
         return NextResponse.json({ shareId: existingShareId }, { status: 200 });
       }
 
@@ -97,10 +142,18 @@ export async function POST(req: Request) {
 
       if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
 
+      await registerPublicShareEvent(supabase, {
+        userId,
+        conversationId,
+        shareId: existingShareId,
+        source,
+        action: "reactivated",
+      });
+
       return NextResponse.json({ shareId: existingShareId }, { status: 200 });
     }
 
-    // ✅ Gera novo shareId e marca como compartilhada
+    // Gera novo shareId e marca como compartilhada
     const shareId = crypto.randomUUID();
 
     const { data: updated, error: updateErr } = await supabase
@@ -116,6 +169,14 @@ export async function POST(req: Request) {
     if (!finalShareId || !isUuid(finalShareId)) {
       return NextResponse.json({ error: "Falha ao gerar shareId." }, { status: 500 });
     }
+
+    await registerPublicShareEvent(supabase, {
+      userId,
+      conversationId,
+      shareId: finalShareId,
+      source,
+      action: "created",
+    });
 
     return NextResponse.json({ shareId: finalShareId }, { status: 200 });
   } catch (e: any) {

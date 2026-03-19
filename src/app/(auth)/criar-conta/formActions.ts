@@ -195,21 +195,32 @@ export async function criarConta(
     if (authErr || !created?.user) {
       console.error("[signup] erro ao criar user", authErr);
       await unconsumeSignupToken(token, usedAtIso);
-      return { ok: false, error: "Não foi possível criar o usuário. Tente novamente." };
+
+      if (authErr?.code === "email_exists") {
+        return {
+          ok: false,
+          error: "Este e-mail já está cadastrado. Faça login ou use outro e-mail.",
+        };
+      }
+
+      return {
+        ok: false,
+        error: "Não foi possível criar o usuário. Tente novamente.",
+      };
     }
 
     const userId = created.user.id;
 
-  const { error: profileErr } = await supa.from("profiles").insert({
-  user_id: userId,
-  nome,
-  cpf_cnpj,
-  email: emailNorm,
-  telefone,
-  municipio,
-  uf,
-  cidade_uf: `${municipio} / ${uf}`,
-});
+    const { error: profileErr } = await supa.from("profiles").insert({
+      user_id: userId,
+      nome,
+      cpf_cnpj,
+      email: emailNorm,
+      telefone,
+      municipio,
+      uf,
+      cidade_uf: `${municipio} / ${uf}`,
+    });
 
     if (profileErr) {
       console.error("[signup] erro ao criar profile", profileErr);

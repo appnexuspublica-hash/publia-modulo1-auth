@@ -5,16 +5,17 @@ import React, { useState, useRef, KeyboardEvent, FormEvent, ChangeEvent } from "
 
 type ChatInputProps = {
   onSend: (message: string) => void | Promise<void>;
-
-  // ✅ novo
   isSending?: boolean;
   onStop?: () => void;
-
-  // compat (se você ainda usa em algum lugar)
   disabled?: boolean;
 };
 
-export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  isSending = false,
+  onStop,
+  disabled,
+}: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -51,7 +52,7 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
       const trimmed = value.trim();
       if (!trimmed || isDisabled) return;
 
-      onSend(trimmed);
+      void onSend(trimmed);
       setValue("");
       if (textareaRef.current) textareaRef.current.style.height = "40px";
     }
@@ -64,7 +65,11 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
           <textarea
             ref={textareaRef}
             placeholder={
-              isSending ? "Gerando resposta… (você pode PARAR)" : "Envie sua pergunta..."
+              isSending
+                ? "Gerando resposta… (você pode PARAR)"
+                : disabled
+                ? "Seu acesso está bloqueado para novas ações."
+                : "Envie sua pergunta..."
             }
             value={value}
             onChange={handleChange}
@@ -74,7 +79,6 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
             disabled={isDisabled}
           />
 
-          {/* ✅ Quando está enviando: mostra PARAR | senão: botão enviar */}
           {isSending ? (
             <button
               type="button"
@@ -99,7 +103,6 @@ export function ChatInput({ onSend, isSending = false, onStop, disabled }: ChatI
         </div>
       </form>
 
-      {/* Rodapé */}
       <div className="w-full bg-[#2b4e67] text-white text-[12px] leading-snug text-center px-4 py-3">
         <p className="mx-auto">
           IMPORTANTE: Publ.IA é uma ferramenta de apoio técnico e informativo. Não substitui a

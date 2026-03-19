@@ -1,183 +1,393 @@
 // src/app/api/upload-pdf/route.ts
-import { NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+import { NextRequest, NextResponse } from "next/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getAccessSummary } from "@/lib/access-control";
 
-export const runtime = "nodejs";
+const PDF_UPLOAD_MAX_MB = 30;
+const TRIAL_PDF_LIMIT = 10;
+const SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+type PdfPeriod = "account" | "month" | null;
 
-const PDF_EXTRACT_MAX_MB = Number(process.env.PDF_EXTRACT_MAX_MB ?? 12);
+type AccessStatus =
+  | "trial_active"
+  | "trial_expired"
+  | "subscription_active"
+  | "subscription_expired";
 
-function nowIso() {
-  return new Date().toISOString();
+type PdfUploadPlanValidation = {
+  allowed: boolean;
+  limit: number | null;
+  used: number;
+  remaining: number | null;
+  period: PdfPeriod;
+  blockedMessage: string | null;
+  accessStatus: AccessStatus;
+};
+
+type UploadPdfRequestBody = {
+  conversationId?: string;
+  fileName?: string;
+  storagePath?: string;
+  filePath?: string;
+  fileSize?: number;
+  fileSizeBytes?: number;
+  mimeType?: string;
+};
+
+function getMonthRangeUtc() {
+  const now = new Date();
+
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)
+  );
+
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0)
+  );
+
+  return {
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+  };
 }
 
-function parseCookieHeader(cookieHeader: string | null) {
-  const out: Record<string, string> = {};
-  if (!cookieHeader) return out;
+async function countUserPdfsAllTime(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+) {
+  const { count, error } = await supabase
+    .from("pdf_files")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", userId);
 
-  for (const part of cookieHeader.split(";")) {
-    const p = part.trim();
-    if (!p) continue;
-
-    const eq = p.indexOf("=");
-    if (eq === -1) continue;
-
-    const k = p.slice(0, eq).trim();
-    const v = p.slice(eq + 1).trim();
-    out[k] = decodeURIComponent(v);
+  if (error) {
+    throw new Error(`Erro ao contar PDFs da conta: ${error.message}`);
   }
 
-  return out;
+  return count ?? 0;
 }
 
-function createAuthClient(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Supabase envs faltando");
+async function countUserPdfsThisMonth(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+) {
+  const { startIso, endIso } = getMonthRangeUtc();
+
+  const { count, error } = await supabase
+    .from("pdf_files")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("created_at", startIso)
+    .lt("created_at", endIso);
+
+  if (error) {
+    throw new Error(`Erro ao contar PDFs do mês: ${error.message}`);
   }
 
-  const jar = parseCookieHeader(req.headers.get("cookie"));
-
-  return createServerClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      get: (name) => jar[name],
-      set() {},
-      remove() {},
-    },
-  });
+  return count ?? 0;
 }
 
-const uuidRe =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+async function validatePdfUploadByPlan(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+): Promise<PdfUploadPlanValidation> {
+  const access = await getAccessSummary(supabase, userId);
 
-export async function POST(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return NextResponse.json(
-      { error: "Servidor não configurado (Supabase envs)." },
-      { status: 500 }
-    );
-  }
-
-  const contentType = req.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    return NextResponse.json(
-      { error: "Content-Type deve ser application/json." },
-      { status: 415 }
-    );
-  }
-
-  const client = createAuthClient(req) as any;
-
-  const { data: auth, error: authErr } = await client.auth.getUser();
-  if (authErr || !auth?.user) {
-    return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
-  }
-
-  const userId = auth.user.id;
-
-  try {
-    const body = await req.json();
-
-    const { conversationId, fileName, fileSize, storagePath } = body as {
-      conversationId?: string;
-      fileName?: string;
-      fileSize?: number;
-      storagePath?: string;
+  if (!access) {
+    return {
+      allowed: false,
+      limit: null,
+      used: 0,
+      remaining: 0,
+      period: null,
+      blockedMessage:
+        "Não foi possível validar o acesso da sua conta no momento.",
+      accessStatus: "trial_expired",
     };
+  }
 
-    if (!conversationId || !storagePath) {
+  const accessStatus = access.access_status as AccessStatus;
+
+  if (accessStatus === "trial_expired") {
+    return {
+      allowed: false,
+      limit: null,
+      used: 0,
+      remaining: 0,
+      period: null,
+      blockedMessage:
+        "Seu período de teste expirou. Assine um plano para enviar novos PDFs.",
+      accessStatus,
+    };
+  }
+
+  if (accessStatus === "subscription_expired") {
+    return {
+      allowed: false,
+      limit: null,
+      used: 0,
+      remaining: 0,
+      period: null,
+      blockedMessage:
+        "Sua assinatura expirou. Renove para voltar a enviar novos PDFs.",
+      accessStatus,
+    };
+  }
+
+  if (accessStatus === "trial_active") {
+    const used = await countUserPdfsAllTime(supabase, userId);
+    const limit = TRIAL_PDF_LIMIT;
+    const remaining = Math.max(limit - used, 0);
+
+    return {
+      allowed: used < limit,
+      limit,
+      used,
+      remaining,
+      period: "account",
+      blockedMessage:
+        used >= limit
+          ? `Você atingiu o limite de ${limit} PDFs no trial. Assine um plano para continuar.`
+          : null,
+      accessStatus,
+    };
+  }
+
+  const used = await countUserPdfsThisMonth(supabase, userId);
+  const limit = SUBSCRIPTION_PDF_LIMIT_MONTH;
+  const remaining = Math.max(limit - used, 0);
+
+  return {
+    allowed: used < limit,
+    limit,
+    used,
+    remaining,
+    period: "month",
+    blockedMessage:
+      used >= limit
+        ? `Você atingiu o limite de ${limit} PDFs neste mês no seu plano atual.`
+        : null,
+    accessStatus: "subscription_active",
+  };
+}
+
+async function registerPdfUploadEvent(params: {
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  userId: string;
+  fileName: string;
+  storagePath: string;
+  fileSizeBytes: number;
+  accessStatus: AccessStatus;
+  pdfLimit: number | null;
+  pdfUsed: number;
+  pdfRemaining: number | null;
+  pdfPeriod: PdfPeriod;
+  conversationId: string | null;
+}) {
+  const {
+    supabase,
+    userId,
+    fileName,
+    storagePath,
+    fileSizeBytes,
+    accessStatus,
+    pdfLimit,
+    pdfUsed,
+    pdfRemaining,
+    pdfPeriod,
+    conversationId,
+  } = params;
+
+  const payload = {
+    user_id: userId,
+    event_type: "pdf_upload",
+    feature_key: "pdf_upload",
+    value: 1,
+    metadata: {
+      conversation_id: conversationId,
+      file_name: fileName,
+      storage_path: storagePath,
+      file_size_bytes: fileSizeBytes,
+      access_status: accessStatus,
+      pdf_limit: pdfLimit,
+      pdf_used: pdfUsed,
+      pdf_remaining: pdfRemaining,
+      pdf_period: pdfPeriod,
+    },
+  };
+
+  const { error } = await supabase.from("usage_events").insert(payload as never);
+
+  if (error) {
+    console.error("Erro ao registrar usage_events(pdf_upload):", error.message);
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const supabase = await createSupabaseServerClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
       return NextResponse.json(
-        { error: "conversationId e storagePath são obrigatórios." },
+        { error: "Usuário não autenticado." },
+        { status: 401 }
+      );
+    }
+
+    const body = (await request.json()) as UploadPdfRequestBody;
+
+    const conversationId = String(body.conversationId ?? "").trim();
+    const fileName = String(body.fileName ?? "").trim();
+    const storagePath = String(body.storagePath ?? body.filePath ?? "").trim();
+    const fileSizeBytes = Number(body.fileSize ?? body.fileSizeBytes ?? 0);
+
+    if (!conversationId || !fileName || !storagePath || !fileSizeBytes) {
+      return NextResponse.json(
+        {
+          error:
+            "Dados inválidos para registrar o PDF. Envie conversationId, fileName, storagePath/filePath e fileSize/fileSizeBytes.",
+        },
         { status: 400 }
       );
     }
 
-    if (!uuidRe.test(conversationId)) {
-      return NextResponse.json({ error: "conversationId inválido." }, { status: 400 });
-    }
+    const maxBytes = PDF_UPLOAD_MAX_MB * 1024 * 1024;
 
-    const invalidPath =
-      !storagePath.startsWith(`${conversationId}/`) ||
-      storagePath.includes("..") ||
-      storagePath.includes("\\") ||
-      storagePath.startsWith("/") ||
-      storagePath.length > 300;
-
-    if (invalidPath) {
-      return NextResponse.json({ error: "storagePath inválido." }, { status: 400 });
-    }
-
-    const { data: conv } = await client
-      .from("conversations")
-      .select("id")
-      .eq("id", conversationId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (!conv) {
+    if (fileSizeBytes > maxBytes) {
       return NextResponse.json(
-        { error: "Conversa inválida ou sem permissão." },
-        { status: 403 }
+        { error: `O PDF excede o limite de ${PDF_UPLOAD_MAX_MB} MB.` },
+        { status: 400 }
       );
     }
 
-    const sizeNum = typeof fileSize === "number" && Number.isFinite(fileSize) ? fileSize : null;
+    const { data: conversation, error: conversationError } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("id", conversationId)
+      .eq("user_id", user.id)
+      .maybeSingle();
 
-    const { data: inserted, error: insErr } = await client
-      .from("pdf_files")
-      .insert({
-        conversation_id: conversationId,
-        user_id: userId,
-        file_name: fileName ?? null,
-        storage_path: storagePath,
-        file_size: sizeNum,
-        extracted_text_status: "pending",
-        extracted_text_error: null,
-        extracted_text_updated_at: nowIso(),
-        vector_index_status: "pending",
-        vector_index_error: null,
-        vector_chunks_count: 0,
-        vector_index_updated_at: nowIso(),
-      } as any)
-      .select("id, file_name, file_size")
-      .single();
-
-    if (insErr || !inserted) {
+    if (conversationError) {
+      console.error("Erro ao validar conversa do PDF:", conversationError.message);
       return NextResponse.json(
-        { error: "Falha ao registrar pdf_files.", detail: insErr?.message ?? null },
+        { error: "Não foi possível validar a conversa do PDF." },
         { status: 500 }
       );
     }
 
-    const row = inserted as {
-      id: string;
-      file_name: string | null;
-      file_size: number | null;
+    if (!conversation) {
+      return NextResponse.json(
+        { error: "Conversa inválida para vincular o PDF." },
+        { status: 400 }
+      );
+    }
+
+    const planValidation = await validatePdfUploadByPlan(supabase, user.id);
+
+    if (!planValidation.allowed) {
+      return NextResponse.json(
+        {
+          error:
+            planValidation.blockedMessage ??
+            "Seu plano atual não permite enviar novos PDFs.",
+          accessStatus: planValidation.accessStatus,
+          pdfUsage: {
+            limit: planValidation.limit,
+            used: planValidation.used,
+            remaining: planValidation.remaining,
+            period: planValidation.period,
+          },
+        },
+        { status: 403 }
+      );
+    }
+
+    const pdfInsertPayload = {
+      user_id: user.id,
+      conversation_id: conversationId,
+      file_name: fileName,
+      storage_path: storagePath,
+      file_size: fileSizeBytes,
     };
 
-    await client
-      .from("conversations")
-      .update({ active_pdf_file_id: row.id, pdf_enabled: true } as any)
-      .eq("id", conversationId)
-      .eq("user_id", userId);
+    const { data: insertedPdf, error: insertError } = await supabase
+      .from("pdf_files")
+      .insert(pdfInsertPayload as never)
+      .select()
+      .single();
 
-    return NextResponse.json({
-      id: row.id,
-      fileName: row.file_name ?? fileName ?? "",
-      fileSize: Number(row.file_size ?? fileSize ?? 0),
-      extractedTextStatus: "pending",
-      vectorIndexStatus: "pending",
-      extractMaxMb: PDF_EXTRACT_MAX_MB,
+    if (insertError) {
+      console.error("Erro ao salvar pdf_files:", insertError.message);
+
+      return NextResponse.json(
+        { error: "Não foi possível registrar o PDF no banco." },
+        { status: 500 }
+      );
+    }
+
+    const { error: conversationUpdateError } = await supabase
+      .from("conversations")
+      .update({
+        active_pdf_file_id: (insertedPdf as { id: string }).id,
+        pdf_enabled: true,
+      } as never)
+      .eq("id", conversationId)
+      .eq("user_id", user.id);
+
+    if (conversationUpdateError) {
+      console.error(
+        "Erro ao atualizar conversa com PDF ativo:",
+        conversationUpdateError.message
+      );
+    }
+
+    await registerPdfUploadEvent({
+      supabase,
+      userId: user.id,
+      fileName,
+      storagePath,
+      fileSizeBytes,
+      accessStatus: planValidation.accessStatus,
+      pdfLimit: planValidation.limit,
+      pdfUsed: planValidation.used + 1,
+      pdfRemaining:
+        planValidation.remaining === null
+          ? null
+          : Math.max(planValidation.remaining - 1, 0),
+      pdfPeriod: planValidation.period,
+      conversationId,
     });
-  } catch (error: any) {
-    console.error("[/api/upload-pdf] erro inesperado:", error);
 
     return NextResponse.json(
       {
-        error: "Erro inesperado ao registrar o PDF.",
-        detail: String(error?.message ?? error),
+        id: (insertedPdf as { id: string }).id,
+        fileName:
+          (insertedPdf as { file_name?: string }).file_name ?? fileName,
+        fileSize:
+          Number((insertedPdf as { file_size?: number }).file_size ?? fileSizeBytes),
+        pdfUsage: {
+          limit: planValidation.limit,
+          used: planValidation.used + 1,
+          remaining:
+            planValidation.remaining === null
+              ? null
+              : Math.max(planValidation.remaining - 1, 0),
+          period: planValidation.period,
+        },
       },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error("Erro em /api/upload-pdf:", error);
+
+    return NextResponse.json(
+      { error: "Erro interno ao processar o upload do PDF." },
       { status: 500 }
     );
   }

@@ -5,6 +5,7 @@ import { toFile } from "openai/uploads";
 
 import { publiaPrompt } from "@/lib/publiaPrompt";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
+import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -542,6 +543,40 @@ async function resolvePdfChatState(
   };
 }
 
+async function registerUsageEvent(
+  client: any,
+  params: {
+    userId: string;
+    conversationId: string;
+    eventType: "chat_message" | "pdf_question";
+    inputTokens?: number;
+    outputTokens?: number;
+    metadata?: Record<string, any>;
+  }
+) {
+  const {
+    userId,
+    conversationId,
+    eventType,
+    inputTokens = 0,
+    outputTokens = 0,
+    metadata = {},
+  } = params;
+
+  const { error } = await client.from("usage_events").insert({
+    user_id: userId,
+    event_type: eventType,
+    conversation_id: conversationId,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    metadata,
+  });
+
+  if (error) {
+    console.error("[/api/chat] erro ao registrar usage_events", error);
+  }
+}
+
 export async function POST(req: Request) {
   if (!openai || !supabaseUrl || !supabaseAnonKey) {
     return new Response(sseEvent("error", { error: "Servidor incompleto. Verifique envs." }), {
@@ -593,6 +628,35 @@ export async function POST(req: Request) {
   }
 
   const userId = authData.user.id;
+
+  const accessSummary = await getAccessSummary(client, userId);
+  if (!accessSummary) {
+    return new Response(
+      sseEvent("error", {
+        error: "Não foi possível verificar seu acesso no momento.",
+      }),
+      {
+        status: 500,
+        headers: SSE_HEADERS,
+      }
+    );
+  }
+
+  const accessDecision = await syncEffectiveAccessStatus(client, accessSummary);
+  if (!accessDecision.allowed) {
+    return new Response(
+      sseEvent("error", {
+        error: accessDecision.message,
+        accessBlocked: true,
+        accessStatus: accessDecision.effectiveStatus,
+        reason: accessDecision.reason,
+      }),
+      {
+        status: 403,
+        headers: SSE_HEADERS,
+      }
+    );
+  }
 
   const { data: conv } = await client
     .from("conversations")
@@ -833,6 +897,8 @@ export async function POST(req: Request) {
             : OPENAI_MODEL_NO_PDF;
 
         let assistantText = "";
+        let inputTokensUsed = 0;
+        let outputTokensUsed = 0;
 
         try {
           const reqObj: any = {
@@ -860,6 +926,14 @@ export async function POST(req: Request) {
                 assistantText += delta;
                 pushDelta(delta);
               }
+            }
+
+            if (event?.type === "response.completed") {
+              const usage = event?.response?.usage;
+
+              inputTokensUsed = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0) || 0;
+              outputTokensUsed =
+                Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0) || 0;
             }
           }
 
@@ -893,6 +967,23 @@ export async function POST(req: Request) {
           safeClose();
           return;
         }
+
+        const usageEventType: "chat_message" | "pdf_question" =
+          pdfChatState.kind === "none" ? "chat_message" : "pdf_question";
+
+        await registerUsageEvent(client, {
+          userId,
+          conversationId,
+          eventType: usageEventType,
+          inputTokens: inputTokensUsed,
+          outputTokens: outputTokensUsed,
+          metadata: {
+            model,
+            hasPdf: pdfChatState.kind !== "none",
+            pdfKind: pdfChatState.kind,
+            forceWebFirst,
+          },
+        });
 
         safeSend("done", { assistantMessage: assistantMessageRow });
         safeClose();

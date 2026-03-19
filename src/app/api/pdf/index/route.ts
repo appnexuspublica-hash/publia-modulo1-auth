@@ -9,6 +9,8 @@ export const runtime = "nodejs";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
+const PDF_UPLOAD_MAX_MB = Number(process.env.PDF_UPLOAD_MAX_MB ?? 30);
+
 function parseCookieHeader(cookieHeader: string | null) {
   const out: Record<string, string> = {};
   if (!cookieHeader) return out;
@@ -96,6 +98,47 @@ export async function POST(req: Request) {
 
     if (!pdfFileId || !uuidRe.test(pdfFileId)) {
       return NextResponse.json({ error: "pdfFileId inválido." }, { status: 400 });
+    }
+
+    const { data: pdfRow, error: pdfErr } = await client
+      .from("pdf_files")
+      .select("id, file_size, user_id")
+      .eq("id", pdfFileId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (pdfErr) {
+      return NextResponse.json(
+        { error: "Erro ao validar PDF para indexação.", detail: pdfErr.message },
+        { status: 500 }
+      );
+    }
+
+    if (!pdfRow) {
+      return NextResponse.json(
+        { error: "PDF inválido ou sem permissão." },
+        { status: 404 }
+      );
+    }
+
+    const fileSize =
+      typeof (pdfRow as any).file_size === "number" && Number.isFinite((pdfRow as any).file_size)
+        ? Number((pdfRow as any).file_size)
+        : null;
+
+    const uploadMaxBytes = PDF_UPLOAD_MAX_MB * 1024 * 1024;
+
+    if (fileSize !== null && fileSize > uploadMaxBytes) {
+      const sizeMb = (fileSize / (1024 * 1024)).toFixed(1);
+
+      return NextResponse.json(
+        {
+          error: `PDF grande (${sizeMb} MB). Limite atual: ${PDF_UPLOAD_MAX_MB} MB.`,
+          code: "PDF_TOO_LARGE",
+          uploadMaxMb: PDF_UPLOAD_MAX_MB,
+        },
+        { status: 413 }
+      );
     }
 
     const result = await processPdfForIndexing({

@@ -25,27 +25,26 @@ type Variant = "chat" | "share";
 
 type ActionToast = { messageId: string; text: string } | null;
 
+type BlockedCta = {
+  href: string;
+  label: string;
+} | null;
+
 type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
-
-  // Compartilhar por mensagem (conversationId + messageId)
   onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
-
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
-
-  // ✅ NOVO (botão "Fazer OCR" ao lado do Regenerar)
   onDoOcr?: () => void | Promise<void>;
-
   isSending: boolean;
   activePdfName?: string | null;
-
   variant?: Variant;
   activeConversationId?: string | null;
   scrollContainerRef?: RefObject<HTMLElement | null>;
-
-  // Toast por mensagem (fica acima dos botões Copiar/Compartilhar)
   actionToast?: ActionToast;
+  isBlocked?: boolean;
+  blockedMessage?: string;
+  blockedCta?: BlockedCta;
 };
 
 const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -77,7 +76,6 @@ function extractText(node: any): string {
   return "";
 }
 
-// Downloads
 async function readErrorMessage(res: Response): Promise<string> {
   const ct = res.headers.get("content-type") || "";
   try {
@@ -139,7 +137,6 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// Theme
 type MdTheme = {
   tableOuterBorder: string;
   tableClassWide: string;
@@ -160,7 +157,8 @@ const THEME_CHAT: MdTheme = {
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
   theadBg: "bg-white/5",
   thWide: "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold",
-  thNormal: "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
+  thNormal:
+    "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
   tdWide: "whitespace-nowrap border border-white/10 px-3 py-2 align-top",
   tdNormal: "whitespace-normal break-words border border-white/10 px-3 py-2 align-top",
   btn: "rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
@@ -174,7 +172,8 @@ const THEME_SHARE: MdTheme = {
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
   theadBg: "bg-slate-200/10",
   thWide: "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
-  thNormal: "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  thNormal:
+    "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
   tdWide: "whitespace-nowrap border border-slate-200/15 px-3 py-2 align-top",
   tdNormal: "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
   btn: "rounded-full border border-slate-200/50 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
@@ -312,7 +311,6 @@ function splitMarkdownFooter(md: string): { main: string; footer: string } {
   return { main, footer };
 }
 
-// ✅ FIX ESLINT: Hooks em componentes com letra maiúscula
 function ThCell(props: any) {
   const theme = useMdTheme();
   const { isWide } = useTableLayout();
@@ -336,6 +334,9 @@ export function ChatMessagesList({
   scrollContainerRef,
   activeConversationId,
   actionToast = null,
+  isBlocked = false,
+  blockedMessage = "",
+  blockedCta = null,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -422,13 +423,12 @@ export function ChatMessagesList({
     activeConversationId.trim().length > 0 &&
     typeof onShareConversation === "function";
 
-  // ✅ heurística simples: se a última resposta tem o texto de OCR, mostra botão
   const showOcrButton =
-  typeof onDoOcr === "function" &&
-  !!lastAssistant &&
-  !!lastUser &&
-  !isSending &&
-  String(lastAssistant.content ?? "").toLowerCase().includes("faça ocr");
+    typeof onDoOcr === "function" &&
+    !!lastAssistant &&
+    !!lastUser &&
+    !isSending &&
+    String(lastAssistant.content ?? "").toLowerCase().includes("faça ocr");
 
   return (
     <MarkdownThemeContext.Provider value={theme}>
@@ -437,6 +437,8 @@ export function ChatMessagesList({
           const isUser = msg.role === "user";
           const isLastAssistant = !!lastAssistant && msg.id === lastAssistant.id;
           const isGeneratingThis = isLastAssistant && isSending;
+          const regenerateBlocked = isGeneratingThis || isBlocked;
+          const ocrBlocked = isGeneratingThis || isBlocked;
 
           let tableIndex = 0;
 
@@ -490,8 +492,6 @@ export function ChatMessagesList({
               );
             },
             thead: ({ node, ...props }: any) => <thead {...props} className={theme.theadBg} />,
-
-            // ✅ FIX: usa componentes válidos (Hooks ok)
             th: (props: any) => <ThCell {...props} />,
             td: (props: any) => <TdCell {...props} />,
 
@@ -563,8 +563,12 @@ export function ChatMessagesList({
               return <p {...props} />;
             },
 
-            ul: ({ node, ...props }: any) => <ul {...props} className="mt-2 space-y-1 list-none p-0" />,
-            ol: ({ node, ...props }: any) => <ol {...props} className="mt-2 space-y-1 list-none p-0" />,
+            ul: ({ node, ...props }: any) => (
+              <ul {...props} className="mt-2 list-none space-y-1 p-0" />
+            ),
+            ol: ({ node, ...props }: any) => (
+              <ol {...props} className="mt-2 list-none space-y-1 p-0" />
+            ),
             li: ({ node, ...props }: any) => (
               <li className="flex gap-2">
                 <span className="shrink-0">-</span>
@@ -607,7 +611,10 @@ export function ChatMessagesList({
 
                     {footer.trim().length > 0 && (
                       <div className="publia-footnote mt-4 text-slate-100/90" data-footnote>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsFooter}>
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={markdownComponentsFooter}
+                        >
                           {footer}
                         </ReactMarkdown>
                       </div>
@@ -629,13 +636,38 @@ export function ChatMessagesList({
                         </div>
                       )}
 
+                      {isBlocked &&
+                        blockedMessage &&
+                        lastAssistant &&
+                        msg.id === lastAssistant.id &&
+                        (onRegenerateLast || showOcrButton) && (
+                          <div className="rounded-xl border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
+                            <div>{blockedMessage}</div>
+
+                            {blockedCta && (
+                              <div className="mt-3 flex flex-wrap items-center gap-2">
+                                <a
+                                  href={blockedCta.href}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                                >
+                                  {blockedCta.label}
+                                </a>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                       <div className="flex flex-wrap items-center justify-center gap-2">
                         {onCopyAnswer && (
                           <button
                             type="button"
                             disabled={isGeneratingThis}
                             onClick={() => onCopyAnswer(msg.id)}
-                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
+                            className={
+                              theme.btn + (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                            }
                           >
                             Copiar
                           </button>
@@ -646,34 +678,54 @@ export function ChatMessagesList({
                             type="button"
                             disabled={isGeneratingThis}
                             onClick={() => onShareConversation!(activeConversationId!.trim(), msg.id)}
-                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
+                            className={
+                              theme.btn + (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                            }
                           >
                             Compartilhar
                           </button>
                         )}
 
-                        {onRegenerateLast && lastAssistant && lastUser && msg.id === lastAssistant.id && (
-                          <button
-                            type="button"
-                            disabled={isGeneratingThis}
-                            onClick={() => onRegenerateLast(lastUser.content)}
-                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
-                          >
-                            Regenerar
-                          </button>
-                        )}
+                        {onRegenerateLast &&
+                          lastAssistant &&
+                          lastUser &&
+                          msg.id === lastAssistant.id && (
+                            <button
+                              type="button"
+                              disabled={regenerateBlocked}
+                              onClick={() => {
+                                if (regenerateBlocked) return;
+                                void onRegenerateLast(lastUser.content);
+                              }}
+                              title={isBlocked ? blockedMessage : "Regenerar resposta"}
+                              className={
+                                theme.btn +
+                                (regenerateBlocked ? " cursor-not-allowed opacity-50" : "")
+                              }
+                            >
+                              Regenerar
+                            </button>
+                          )}
 
-                        {/* ✅ Depois do Regenerar */}
-                        {showOcrButton && onDoOcr && lastAssistant && msg.id === lastAssistant.id && (
-                          <button
-                            type="button"
-                            disabled={isGeneratingThis}
-                            onClick={() => onDoOcr()}
-                            className={theme.btn + (isGeneratingThis ? " opacity-50 cursor-not-allowed" : "")}
-                          >
-                            Fazer OCR
-                          </button>
-                        )}
+                        {showOcrButton &&
+                          onDoOcr &&
+                          lastAssistant &&
+                          msg.id === lastAssistant.id && (
+                            <button
+                              type="button"
+                              disabled={ocrBlocked}
+                              onClick={() => {
+                                if (ocrBlocked) return;
+                                void onDoOcr();
+                              }}
+                              title={isBlocked ? blockedMessage : "Fazer OCR"}
+                              className={
+                                theme.btn + (ocrBlocked ? " cursor-not-allowed opacity-50" : "")
+                              }
+                            >
+                              Fazer OCR
+                            </button>
+                          )}
                       </div>
                     </div>
                   )}

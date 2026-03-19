@@ -1,10 +1,24 @@
-// src/app/chat/ChatPageClient.tsx
+//src/app/chat/chatPageClient.tsx
 "use client";
 
 import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
-import { useEffect, useState, useRef, ChangeEvent, useCallback } from "react";
+import {
+  useEffect,
+  useState,
+  useRef,
+  ChangeEvent,
+  useCallback,
+  useMemo,
+} from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import Image from "next/image";
+import {
+  canUseAiFeatures,
+  fetchAccessSummary,
+  getBlockedAccessMessage,
+  type FrontendAccessSummary,
+} from "@/lib/access-client";
+import { getBlockedAccessCta } from "@/lib/access-cta";
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
@@ -15,6 +29,18 @@ type ChatPageClientProps = {
   userId: string;
   userLabel: string;
 };
+
+type ToastType = "success" | "warning" | "error";
+
+type ToastState = {
+  text: string;
+  type: ToastType;
+  persistent: boolean;
+  cta?: {
+    href: string;
+    label: string;
+  } | null;
+} | null;
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -42,7 +68,7 @@ function markdownToPlainText(markdown: string): string {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const MAX_PDF_SIZE_MB = 48;
+const MAX_PDF_SIZE_MB = 30;
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 
 type Conversation = {
@@ -55,8 +81,21 @@ type Conversation = {
   pdf_enabled?: boolean;
 };
 
-type PdfExtractStatus = "pending" | "processing" | "ready" | "error" | "skipped_large" | string;
-type PdfVectorStatus = "pending" | "processing" | "ready" | "error" | "blocked_no_text" | string;
+type PdfExtractStatus =
+  | "pending"
+  | "processing"
+  | "ready"
+  | "error"
+  | "skipped_large"
+  | string;
+
+type PdfVectorStatus =
+  | "pending"
+  | "processing"
+  | "ready"
+  | "error"
+  | "blocked_no_text"
+  | string;
 
 type AttachedPdf = {
   id: string;
@@ -75,7 +114,15 @@ type SSEParsed =
   | { event: "meta"; data: any }
   | { event: "delta"; data: { text?: string } }
   | { event: "done"; data: any }
-  | { event: "error"; data: { error?: string } }
+  | {
+      event: "error";
+      data: {
+        error?: string;
+        accessBlocked?: boolean;
+        accessStatus?: string;
+        reason?: string;
+      };
+    }
   | { event: string; data: any };
 
 type PdfUiStatus =
@@ -112,6 +159,40 @@ function parseSSEBlock(block: string): SSEParsed | null {
   return { event: eventName, data: parsedData } as SSEParsed;
 }
 
+async function extractApiChatErrorMessage(res: Response): Promise<string> {
+  const fallback = "Erro ao enviar mensagem para a IA.";
+
+  try {
+    const text = await res.text();
+    if (!text?.trim()) return fallback;
+
+    const trimmed = text.trim();
+
+    try {
+      const json = JSON.parse(trimmed);
+      const message = String(json?.error ?? "").trim();
+      return message || fallback;
+    } catch {}
+
+    const blocks = trimmed
+      .split("\n\n")
+      .map((b) => b.trim())
+      .filter(Boolean);
+
+    for (const block of blocks) {
+      const parsed = parseSSEBlock(block);
+      if (parsed?.event === "error") {
+        const msg = String(parsed.data?.error ?? "").trim();
+        if (msg) return msg;
+      }
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function classifyPdfUiStatus(att: AttachedPdf | null): PdfUiStatus {
   if (!att) return "none";
 
@@ -145,7 +226,8 @@ function classifyPdfUiStatus(att: AttachedPdf | null): PdfUiStatus {
 
 function getPdfBadge(att: AttachedPdf | null) {
   const status = classifyPdfUiStatus(att);
-  const chunks = typeof att?.vectorChunksCount === "number" ? att.vectorChunksCount : 0;
+  const chunks =
+    typeof att?.vectorChunksCount === "number" ? att.vectorChunksCount : 0;
 
   switch (status) {
     case "processing":
@@ -191,11 +273,18 @@ function getPdfHint(att: AttachedPdf | null) {
   }
 }
 
-export default function ChatPageClient({ userId, userLabel }: ChatPageClientProps) {
-  const [supabase] = useState(() => createBrowserClient(supabaseUrl, supabaseAnonKey));
+export default function ChatPageClient({
+  userId,
+  userLabel,
+}: ChatPageClientProps) {
+  const [supabase] = useState(() =>
+    createBrowserClient(supabaseUrl, supabaseAnonKey)
+  );
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(
+    null
+  );
   const activeConversationIdRef = useRef<string | null>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -217,16 +306,62 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   const stoppedByUserRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
 
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimerRef = useRef<any>(null);
+  const [toast, setToast] = useState<ToastState>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [actionToast, setActionToast] = useState<{ messageId: string; text: string } | null>(null);
-  const actionToastTimerRef = useRef<any>(null);
+  const [actionToast, setActionToast] = useState<{
+    messageId: string;
+    text: string;
+  } | null>(null);
+  const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function showToast(msg: string) {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast(msg);
-    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+  const [access, setAccess] = useState<FrontendAccessSummary | null>(null);
+  const [accessLoading, setAccessLoading] = useState(true);
+
+  function clearToastTimer() {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+  }
+
+  function hideToast() {
+    clearToastTimer();
+    setToast(null);
+  }
+
+  function showToast(
+    text: string,
+    options?: {
+      type?: ToastType;
+      persistent?: boolean;
+      durationMs?: number;
+      cta?: {
+        href: string;
+        label: string;
+      } | null;
+    }
+  ) {
+    const type = options?.type ?? "success";
+    const persistent =
+      options?.persistent ?? (type === "error" || type === "warning");
+    const durationMs = options?.durationMs ?? 2500;
+
+    clearToastTimer();
+
+    setToast({
+      text,
+      type,
+      persistent,
+      cta: options?.cta ?? null,
+    });
+
+    if (!persistent) {
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, durationMs);
+    }
   }
 
   function showActionToast(messageId: string, text: string) {
@@ -235,14 +370,52 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     actionToastTimerRef.current = setTimeout(() => setActionToast(null), 2500);
   }
 
+  const loadAccess = useCallback(async () => {
+    try {
+      setAccessLoading(true);
+      const data = await fetchAccessSummary();
+      setAccess(data);
+    } catch (error) {
+      console.error("Erro ao carregar acesso no frontend:", error);
+      setAccess(null);
+    } finally {
+      setAccessLoading(false);
+    }
+  }, []);
+
+  const isBlocked = useMemo(() => {
+    if (accessLoading) return false;
+    return !canUseAiFeatures(access);
+  }, [access, accessLoading]);
+
+  const blockedMessage = useMemo(() => {
+    if (accessLoading) return "";
+    return getBlockedAccessMessage(access);
+  }, [access, accessLoading]);
+
+  const blockedCta = useMemo(() => {
+    if (accessLoading) return null;
+    return getBlockedAccessCta(access?.access_status);
+  }, [access, accessLoading]);
+
+  useEffect(() => {
+    loadAccess();
+  }, [loadAccess]);
+
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
   useEffect(() => {
+    if (isBlocked) {
+      setShowPdfQuickActions(false);
+    }
+  }, [isBlocked]);
+
+  useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      clearToastTimer();
       if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current);
     };
   }, []);
@@ -258,8 +431,11 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     setMessages((prev) => {
       const idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
       const fallbackIdx =
-        idx === -1 ? [...prev].reverse().findIndex((m) => m.role === "assistant") : -1;
-      const realIdx = idx !== -1 ? idx : fallbackIdx === -1 ? -1 : prev.length - 1 - fallbackIdx;
+        idx === -1
+          ? [...prev].reverse().findIndex((m) => m.role === "assistant")
+          : -1;
+      const realIdx =
+        idx !== -1 ? idx : fallbackIdx === -1 ? -1 : prev.length - 1 - fallbackIdx;
 
       if (realIdx === -1) return prev;
 
@@ -267,7 +443,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       if (m.role !== "assistant") return prev;
 
       const marker = "\n\n*(Resposta interrompida pelo usuário.)*";
-      const already = (m.content || "").includes("Resposta interrompida pelo usuário");
+      const already = (m.content || "").includes(
+        "Resposta interrompida pelo usuário"
+      );
 
       const next = [...prev];
       next[realIdx] = {
@@ -327,7 +505,11 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           setAttachedPdf(status);
 
           const uiStatus = classifyPdfUiStatus(status);
-          if (uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large") {
+          if (
+            uiStatus === "no_text" ||
+            uiStatus === "technical_error" ||
+            uiStatus === "large"
+          ) {
             setShowPdfHint(true);
           }
         }
@@ -336,7 +518,8 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         const v = String(status?.vectorIndexStatus ?? "").toLowerCase();
 
         const extractedStable = e && !["pending", "processing"].includes(e);
-        const vectorStable = e !== "ready" ? true : v && !["pending", "processing"].includes(v);
+        const vectorStable =
+          e !== "ready" ? true : v && !["pending", "processing"].includes(v);
 
         if (extractedStable && vectorStable) break;
 
@@ -425,7 +608,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         if (activeConversationIdRef.current !== currentConversationId) return;
         setMessages(msgs);
       } finally {
-        if (activeConversationIdRef.current === currentConversationId) setLoadingMessages(false);
+        if (activeConversationIdRef.current === currentConversationId) {
+          setLoadingMessages(false);
+        }
       }
     }
 
@@ -439,14 +624,20 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           .maybeSingle();
 
         if (convError) {
-          console.error("Erro ao carregar conversa (PDF state):", convError.message);
+          console.error(
+            "Erro ao carregar conversa (PDF state):",
+            convError.message
+          );
           return;
         }
 
         if (activeConversationIdRef.current !== currentConversationId) return;
 
         const pdfEnabled = Boolean((conv as any)?.pdf_enabled);
-        const activePdfId = (conv as any)?.active_pdf_file_id as string | null | undefined;
+        const activePdfId = (conv as any)?.active_pdf_file_id as
+          | string
+          | null
+          | undefined;
 
         if (!pdfEnabled) {
           setAttachedPdf(null);
@@ -459,7 +650,11 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           if (status) {
             setAttachedPdf(status);
             const uiStatus = classifyPdfUiStatus(status);
-            setShowPdfHint(uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large");
+            setShowPdfHint(
+              uiStatus === "no_text" ||
+                uiStatus === "technical_error" ||
+                uiStatus === "large"
+            );
           }
           return;
         }
@@ -486,11 +681,18 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           return;
         }
 
-        const status = await fetchPdfStatus(String((lastPdf as any).id), currentConversationId);
+        const status = await fetchPdfStatus(
+          String((lastPdf as any).id),
+          currentConversationId
+        );
         if (status) {
           setAttachedPdf(status);
           const uiStatus = classifyPdfUiStatus(status);
-          setShowPdfHint(uiStatus === "no_text" || uiStatus === "technical_error" || uiStatus === "large");
+          setShowPdfHint(
+            uiStatus === "no_text" ||
+              uiStatus === "technical_error" ||
+              uiStatus === "large"
+          );
         }
 
         supabase
@@ -500,7 +702,10 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
           .eq("user_id", userId)
           .then(({ error }: any) => {
             if (error) {
-              console.error("Falha ao setar active_pdf_file_id (fallback):", error.message);
+              console.error(
+                "Falha ao setar active_pdf_file_id (fallback):",
+                error.message
+              );
             }
           });
       } catch (e) {
@@ -512,7 +717,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
     loadAttachedPdf();
   }, [activeConversationId, supabase, userId, fetchPdfStatus]);
 
-  async function createConversation(shouldResetState: boolean = false): Promise<string | null> {
+  async function createConversation(
+    shouldResetState: boolean = false
+  ): Promise<string | null> {
     try {
       const { data, error } = await supabase
         .from("conversations")
@@ -522,7 +729,10 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
 
       if (error) {
         console.error("Erro ao criar conversa:", error.message);
-        showToast("Não foi possível criar a conversa.");
+        showToast("Não foi possível criar a conversa.", {
+          type: "error",
+          persistent: true,
+        });
         return null;
       }
 
@@ -545,12 +755,24 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       return newConv.id;
     } catch (err) {
       console.error("Erro inesperado ao criar conversa:", err);
-      showToast("Erro inesperado ao criar conversa.");
+      showToast("Erro inesperado ao criar conversa.", {
+        type: "error",
+        persistent: true,
+      });
       return null;
     }
   }
 
   async function handleNewConversation() {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     abortRef.current?.abort();
     abortRef.current = null;
     stoppedByUserRef.current = false;
@@ -583,14 +805,23 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   }
 
   async function handleDeleteConversation(id: string) {
-    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta conversa?");
+    const confirmDelete = window.confirm(
+      "Tem certeza que deseja excluir esta conversa?"
+    );
     if (!confirmDelete) return;
 
-    const { error } = await supabase.from("conversations").delete().eq("id", id).eq("user_id", userId);
+    const { error } = await supabase
+      .from("conversations")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
 
     if (error) {
       console.error("Erro ao excluir conversa:", error.message);
-      showToast("Não foi possível excluir a conversa.");
+      showToast("Não foi possível excluir a conversa.", {
+        type: "error",
+        persistent: true,
+      });
       return;
     }
 
@@ -606,6 +837,12 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       setActionToast(null);
       setShowPdfHint(false);
     }
+
+    showToast("Conversa excluída.", {
+      type: "success",
+      persistent: false,
+      durationMs: 2500,
+    });
   }
 
   async function ensureConversationId(): Promise<string | null> {
@@ -617,6 +854,15 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
     if (!trimmed) return;
+
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
 
     stoppedByUserRef.current = false;
     streamingAssistantIdRef.current = null;
@@ -649,10 +895,15 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
       if (isDefaultTitle) {
         const base = trimmed.replace(/\s+/g, " ");
         const maxLen = 60;
-        const newTitle = base.length > maxLen ? base.slice(0, maxLen).trimEnd() + "..." : base;
+        const newTitle =
+          base.length > maxLen
+            ? base.slice(0, maxLen).trimEnd() + "..."
+            : base;
 
         setConversations((prev) =>
-          prev.map((c) => (c.id === conversationId ? { ...c, title: newTitle } : c))
+          prev.map((c) =>
+            c.id === conversationId ? { ...c, title: newTitle } : c
+          )
         );
 
         supabase
@@ -679,10 +930,33 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
         body: JSON.stringify({ conversationId, message: trimmed }),
       });
 
-      if (!res.ok || !res.body) {
-        console.error("Erro ao chamar /api/chat:", await res.text());
-        showToast("Erro ao enviar mensagem para a IA.");
-        setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
+      if (!res.ok) {
+        const apiErrorMessage = await extractApiChatErrorMessage(res);
+        console.error("Erro ao chamar /api/chat:", apiErrorMessage);
+
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempAssistantId
+              ? { ...m, content: `Erro: ${apiErrorMessage}` }
+              : m
+          )
+        );
+
+        showToast(apiErrorMessage, {
+          type: "error",
+          persistent: true,
+        });
+        return;
+      }
+
+      if (!res.body) {
+        showToast("Erro ao enviar mensagem para a IA.", {
+          type: "error",
+          persistent: true,
+        });
+        setMessages((prev) =>
+          prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId)
+        );
         return;
       }
 
@@ -729,7 +1003,9 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
             if (deltaText) {
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === tempAssistantId ? { ...m, content: (m.content || "") + deltaText } : m
+                  m.id === tempAssistantId
+                    ? { ...m, content: (m.content || "") + deltaText }
+                    : m
                 )
               );
             }
@@ -758,34 +1034,66 @@ export default function ChatPageClient({ userId, userLabel }: ChatPageClientProp
             console.error("[SSE error]", msg);
 
             setMessages((prev) =>
-              prev.map((m) => (m.id === tempAssistantId ? { ...m, content: `Erro: ${msg}` } : m))
+              prev.map((m) =>
+                m.id === tempAssistantId ? { ...m, content: `Erro: ${msg}` } : m
+              )
             );
 
-            showToast(msg);
+            showToast(msg, {
+              type: "error",
+              persistent: true,
+            });
           }
         }
       }
     } catch (error: any) {
       if (error?.name !== "AbortError") {
         console.error("Erro inesperado ao enviar mensagem para IA:", error);
-        showToast("Erro ao enviar mensagem para a IA.");
-        setMessages((prev) => prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId));
+        showToast("Erro ao enviar mensagem para a IA.", {
+          type: "error",
+          persistent: true,
+        });
+        setMessages((prev) =>
+          prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId)
+        );
       }
     } finally {
       abortRef.current = null;
       setIsSending(false);
       streamingAssistantIdRef.current = null;
       stoppedByUserRef.current = false;
+      loadAccess().catch(() => {});
     }
   }
 
   async function handleRegenerateLast(lastUserMessage: string) {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     await handleSend(lastUserMessage);
   }
 
   async function handlePdfQuickAction(kind: QuickActionKind) {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     if (!attachedPdf) {
-      showToast("Anexe um PDF antes de usar as ações rápidas.");
+      showToast("Anexe um PDF antes de usar as ações rápidas.", {
+        type: "warning",
+        persistent: true,
+      });
       return;
     }
 
@@ -841,7 +1149,9 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
 
     try {
-      const msg = messages.find((m) => m.id === messageId && m.role === "assistant");
+      const msg = messages.find(
+        (m) => m.id === messageId && m.role === "assistant"
+      );
       if (!msg) throw new Error("Mensagem não encontrada para copiar.");
 
       const plainText = markdownToPlainText(msg.content);
@@ -850,7 +1160,10 @@ Organize a resposta em tópicos, com explicações objetivas.
       showActionToast(messageId, "Resposta copiada.");
     } catch (err) {
       console.error("Erro ao copiar resposta:", err);
-      showToast("Não foi possível copiar a resposta.");
+      showToast("Não foi possível copiar a resposta.", {
+        type: "error",
+        persistent: true,
+      });
     }
   }
 
@@ -859,11 +1172,17 @@ Organize a resposta em tópicos, com explicações objetivas.
     const targetMessageId = String(messageId ?? "").trim();
 
     if (!targetConversationId || !isUuid(targetConversationId)) {
-      showToast("Conversa inválida para compartilhar.");
+      showToast("Conversa inválida para compartilhar.", {
+        type: "error",
+        persistent: true,
+      });
       return;
     }
     if (!targetMessageId || !isUuid(targetMessageId)) {
-      showToast("Mensagem inválida para compartilhar.");
+      showToast("Mensagem inválida para compartilhar.", {
+        type: "error",
+        persistent: true,
+      });
       return;
     }
 
@@ -878,38 +1197,89 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       if (!res.ok) {
         console.error("[share/create] erro:", data);
-        showToast(String(data?.error ?? "Não foi possível gerar o link público."));
+        showToast(String(data?.error ?? "Não foi possível gerar o link público."), {
+          type: "error",
+          persistent: true,
+        });
         return;
       }
 
       const shareId = String(data?.shareId ?? "").trim();
       if (!shareId) {
-        showToast("Não foi possível gerar o link público.");
+        showToast("Não foi possível gerar o link público.", {
+          type: "error",
+          persistent: true,
+        });
         return;
       }
 
-      const url = `${window.location.origin}/p/${shareId}?m=${encodeURIComponent(targetMessageId)}`;
+      const url = `${window.location.origin}/p/${shareId}?m=${encodeURIComponent(
+        targetMessageId
+      )}`;
       await navigator.clipboard.writeText(url);
 
       showActionToast(messageId, "Link público copiado.");
     } catch (err) {
       console.error("Erro inesperado ao compartilhar:", err);
-      showToast("Erro inesperado ao gerar link público.");
+      showToast("Erro inesperado ao gerar link público.", {
+        type: "error",
+        persistent: true,
+      });
     }
   }
 
   function handlePdfButtonClick() {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     fileInputRef.current?.click();
   }
 
+  async function removeUploadedPdfFromStorage(storagePath: string) {
+    try {
+      const { error } = await (supabase as any).storage
+        .from("pdf-files")
+        .remove([storagePath]);
+
+      if (error) {
+        console.error("[Chat] Falha ao remover PDF órfão do storage:", error);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("[Chat] Erro inesperado ao remover PDF órfão do storage:", error);
+      return false;
+    }
+  }
+
   async function handlePdfChange(e: ChangeEvent<HTMLInputElement>) {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      e.target.value = "";
+      return;
+    }
+
     const file = e.target.files?.[0];
     if (!file) return;
 
     const maxBytes = MAX_PDF_SIZE_MB * 1024 * 1024;
     if (file.size > maxBytes) {
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      showToast(`PDF grande (${sizeMb} MB). Limite atual: ${MAX_PDF_SIZE_MB} MB.`);
+      showToast(`PDF grande (${sizeMb} MB). Limite atual: ${MAX_PDF_SIZE_MB} MB.`, {
+        type: "warning",
+        persistent: true,
+      });
       e.target.value = "";
       return;
     }
@@ -917,10 +1287,15 @@ Organize a resposta em tópicos, com explicações objetivas.
     setIsUploadingPdf(true);
     setShowPdfHint(false);
 
+    let uploadedStoragePath: string | null = null;
+
     try {
       const conversationId = await ensureConversationId();
       if (!conversationId) {
-        showToast("Não foi possível criar uma conversa para vincular o PDF.");
+        showToast("Não foi possível criar uma conversa para vincular o PDF.", {
+          type: "error",
+          persistent: true,
+        });
         setIsUploadingPdf(false);
         return;
       }
@@ -938,11 +1313,15 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       if (storageError || !storageData) {
         console.error("[Chat] Erro ao enviar PDF para o Supabase Storage:", storageError);
-        showToast("Não foi possível enviar o PDF. Tente novamente.");
+        showToast("Não foi possível enviar o PDF. Tente novamente.", {
+          type: "error",
+          persistent: true,
+        });
         return;
       }
 
       const finalStoragePath = storageData.path ?? storagePath;
+      uploadedStoragePath = finalStoragePath;
 
       const res = await fetch("/api/upload-pdf", {
         method: "POST",
@@ -956,8 +1335,51 @@ Organize a resposta em tópicos, com explicações objetivas.
       });
 
       if (!res.ok) {
-        console.error("Erro ao registrar PDF no banco:", await res.text());
-        showToast("PDF enviado, mas falhou ao registrar no histórico.");
+        const errorText = await res.text();
+        console.error("Erro ao registrar PDF no banco:", errorText);
+
+        if (uploadedStoragePath) {
+          await removeUploadedPdfFromStorage(uploadedStoragePath);
+          uploadedStoragePath = null;
+        }
+
+        let apiMessage = "PDF enviado, mas falhou ao registrar no histórico.";
+        let apiAccessStatus: string | null = null;
+
+        try {
+          const parsed = JSON.parse(errorText);
+          const parsedMessage = String(parsed?.error ?? "").trim();
+          if (parsedMessage) {
+            apiMessage = parsedMessage;
+          }
+
+          apiAccessStatus =
+            typeof parsed?.accessStatus === "string" ? parsed.accessStatus : null;
+        } catch {}
+
+        const lowerMessage = apiMessage.toLowerCase();
+        const isCommercialBlock =
+          lowerMessage.includes("limite de") ||
+          lowerMessage.includes("período de teste expirou") ||
+          lowerMessage.includes("assinatura expirou") ||
+          lowerMessage.includes("não permite enviar novos pdfs");
+
+        const isPdfLimitReached =
+          lowerMessage.includes("limite de") &&
+          lowerMessage.includes("pdf");
+
+        const toastCta = apiAccessStatus
+          ? getBlockedAccessCta(
+              apiAccessStatus as any,
+              isPdfLimitReached ? "pdf_limit_reached" : "general_block"
+            )
+          : null;
+
+        showToast(apiMessage, {
+          type: isCommercialBlock ? "warning" : "error",
+          persistent: true,
+          cta: isCommercialBlock ? toastCta : null,
+        });
         return;
       }
 
@@ -972,7 +1394,11 @@ Organize a resposta em tópicos, com explicações objetivas.
       if (status) {
         setAttachedPdf(status);
       } else {
-        setAttachedPdf({ id: data.id, fileName: data.fileName, fileSize: data.fileSize });
+        setAttachedPdf({
+          id: data.id,
+          fileName: data.fileName,
+          fileSize: data.fileSize,
+        });
       }
 
       fetch("/api/pdf/index", {
@@ -982,16 +1408,34 @@ Organize a resposta em tópicos, com explicações objetivas.
       }).catch(() => {});
 
       pollPdfUntilStable(data.id, conversationId).catch(() => {});
+      loadAccess().catch(() => {});
+
+      uploadedStoragePath = null;
 
       if (data.warning) {
         console.warn("[upload-pdf] warning:", data.warning);
-        showToast("PDF anexado (atenção: verifique colunas do banco).");
+        showToast("PDF anexado (atenção: verifique colunas do banco).", {
+          type: "warning",
+          persistent: true,
+        });
       } else {
-        showToast("PDF anexado.");
+        showToast("PDF anexado.", {
+          type: "success",
+          persistent: false,
+          durationMs: 2500,
+        });
       }
     } catch (error) {
       console.error("Erro inesperado ao enviar PDF:", error);
-      showToast("Não foi possível enviar o PDF.");
+
+      if (uploadedStoragePath) {
+        await removeUploadedPdfFromStorage(uploadedStoragePath);
+      }
+
+      showToast("Não foi possível enviar o PDF.", {
+        type: "error",
+        persistent: true,
+      });
     } finally {
       e.target.value = "";
       setIsUploadingPdf(false);
@@ -999,6 +1443,15 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   async function handleRemovePdf() {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     try {
       const conversationId = activeConversationIdRef.current;
       if (!conversationId) {
@@ -1016,21 +1469,40 @@ Organize a resposta em tópicos, com explicações objetivas.
 
       if (!res.ok) {
         console.error("Falha ao desanexar PDF:", await res.text());
-        showToast("Não foi possível desanexar o PDF.");
+        showToast("Não foi possível desanexar o PDF.", {
+          type: "error",
+          persistent: true,
+        });
         return;
       }
 
       setAttachedPdf(null);
       setShowPdfQuickActions(false);
       setShowPdfHint(false);
-      showToast("PDF desanexado.");
+      showToast("PDF desanexado.", {
+        type: "success",
+        persistent: false,
+        durationMs: 2500,
+      });
     } catch (e) {
       console.error("Erro ao desanexar PDF:", e);
-      showToast("Erro ao desanexar o PDF.");
+      showToast("Erro ao desanexar o PDF.", {
+        type: "error",
+        persistent: true,
+      });
     }
   }
 
   async function handleDoOcr() {
+    if (isBlocked) {
+      showToast(blockedMessage, {
+        type: "warning",
+        persistent: true,
+        cta: blockedCta,
+      });
+      return;
+    }
+
     const conversationId = activeConversationIdRef.current;
 
     if (conversationId) {
@@ -1043,12 +1515,18 @@ Organize a resposta em tópicos, com explicações objetivas.
 
         if (!res.ok) {
           console.error("Falha ao desanexar PDF:", await res.text());
-          showToast("Não consegui desanexar o PDF agora. Tente novamente.");
+          showToast("Não consegui desanexar o PDF agora. Tente novamente.", {
+            type: "error",
+            persistent: true,
+          });
           return;
         }
       } catch (e) {
         console.error("Erro ao desanexar PDF:", e);
-        showToast("Não consegui desanexar o PDF agora. Tente novamente.");
+        showToast("Não consegui desanexar o PDF agora. Tente novamente.", {
+          type: "error",
+          persistent: true,
+        });
         return;
       }
     }
@@ -1059,13 +1537,45 @@ Organize a resposta em tópicos, com explicações objetivas.
 
     const w = window.open(OCR_URL, "_blank", "noopener,noreferrer");
     if (!w) {
-      showToast("Pop-up bloqueado. Permita pop-ups ou abra: smallpdf.com/pt/pdf-ocr");
+      showToast("Pop-up bloqueado. Permita pop-ups ou abra: smallpdf.com/pt/pdf-ocr", {
+        type: "warning",
+        persistent: true,
+      });
     }
   }
 
   function handleDismissPdfHint() {
     setShowPdfHint(false);
   }
+
+  const toastStyles = useMemo(() => {
+    if (!toast) {
+      return {
+        container: "",
+        button: "",
+      };
+    }
+
+    switch (toast.type) {
+      case "success":
+        return {
+          container:
+            "border-emerald-300/30 bg-emerald-500/10 text-emerald-100",
+          button: "text-emerald-100/80 hover:text-emerald-50",
+        };
+      case "warning":
+        return {
+          container: "border-amber-300/30 bg-amber-500/10 text-amber-100",
+          button: "text-amber-100/80 hover:text-amber-50",
+        };
+      case "error":
+      default:
+        return {
+          container: "border-red-300/30 bg-red-500/10 text-red-100",
+          button: "text-red-100/80 hover:text-red-50",
+        };
+    }
+  }, [toast]);
 
   const renderMain = () => {
     const badge = getPdfBadge(attachedPdf);
@@ -1091,6 +1601,9 @@ Organize a resposta em tópicos, com explicações objetivas.
               variant="chat"
               activeConversationId={activeConversationId}
               actionToast={actionToast}
+              isBlocked={isBlocked}
+              blockedMessage={blockedMessage}
+              blockedCta={blockedCta}
             />
           ) : loadingMessages && activeConversationId ? (
             <div className="flex h-full items-center justify-center text-sm text-white">
@@ -1104,8 +1617,57 @@ Organize a resposta em tópicos, com explicações objetivas.
         <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
           <div className="mx-auto w-full max-w-3xl">
             {toast && (
-              <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
-                {toast}
+              <div
+                className={`mb-2 rounded-xl border px-3 py-2 text-[12px] ${toastStyles.container}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <div className="leading-snug">{toast.text}</div>
+
+                    {toast.cta && (
+                      <div className="mt-3">
+                        <a
+                          href={toast.cta.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                        >
+                          {toast.cta.label}
+                        </a>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={hideToast}
+                    className={`shrink-0 text-[14px] font-bold leading-none ${toastStyles.button}`}
+                    aria-label="Fechar aviso"
+                    title="Fechar"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {isBlocked && (
+              <div className="mb-3 rounded-xl border border-amber-300/30 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-100">
+                <div className="font-semibold">Acesso bloqueado para novas ações</div>
+                <div className="mt-1">{blockedMessage}</div>
+
+                {blockedCta && (
+                  <div className="mt-3">
+                    <a
+                      href={blockedCta.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                    >
+                      {blockedCta.label}
+                    </a>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1124,13 +1686,13 @@ Organize a resposta em tópicos, com explicações objetivas.
                     </button>
                   )}
 
-                <button
-  type="button"
-  onClick={handleDismissPdfHint}
-  className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
->
-  CONTINUAR
-</button>
+                  <button
+                    type="button"
+                    onClick={handleDismissPdfHint}
+                    className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
+                  >
+                    CONTINUAR
+                  </button>
                 </div>
               </div>
             )}
@@ -1139,7 +1701,12 @@ Organize a resposta em tópicos, com explicações objetivas.
               <button
                 type="button"
                 onClick={handlePdfButtonClick}
-                className="inline-flex items-center justify-center rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
+                disabled={isBlocked || accessLoading || isUploadingPdf}
+                className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
+                  isBlocked || accessLoading || isUploadingPdf
+                    ? "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
+                    : "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
+                }`}
               >
                 ANEXAR PDF
               </button>
@@ -1155,7 +1722,9 @@ Organize a resposta em tópicos, com explicações objetivas.
               {attachedPdf && (
                 <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
                   <span className="max-w-[220px] truncate">{attachedPdf.fileName}</span>
-                  <span className="opacity-80">{Math.round(attachedPdf.fileSize / 1024)} KB</span>
+                  <span className="opacity-80">
+                    {Math.round(attachedPdf.fileSize / 1024)} KB
+                  </span>
 
                   {badge && (
                     <span className="ml-1 rounded-full bg-black/20 px-2 py-1 text-[10px] opacity-95">
@@ -1176,12 +1745,14 @@ Organize a resposta em tópicos, com explicações objetivas.
               <div className="relative">
                 <button
                   type="button"
-                  disabled={!attachedPdf}
-                  onClick={() => attachedPdf && setShowPdfQuickActions((prev) => !prev)}
+                  disabled={!attachedPdf || isBlocked || accessLoading}
+                  onClick={() =>
+                    attachedPdf && setShowPdfQuickActions((prev) => !prev)
+                  }
                   className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
-                    attachedPdf
+                    attachedPdf && !isBlocked && !accessLoading
                       ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                      : "bg-[#1b3a56] text-slate-400 opacity-60 cursor-not-allowed"
+                      : "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
                   }`}
                 >
                   AÇÕES RÁPIDAS COM O PDF ▾
@@ -1224,9 +1795,16 @@ Organize a resposta em tópicos, com explicações objetivas.
               </div>
             </div>
 
-            {isUploadingPdf && <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>}
+            {isUploadingPdf && (
+              <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>
+            )}
 
-            <ChatInput onSend={handleSend} isSending={isSending} onStop={handleStop} />
+            <ChatInput
+              onSend={handleSend}
+              isSending={isSending}
+              onStop={handleStop}
+              disabled={isBlocked || accessLoading}
+            />
           </div>
         </div>
       </div>
@@ -1286,11 +1864,19 @@ Organize a resposta em tópicos, com explicações objetivas.
               onSelectConversation={(id) => handleSelectConversation(id)}
               onDeleteConversation={(id) => handleDeleteConversation(id)}
               userLabel={userLabel}
+              isBlocked={isBlocked}
+              blockedMessage={blockedMessage}
+              blockedCta={blockedCta}
+              access={access}
+              accessLoading={accessLoading}
             />
           </div>
 
           {isMobileSidebarOpen && (
-            <div className="fixed inset-0 z-30 bg-black/40" onClick={() => setIsMobileSidebarOpen(false)} />
+            <div
+              className="fixed inset-0 z-30 bg-black/40"
+              onClick={() => setIsMobileSidebarOpen(false)}
+            />
           )}
 
           <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
@@ -1305,6 +1891,11 @@ Organize a resposta em tópicos, com explicações objetivas.
           onSelectConversation={(id) => handleSelectConversation(id)}
           onDeleteConversation={(id) => handleDeleteConversation(id)}
           userLabel={userLabel}
+          isBlocked={isBlocked}
+          blockedMessage={blockedMessage}
+          blockedCta={blockedCta}
+          access={access}
+          accessLoading={accessLoading}
         />
 
         <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
