@@ -1,8 +1,10 @@
+// src/app/api/pdf/ask/route.ts
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 
 import { buildPdfContext, retrieveRelevantPdfChunks } from "@/lib/pdf/retrieveChunks";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
 
 export const runtime = "nodejs";
 
@@ -43,7 +45,7 @@ export async function POST(req: Request) {
       return jsonError("question é obrigatória.", 400);
     }
 
-    const supabase = createSupabaseServerClient();
+    const supabase = await createSupabaseServerClient();
 
     const {
       data: { user },
@@ -56,6 +58,35 @@ export async function POST(req: Request) {
     if (userErr || !user) {
       console.error("[pdf/ask] auth error:", userErr?.message);
       return jsonError("Não autenticado.", 401, userErr?.message);
+    }
+
+    const accessSummary = await getAccessSummary(supabase, user.id);
+
+    if (!accessSummary) {
+      return jsonError(
+        "Não foi possível verificar o acesso da sua conta no momento.",
+        500
+      );
+    }
+
+    const accessDecision = await syncEffectiveAccessStatus(
+      supabase,
+      accessSummary
+    );
+
+    if (!accessDecision.allowed) {
+      return NextResponse.json(
+        {
+          error:
+            accessDecision.message ??
+            "Seu plano atual não permite fazer perguntas sobre PDFs.",
+          accessBlocked: true,
+          accessStatus: accessDecision.effectiveStatus,
+          access_status: accessDecision.effectiveStatus,
+          reason: accessDecision.reason,
+        },
+        { status: 403 }
+      );
     }
 
     const { data: pdf, error: pdfErr } = await supabase
@@ -76,8 +107,13 @@ export async function POST(req: Request) {
       return jsonError("PDF não encontrado.", 404);
     }
 
-    const extractedStatus = String((pdf as any).extracted_text_status ?? "").toLowerCase();
-    const vectorStatus = String((pdf as any).vector_index_status ?? "").toLowerCase();
+    const extractedStatus = String(
+      (pdf as any).extracted_text_status ?? ""
+    ).toLowerCase();
+
+    const vectorStatus = String(
+      (pdf as any).vector_index_status ?? ""
+    ).toLowerCase();
 
     if (extractedStatus !== "ready" || vectorStatus !== "ready") {
       return NextResponse.json(

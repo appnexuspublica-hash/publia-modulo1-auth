@@ -1,48 +1,11 @@
 // src/app/api/pdf/reprocess/route.ts
 import { NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
 
+import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
 import { processPdfForIndexing } from "@/lib/pdf/processForIndexing";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-function parseCookieHeader(cookieHeader: string | null) {
-  const out: Record<string, string> = {};
-  if (!cookieHeader) return out;
-
-  for (const part of cookieHeader.split(";")) {
-    const p = part.trim();
-    if (!p) continue;
-
-    const eq = p.indexOf("=");
-    if (eq === -1) continue;
-
-    const k = p.slice(0, eq).trim();
-    const v = p.slice(eq + 1).trim();
-    out[k] = decodeURIComponent(v);
-  }
-
-  return out;
-}
-
-function createAuthClient(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Supabase envs faltando");
-  }
-
-  const jar = parseCookieHeader(req.headers.get("cookie"));
-
-  return createServerClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      get: (name) => jar[name],
-      set() {},
-      remove() {},
-    },
-  });
-}
 
 const uuidRe =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -67,13 +30,6 @@ export async function POST(req: Request) {
   const isDev = process.env.NODE_ENV !== "production";
 
   try {
-    if (!supabaseUrl || !supabaseAnonKey) {
-      return NextResponse.json(
-        { error: "Servidor não configurado (Supabase envs)." },
-        { status: 500 }
-      );
-    }
-
     const contentType = req.headers.get("content-type") || "";
     if (!contentType.includes("application/json")) {
       return NextResponse.json(
@@ -82,14 +38,44 @@ export async function POST(req: Request) {
       );
     }
 
-    const client = createAuthClient(req) as any;
+    const client = await createSupabaseServerClient();
 
-    const { data: auth, error: authErr } = await client.auth.getUser();
-    if (authErr || !auth?.user) {
+    const {
+      data: { user },
+      error: authErr,
+    } = await client.auth.getUser();
+
+    if (authErr || !user) {
       return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
     }
 
-    const userId = auth.user.id;
+    const userId = user.id;
+
+    const accessSummary = await getAccessSummary(client, userId);
+
+    if (!accessSummary) {
+      return NextResponse.json(
+        { error: "Não foi possível verificar o acesso da sua conta no momento." },
+        { status: 500 }
+      );
+    }
+
+    const accessDecision = await syncEffectiveAccessStatus(client, accessSummary);
+
+    if (!accessDecision.allowed) {
+      return NextResponse.json(
+        {
+          error:
+            accessDecision.message ??
+            "Seu plano atual não permite reprocessar PDFs.",
+          accessBlocked: true,
+          accessStatus: accessDecision.effectiveStatus,
+          access_status: accessDecision.effectiveStatus,
+          reason: accessDecision.reason,
+        },
+        { status: 403 }
+      );
+    }
 
     const body = await req.json().catch(() => null);
     const pdfFileId = String(body?.pdfFileId ?? "").trim();

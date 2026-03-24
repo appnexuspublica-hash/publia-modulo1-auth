@@ -1,12 +1,10 @@
 // src/app/api/export-xlsx/route.ts
 import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
-import { createServerClient } from "@supabase/ssr";
+
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 type Body = {
   filename?: string;
@@ -16,41 +14,6 @@ type Body = {
 function sanitizeFilename(name: string) {
   const base = (name || "planilha.xlsx").replace(/[^\w.-]+/g, "_");
   return base.toLowerCase().endsWith(".xlsx") ? base : `${base}.xlsx`;
-}
-
-function parseCookieHeader(cookieHeader: string | null) {
-  const out: Record<string, string> = {};
-  if (!cookieHeader) return out;
-
-  for (const part of cookieHeader.split(";")) {
-    const p = part.trim();
-    if (!p) continue;
-
-    const eq = p.indexOf("=");
-    if (eq === -1) continue;
-
-    const k = p.slice(0, eq).trim();
-    const v = p.slice(eq + 1).trim();
-    out[k] = decodeURIComponent(v);
-  }
-
-  return out;
-}
-
-function createAuthClient(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Supabase envs faltando");
-  }
-
-  const jar = parseCookieHeader(req.headers.get("cookie"));
-
-  return createServerClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      get: (name) => jar[name],
-      set() {},
-      remove() {},
-    },
-  });
 }
 
 async function registerExportEvent(
@@ -83,21 +46,18 @@ async function registerExportEvent(
 
 export async function POST(req: Request) {
   try {
-    if (!supabaseUrl || !supabaseAnonKey) {
-      return NextResponse.json(
-        { error: "Servidor não configurado (Supabase envs)." },
-        { status: 500 }
-      );
-    }
+    const client = await createSupabaseServerClient();
 
-    const client = createAuthClient(req) as any;
+    const {
+      data: { user },
+      error: authErr,
+    } = await client.auth.getUser();
 
-    const { data: auth, error: authErr } = await client.auth.getUser();
-    if (authErr || !auth?.user) {
+    if (authErr || !user) {
       return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
     }
 
-    const userId = auth.user.id;
+    const userId = user.id;
 
     const body = (await req.json()) as Body;
 
@@ -105,7 +65,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "rows inválido" }, { status: 400 });
     }
 
-    // limite simples pra evitar abuso
     const maxCells = 200_000;
     const cells = body.rows.reduce((acc, r) => acc + (r?.length ?? 0), 0);
 
@@ -142,7 +101,8 @@ export async function POST(req: Request) {
     return new Response(out, {
       status: 200,
       headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${filename}"`,
         "Cache-Control": "no-store",
       },

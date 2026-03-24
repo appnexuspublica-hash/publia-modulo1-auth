@@ -1,4 +1,4 @@
-// src/app/chat/components/ChatSidebar.tsx
+//src/app/chat/components/ChatSidebar.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -40,7 +40,12 @@ function formatDateShort(dateStr: string): string {
 }
 
 function getCompactStatusLabel(access?: FrontendAccessSummary | null) {
-  const status = access?.access_status;
+  const isAdmin = access?.isAdmin === true;
+  const status = access?.access_status ?? access?.accessStatus;
+
+  if (isAdmin) {
+    return "Plano";
+  }
 
   if (status === "trial_active" || status === "trial_expired") {
     return "Trial";
@@ -54,7 +59,15 @@ function getCompactStatusLabel(access?: FrontendAccessSummary | null) {
 }
 
 function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
-  const status = access?.access_status;
+  const isAdmin = access?.isAdmin === true;
+  const status = access?.access_status ?? access?.accessStatus;
+
+  if (isAdmin) {
+    return {
+      label: "ATIVO",
+      className: "bg-[#e1e1e1] text-slate-800",
+    };
+  }
 
   if (status === "trial_active" || status === "subscription_active") {
     return {
@@ -111,15 +124,17 @@ export function ChatSidebar({
     [access]
   );
 
-  const sidebarCta = useMemo(
-    () => getSidebarAccessCta(access?.access_status),
-    [access]
-  );
+  const sidebarCta = useMemo(() => {
+    if (access?.isAdmin) return null;
+    return getSidebarAccessCta(access?.access_status ?? access?.accessStatus);
+  }, [access]);
 
   const trialDaysRemaining = useMemo(
     () => getTrialDaysRemaining(access?.trialEndsAt),
     [access?.trialEndsAt]
   );
+
+  const isAdmin = access?.isAdmin === true;
 
   const messagesUsed =
     typeof access?.messagesUsed === "number" ? access.messagesUsed : null;
@@ -203,52 +218,82 @@ export function ChatSidebar({
 
         {showCompactTrialBar && showStatusDetails && (
           <div className="mt-3 rounded-xl border border-slate-200 bg-[#f8f8f8] px-3 py-3 text-[12px] text-slate-700">
-            {access?.access_status === "trial_active" &&
-              trialDaysRemaining !== null && (
-                <div className="mb-2 rounded-lg bg-white px-3 py-2">
-                  <div className="text-[11px] font-semibold text-slate-900">
-                    Trial
+            {isAdmin ? (
+              <>
+                {messagesUsed !== null && (
+                  <div className="mb-2 rounded-lg bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-900">
+                      Mensagens
+                    </div>
+                    <div className="mt-1 text-[12px] text-slate-700">
+                      {messagesUsed} usadas
+                    </div>
                   </div>
-                  <div className="mt-1 text-[12px] text-slate-700">
-                    {trialDaysRemaining} dia
-                    {trialDaysRemaining === 1 ? "" : "s"} restante
-                    {trialDaysRemaining === 1 ? "" : "s"}
+                )}
+
+                {pdfUsed !== null && (
+                  <div className="rounded-lg bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-900">
+                      PDFs
+                    </div>
+                    <div className="mt-1 text-[12px] text-slate-700">
+                      {pdfUsed} usados
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </>
+            ) : (
+              <>
+                {access?.access_status === "trial_active" &&
+                  trialDaysRemaining !== null && (
+                    <div className="mb-2 rounded-lg bg-white px-3 py-2">
+                      <div className="text-[11px] font-semibold text-slate-900">
+                        Trial
+                      </div>
+                      <div className="mt-1 text-[12px] text-slate-700">
+                        {trialDaysRemaining} dia
+                        {trialDaysRemaining === 1 ? "" : "s"} restante
+                        {trialDaysRemaining === 1 ? "" : "s"}
+                      </div>
+                    </div>
+                  )}
 
-            {trialMessageLimit !== null && messagesUsed !== null && (
-              <div className="mb-2 rounded-lg bg-white px-3 py-2">
-                <div className="text-[11px] font-semibold text-slate-900">
-                  Mensagens
-                </div>
-                <div className="mt-1 text-[12px] text-slate-700">
-                  {messagesUsed}/{trialMessageLimit} usadas
-                </div>
-              </div>
-            )}
+                {trialMessageLimit !== null && messagesUsed !== null && (
+                  <div className="mb-2 rounded-lg bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-900">
+                      Mensagens
+                    </div>
+                    <div className="mt-1 text-[12px] text-slate-700">
+                      {messagesUsed}/{trialMessageLimit} usadas
+                    </div>
+                  </div>
+                )}
 
-            {pdfLimit !== null && pdfUsed !== null && (
-              <div className="rounded-lg bg-white px-3 py-2">
-                <div className="text-[11px] font-semibold text-slate-900">
-                  PDFs
-                </div>
-                <div className="mt-1 text-[12px] text-slate-700">
-                  {pdfUsed}/{pdfLimit} usados
-                  {pdfPeriod === "month" ? " neste mês" : ""}
-                </div>
-              </div>
-            )}
+                {pdfUsed !== null && (
+                  <div className="rounded-lg bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-900">
+                      PDFs
+                    </div>
+                    <div className="mt-1 text-[12px] text-slate-700">
+                      {pdfLimit !== null
+                        ? `${pdfUsed}/${pdfLimit} usados`
+                        : `${pdfUsed} usados`}
+                      {pdfPeriod === "month" ? " neste mês" : ""}
+                    </div>
+                  </div>
+                )}
 
-            {sidebarCta && (
-              <a
-                href={sidebarCta.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-[#f5a000] px-3 py-2 text-[11px] font-semibold text-white transition hover:brightness-105"
-              >
-                {sidebarCta.label}
-              </a>
+                {sidebarCta && (
+                  <a
+                    href={sidebarCta.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-[#f5a000] px-3 py-2 text-[11px] font-semibold text-white transition hover:brightness-105"
+                  >
+                    {sidebarCta.label}
+                  </a>
+                )}
+              </>
             )}
           </div>
         )}

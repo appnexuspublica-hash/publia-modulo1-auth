@@ -30,7 +30,8 @@ export type AccessDecision = {
     | "trial_time_expired"
     | "trial_message_limit_reached"
     | "trial_inactive"
-    | "subscription_expired";
+    | "subscription_expired"
+    | "admin_override";
   message: string | null;
 };
 
@@ -116,6 +117,42 @@ export function evaluateAccess(summary: AccessSummary): AccessDecision {
   };
 }
 
+async function getIsAdmin(client: any, userId: string): Promise<boolean> {
+  const { data, error } = await client
+    .from("profiles")
+    .select("is_admin, role")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[access-control] erro ao consultar profiles.is_admin/role", error);
+    return false;
+  }
+
+  const isAdmin = Boolean(data?.is_admin);
+  const isAdminRole = String(data?.role ?? "").toLowerCase() === "admin";
+
+  return isAdmin || isAdminRole;
+}
+
+export async function evaluateAccessWithAdmin(
+  client: any,
+  summary: AccessSummary
+): Promise<AccessDecision> {
+  const isAdmin = await getIsAdmin(client, summary.user_id);
+
+  if (isAdmin) {
+    return {
+      allowed: true,
+      effectiveStatus: "subscription_active",
+      reason: "admin_override",
+      message: null,
+    };
+  }
+
+  return evaluateAccess(summary);
+}
+
 async function ensureUserAccessRow(client: any, userId: string) {
   const { data: existing, error: existingErr } = await client
     .from("user_access")
@@ -144,14 +181,20 @@ async function ensureUserAccessRow(client: any, userId: string) {
   });
 
   if (insertErr) {
-    console.error("[access-control] erro ao criar user_access automaticamente", insertErr);
+    console.error(
+      "[access-control] erro ao criar user_access automaticamente",
+      insertErr
+    );
     return false;
   }
 
   return true;
 }
 
-async function getAccessSummaryFromView(client: any, userId: string): Promise<AccessSummary | null> {
+async function getAccessSummaryFromView(
+  client: any,
+  userId: string
+): Promise<AccessSummary | null> {
   const { data, error } = await client
     .from("user_access_summary")
     .select("*")
@@ -251,7 +294,10 @@ async function getAccessSummaryFromTables(
   };
 }
 
-export async function getAccessSummary(client: any, userId: string): Promise<AccessSummary | null> {
+export async function getAccessSummary(
+  client: any,
+  userId: string
+): Promise<AccessSummary | null> {
   const fromView = await getAccessSummaryFromView(client, userId);
   if (fromView) {
     return fromView;
@@ -262,11 +308,25 @@ export async function getAccessSummary(client: any, userId: string): Promise<Acc
     return fromTables;
   }
 
-  console.error("[access-control] nenhum resumo de acesso encontrado para user_id:", userId);
+  console.error(
+    "[access-control] nenhum resumo de acesso encontrado para user_id:",
+    userId
+  );
   return null;
 }
 
 export async function syncEffectiveAccessStatus(client: any, summary: AccessSummary) {
+  const isAdmin = await getIsAdmin(client, summary.user_id);
+
+  if (isAdmin) {
+    return {
+      allowed: true,
+      effectiveStatus: "subscription_active" as AccessStatus,
+      reason: "admin_override" as const,
+      message: null,
+    };
+  }
+
   const decision = evaluateAccess(summary);
 
   if (decision.effectiveStatus !== summary.access_status) {

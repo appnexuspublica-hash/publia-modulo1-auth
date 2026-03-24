@@ -1,13 +1,16 @@
 // src/app/api/upload-pdf/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getAccessSummary } from "@/lib/access-control";
+import {
+  getAccessSummary,
+  evaluateAccessWithAdmin,
+} from "@/lib/access-control";
 
 const PDF_UPLOAD_MAX_MB = 30;
 const TRIAL_PDF_LIMIT = 10;
 const SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
 
-type PdfPeriod = "account" | "month" | null;
+type PdfPeriod = "account" | "month" | "admin" | null;
 
 type AccessStatus =
   | "trial_active"
@@ -23,6 +26,7 @@ type PdfUploadPlanValidation = {
   period: PdfPeriod;
   blockedMessage: string | null;
   accessStatus: AccessStatus;
+  isAdmin: boolean;
 };
 
 type UploadPdfRequestBody = {
@@ -104,12 +108,30 @@ async function validatePdfUploadByPlan(
       blockedMessage:
         "Não foi possível validar o acesso da sua conta no momento.",
       accessStatus: "trial_expired",
+      isAdmin: false,
     };
   }
 
-  const accessStatus = access.access_status as AccessStatus;
+  const decision = await evaluateAccessWithAdmin(supabase, access);
+  const accessStatus = decision.effectiveStatus as AccessStatus;
+  const isAdmin = decision.reason === "admin_override";
 
-  if (accessStatus === "trial_expired") {
+  if (isAdmin) {
+    const used = await countUserPdfsAllTime(supabase, userId);
+
+    return {
+      allowed: true,
+      limit: null,
+      used,
+      remaining: null,
+      period: "admin",
+      blockedMessage: null,
+      accessStatus,
+      isAdmin: true,
+    };
+  }
+
+  if (!decision.allowed) {
     return {
       allowed: false,
       limit: null,
@@ -117,21 +139,10 @@ async function validatePdfUploadByPlan(
       remaining: 0,
       period: null,
       blockedMessage:
-        "Seu período de teste expirou. Assine um plano para enviar novos PDFs.",
+        decision.message ??
+        "Seu plano atual não permite enviar novos PDFs.",
       accessStatus,
-    };
-  }
-
-  if (accessStatus === "subscription_expired") {
-    return {
-      allowed: false,
-      limit: null,
-      used: 0,
-      remaining: 0,
-      period: null,
-      blockedMessage:
-        "Sua assinatura expirou. Renove para voltar a enviar novos PDFs.",
-      accessStatus,
+      isAdmin: false,
     };
   }
 
@@ -151,6 +162,7 @@ async function validatePdfUploadByPlan(
           ? `Você atingiu o limite de ${limit} PDFs no trial. Assine um plano para continuar.`
           : null,
       accessStatus,
+      isAdmin: false,
     };
   }
 
@@ -169,6 +181,7 @@ async function validatePdfUploadByPlan(
         ? `Você atingiu o limite de ${limit} PDFs neste mês no seu plano atual.`
         : null,
     accessStatus: "subscription_active",
+    isAdmin: false,
   };
 }
 
@@ -297,6 +310,8 @@ export async function POST(request: NextRequest) {
             planValidation.blockedMessage ??
             "Seu plano atual não permite enviar novos PDFs.",
           accessStatus: planValidation.accessStatus,
+          access_status: planValidation.accessStatus,
+          isAdmin: planValidation.isAdmin,
           pdfUsage: {
             limit: planValidation.limit,
             used: planValidation.used,
@@ -369,8 +384,10 @@ export async function POST(request: NextRequest) {
         id: (insertedPdf as { id: string }).id,
         fileName:
           (insertedPdf as { file_name?: string }).file_name ?? fileName,
-        fileSize:
-          Number((insertedPdf as { file_size?: number }).file_size ?? fileSizeBytes),
+        fileSize: Number(
+          (insertedPdf as { file_size?: number }).file_size ?? fileSizeBytes
+        ),
+        isAdmin: planValidation.isAdmin,
         pdfUsage: {
           limit: planValidation.limit,
           used: planValidation.used + 1,

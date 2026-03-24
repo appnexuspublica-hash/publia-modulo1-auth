@@ -1,9 +1,12 @@
 // src/app/api/access/me/route.ts
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getAccessSummary } from "@/lib/access-control";
+import {
+  getAccessSummary,
+  evaluateAccessWithAdmin,
+} from "@/lib/access-control";
 
-type PdfPeriod = "account" | "month" | null;
+type PdfPeriod = "account" | "month" | "admin" | null;
 
 type AccessStatus =
   | "trial_active"
@@ -77,8 +80,20 @@ async function countUserPdfsThisMonth(
 async function buildPdfUsage(
   supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
   userId: string,
-  accessStatus: AccessStatus
+  accessStatus: AccessStatus,
+  isAdmin: boolean
 ): Promise<PdfUsageSummary> {
+  if (isAdmin) {
+    const used = await countUserPdfsAllTime(supabase, userId);
+
+    return {
+      limit: null,
+      used,
+      remaining: null,
+      period: "admin",
+    };
+  }
+
   if (accessStatus === "trial_active") {
     const used = await countUserPdfsAllTime(supabase, userId);
     const limit = TRIAL_PDF_LIMIT;
@@ -148,12 +163,26 @@ export async function GET() {
       );
     }
 
-    const accessStatus = access.access_status as AccessStatus;
-    const pdfUsage = await buildPdfUsage(supabase, user.id, accessStatus);
+    const decision = await evaluateAccessWithAdmin(supabase, access);
+    const accessStatus = decision.effectiveStatus as AccessStatus;
+    const isAdmin = decision.reason === "admin_override";
+
+    const pdfUsage = await buildPdfUsage(
+      supabase,
+      user.id,
+      accessStatus,
+      isAdmin
+    );
 
     return NextResponse.json({
       accessStatus,
-      blockedMessage: buildBlockedMessage(accessStatus),
+      access_status: accessStatus,
+      blockedMessage: decision.allowed
+        ? null
+        : decision.message ?? buildBlockedMessage(accessStatus),
+      blocked_message: decision.allowed
+        ? null
+        : decision.message ?? buildBlockedMessage(accessStatus),
       trialEndsAt:
         "trial_ends_at" in access && typeof access.trial_ends_at === "string"
           ? access.trial_ends_at
@@ -166,10 +195,13 @@ export async function GET() {
       messagesUsed:
         typeof access.messages_used === "number" ? access.messages_used : 0,
       trialMessageLimit:
-        typeof access.trial_message_limit === "number"
-          ? access.trial_message_limit
-          : null,
+  isAdmin
+    ? null
+    : typeof access.trial_message_limit === "number"
+      ? access.trial_message_limit
+      : null,
       pdfUsage,
+      isAdmin,
     });
   } catch (error) {
     console.error("Erro em /api/access/me:", error);

@@ -5,7 +5,7 @@ export type AccessStatus =
   | "subscription_active"
   | "subscription_expired";
 
-export type PdfPeriod = "account" | "month" | null;
+export type PdfPeriod = "account" | "month" | "admin" | null;
 
 export type PdfUsageSummary = {
   limit: number | null;
@@ -18,15 +18,21 @@ export type FrontendAccessSummary = {
   accessStatus: AccessStatus;
   access_status: AccessStatus;
   blockedMessage: string | null;
+  blocked_message?: string | null;
   trialEndsAt: string | null;
   subscriptionEndsAt: string | null;
   messagesUsed: number;
   trialMessageLimit: number | null;
   pdfUsage: PdfUsageSummary;
+  isAdmin?: boolean;
 };
 
 export function canUseAiFeatures(access: FrontendAccessSummary | null): boolean {
   if (!access) return false;
+
+  if (access.isAdmin === true) {
+    return true;
+  }
 
   const status = access.accessStatus ?? access.access_status;
 
@@ -40,8 +46,16 @@ export function getBlockedAccessMessage(
     return "Não foi possível validar o acesso da sua conta no momento.";
   }
 
+  if (access.isAdmin === true) {
+    return "";
+  }
+
   if (access.blockedMessage) {
     return access.blockedMessage;
+  }
+
+  if (access.blocked_message) {
+    return access.blocked_message;
   }
 
   const status = access.accessStatus ?? access.access_status;
@@ -73,8 +87,9 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
 
   return {
     accessStatus: status,
-    access_status: status,
+    access_status: (data.access_status as AccessStatus) ?? status,
     blockedMessage: data.blockedMessage ?? null,
+    blocked_message: data.blocked_message ?? null,
     trialEndsAt: data.trialEndsAt ?? null,
     subscriptionEndsAt: data.subscriptionEndsAt ?? null,
     messagesUsed: typeof data.messagesUsed === "number" ? data.messagesUsed : 0,
@@ -82,6 +97,7 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
       typeof data.trialMessageLimit === "number"
         ? data.trialMessageLimit
         : null,
+    isAdmin: data.isAdmin === true,
     pdfUsage: {
       limit:
         typeof data?.pdfUsage?.limit === "number" ? data.pdfUsage.limit : null,
@@ -92,7 +108,8 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
           : null,
       period:
         data?.pdfUsage?.period === "account" ||
-        data?.pdfUsage?.period === "month"
+        data?.pdfUsage?.period === "month" ||
+        data?.pdfUsage?.period === "admin"
           ? data.pdfUsage.period
           : null,
     },
