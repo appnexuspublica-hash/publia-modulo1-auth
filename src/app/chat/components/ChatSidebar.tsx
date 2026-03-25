@@ -1,4 +1,4 @@
-//src/app/chat/components/ChatSidebar.tsx
+// src/app/chat/components/ChatSidebar.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -39,25 +39,6 @@ function formatDateShort(dateStr: string): string {
   return d.toLocaleDateString("pt-BR");
 }
 
-function getCompactStatusLabel(access?: FrontendAccessSummary | null) {
-  const isAdmin = access?.isAdmin === true;
-  const status = access?.access_status ?? access?.accessStatus;
-
-  if (isAdmin) {
-    return "Plano";
-  }
-
-  if (status === "trial_active" || status === "trial_expired") {
-    return "Trial";
-  }
-
-  if (status === "subscription_active" || status === "subscription_expired") {
-    return "Plano";
-  }
-
-  return null;
-}
-
 function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
   const isAdmin = access?.isAdmin === true;
   const status = access?.access_status ?? access?.accessStatus;
@@ -69,7 +50,14 @@ function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
     };
   }
 
-  if (status === "trial_active" || status === "subscription_active") {
+  if (status === "trial_active") {
+    return {
+      label: "TRIAL ATIVO",
+      className: "bg-[#e1e1e1] text-slate-800",
+    };
+  }
+
+  if (status === "subscription_active") {
     return {
       label: "ATIVO",
       className: "bg-emerald-100 text-emerald-700",
@@ -114,11 +102,6 @@ export function ChatSidebar({
 }: ChatSidebarProps) {
   const [showStatusDetails, setShowStatusDetails] = useState(false);
 
-  const compactStatusLabel = useMemo(
-    () => getCompactStatusLabel(access),
-    [access]
-  );
-
   const compactStatusBadge = useMemo(
     () => getCompactStatusBadge(access),
     [access]
@@ -155,7 +138,7 @@ export function ChatSidebar({
   const showCompactTrialBar =
     !accessLoading &&
     !!access &&
-    !!compactStatusLabel &&
+    !!compactStatusBadge &&
     !isBlocked;
 
   let lastRenderedDate = "";
@@ -189,10 +172,6 @@ export function ChatSidebar({
 
             {showCompactTrialBar && compactStatusBadge ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="text-[12px] font-semibold text-slate-900">
-                  {compactStatusLabel}
-                </span>
-
                 <button
                   type="button"
                   onClick={toggleStatusDetails}
