@@ -1,4 +1,4 @@
-//src/app/chat/chatPageClient.tsx
+// src/app/chat/chatPageClient.tsx
 "use client";
 
 import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
@@ -64,6 +64,12 @@ function markdownToPlainText(markdown: string): string {
   text = text.replace(/\n{3,}/g, "\n\n");
 
   return text.trim();
+}
+
+function truncatePdfName(name: string, max = 9) {
+  const clean = String(name ?? "").trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max)}...`;
 }
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -226,26 +232,22 @@ function classifyPdfUiStatus(att: AttachedPdf | null): PdfUiStatus {
 
 function getPdfBadge(att: AttachedPdf | null) {
   const status = classifyPdfUiStatus(att);
-  const chunks =
-    typeof att?.vectorChunksCount === "number" ? att.vectorChunksCount : 0;
 
   switch (status) {
     case "processing":
       return "Lendo...";
     case "indexing":
       return "Indexando...";
-    case "ready":
-      return chunks > 0 ? "Pronto" : "PDF com texto";
     case "no_text":
-      return "PDF sem texto";
+      return "Sem texto";
     case "technical_error":
-      return "Falha no PDF";
+      return "Falha";
     case "large":
-      return "PDF grande";
+      return "Grande";
     case "index_error":
-      return "Indexação falhou";
+      return "Indexação";
     default:
-      return att ? "PDF anexado" : null;
+      return null;
   }
 }
 
@@ -292,9 +294,13 @@ export default function ChatPageClient({
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isSending, setIsSending] = useState(false);
 
-  const [attachedPdf, setAttachedPdf] = useState<AttachedPdf | null>(null);
+  const [attachedPdfs, setAttachedPdfs] = useState<AttachedPdf[]>([]);
+  const [activePdfId, setActivePdfId] = useState<string | null>(null);
+  const [selectedPdfIds, setSelectedPdfIds] = useState<string[]>([]);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showPdfQuickActions, setShowPdfQuickActions] = useState(false);
+  const quickActionsRef = useRef<HTMLDivElement | null>(null);
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
 
   const [showPdfHint, setShowPdfHint] = useState(false);
@@ -398,6 +404,17 @@ export default function ChatPageClient({
     return getBlockedAccessCta(access?.access_status);
   }, [access, accessLoading]);
 
+  const attachedPdf = useMemo(() => {
+    if (!attachedPdfs.length) return null;
+    if (!activePdfId) return attachedPdfs[attachedPdfs.length - 1] ?? null;
+
+    return (
+      attachedPdfs.find((pdf) => pdf.id === activePdfId) ??
+      attachedPdfs[attachedPdfs.length - 1] ??
+      null
+    );
+  }, [attachedPdfs, activePdfId]);
+
   useEffect(() => {
     loadAccess();
   }, [loadAccess]);
@@ -411,6 +428,23 @@ export default function ChatPageClient({
       setShowPdfQuickActions(false);
     }
   }, [isBlocked]);
+
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (!quickActionsRef.current) return;
+      if (!quickActionsRef.current.contains(event.target as Node)) {
+        setShowPdfQuickActions(false);
+      }
+    }
+
+    if (showPdfQuickActions) {
+      document.addEventListener("mousedown", handleOutsideClick);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, [showPdfQuickActions]);
 
   useEffect(() => {
     return () => {
@@ -491,6 +525,188 @@ export default function ChatPageClient({
     [supabase, userId]
   );
 
+  const loadConversationPdfs = useCallback(
+    async (conversationId: string) => {
+      const { data: conv, error: convError } = await supabase
+        .from("conversations")
+        .select("id, active_pdf_file_id, pdf_enabled")
+        .eq("id", conversationId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (convError) {
+        console.error("Erro ao carregar conversa (PDF state):", convError.message);
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
+        setShowPdfHint(false);
+        return;
+      }
+
+      if (activeConversationIdRef.current !== conversationId) return;
+
+      const pdfEnabled = Boolean((conv as any)?.pdf_enabled);
+      const currentActivePdfId =
+        ((conv as any)?.active_pdf_file_id as string | null | undefined) ?? null;
+
+      if (!pdfEnabled) {
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
+        setShowPdfHint(false);
+        return;
+      }
+
+      const { data: links, error: linksError } = await supabase
+        .from("conversation_pdf_links")
+        .select("pdf_file_id, is_active, created_at")
+        .eq("conversation_id", conversationId)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true });
+
+      if (linksError) {
+        console.error("Erro ao carregar vínculos dos PDFs:", linksError.message);
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
+        setShowPdfHint(false);
+        return;
+      }
+
+      const pdfIds = Array.from(
+        new Set(
+          (links ?? [])
+            .map((item: any) => String(item?.pdf_file_id ?? "").trim())
+            .filter(Boolean)
+        )
+      );
+
+      if (!pdfIds.length) {
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
+        setShowPdfHint(false);
+        return;
+      }
+
+      const statusList = await Promise.all(
+        pdfIds.map((pdfId) => fetchPdfStatus(pdfId, conversationId))
+      );
+
+      if (activeConversationIdRef.current !== conversationId) return;
+
+      const validPdfs = statusList.filter(Boolean) as AttachedPdf[];
+      setAttachedPdfs(validPdfs);
+
+      const activeFromLinks =
+        (links ?? []).find((item: any) => item?.is_active === true)?.pdf_file_id ?? null;
+
+      const resolvedActivePdfId =
+        String(
+          currentActivePdfId ??
+            activeFromLinks ??
+            validPdfs[validPdfs.length - 1]?.id ??
+            ""
+        ).trim() || null;
+
+      setActivePdfId(resolvedActivePdfId);
+
+      setSelectedPdfIds((prev) => {
+        const validIds = validPdfs.map((pdf) => pdf.id);
+        const validSet = new Set(validIds);
+        const filtered = prev.filter((id) => validSet.has(id));
+        if (filtered.length > 0) return filtered;
+        return validIds;
+      });
+
+      const activePdfResolved =
+        validPdfs.find((pdf) => pdf.id === resolvedActivePdfId) ??
+        validPdfs[validPdfs.length - 1] ??
+        null;
+
+      if (!activePdfResolved) {
+        setShowPdfHint(false);
+        return;
+      }
+
+      const uiStatus = classifyPdfUiStatus(activePdfResolved);
+      setShowPdfHint(
+        uiStatus === "no_text" ||
+          uiStatus === "technical_error" ||
+          uiStatus === "large"
+      );
+    },
+    [fetchPdfStatus, supabase, userId]
+  );
+
+  const setPdfAsActive = useCallback(
+    async (conversationId: string, pdfFileId: string, options?: { silent?: boolean }) => {
+      const { error: deactivateError } = await supabase
+        .from("conversation_pdf_links")
+        .update({ is_active: false } as any)
+        .eq("conversation_id", conversationId)
+        .eq("user_id", userId);
+
+      if (deactivateError) {
+        console.error("Erro ao desativar PDFs anteriores da conversa:", deactivateError.message);
+
+        if (!options?.silent) {
+          showToast("Não foi possível definir o PDF ativo.", {
+            type: "error",
+            persistent: true,
+          });
+        }
+        return false;
+      }
+
+      const { error: activateError } = await supabase
+        .from("conversation_pdf_links")
+        .update({ is_active: true } as any)
+        .eq("conversation_id", conversationId)
+        .eq("user_id", userId)
+        .eq("pdf_file_id", pdfFileId);
+
+      if (activateError) {
+        console.error("Erro ao ativar o PDF atual da conversa:", activateError.message);
+
+        if (!options?.silent) {
+          showToast("Não foi possível definir o PDF ativo.", {
+            type: "error",
+            persistent: true,
+          });
+        }
+        return false;
+      }
+
+      const { error: conversationUpdateError } = await supabase
+        .from("conversations")
+        .update({
+          active_pdf_file_id: pdfFileId,
+          pdf_enabled: true,
+        } as any)
+        .eq("id", conversationId)
+        .eq("user_id", userId);
+
+      if (conversationUpdateError) {
+        console.error(
+          "Erro ao atualizar conversa com PDF ativo:",
+          conversationUpdateError.message
+        );
+
+        if (!options?.silent) {
+          showToast("Não foi possível salvar o PDF ativo.", {
+            type: "error",
+            persistent: true,
+          });
+        }
+        return false;
+      }
+
+      return true;
+    },
+    [supabase, userId]
+  );
+
   const pollPdfUntilStable = useCallback(
     async (pdfFileId: string, conversationId: string) => {
       const start = Date.now();
@@ -502,15 +718,21 @@ export default function ChatPageClient({
 
         const status = await fetchPdfStatus(pdfFileId, conversationId);
         if (status) {
-          setAttachedPdf(status);
+          setAttachedPdfs((prev) => {
+            const exists = prev.some((item) => item.id === status.id);
+            if (!exists) return [...prev, status];
+            return prev.map((item) => (item.id === status.id ? status : item));
+          });
 
-          const uiStatus = classifyPdfUiStatus(status);
-          if (
-            uiStatus === "no_text" ||
-            uiStatus === "technical_error" ||
-            uiStatus === "large"
-          ) {
-            setShowPdfHint(true);
+          if (activePdfId === pdfFileId) {
+            const uiStatus = classifyPdfUiStatus(status);
+            if (
+              uiStatus === "no_text" ||
+              uiStatus === "technical_error" ||
+              uiStatus === "large"
+            ) {
+              setShowPdfHint(true);
+            }
           }
         }
 
@@ -526,7 +748,7 @@ export default function ChatPageClient({
         await new Promise((r) => setTimeout(r, intervalMs));
       }
     },
-    [fetchPdfStatus]
+    [fetchPdfStatus, activePdfId]
   );
 
   useEffect(() => {
@@ -562,7 +784,9 @@ export default function ChatPageClient({
   useEffect(() => {
     if (!activeConversationId) {
       setMessages([]);
-      setAttachedPdf(null);
+      setAttachedPdfs([]);
+      setActivePdfId(null);
+      setSelectedPdfIds([]);
       setShowPdfQuickActions(false);
       setActionToast(null);
       setShowPdfHint(false);
@@ -578,7 +802,9 @@ export default function ChatPageClient({
     setLoadingMessages(true);
     setActionToast(null);
 
-    setAttachedPdf(null);
+    setAttachedPdfs([]);
+    setActivePdfId(null);
+    setSelectedPdfIds([]);
     setShowPdfQuickActions(false);
     setShowPdfHint(false);
 
@@ -616,106 +842,19 @@ export default function ChatPageClient({
 
     async function loadAttachedPdf() {
       try {
-        const { data: conv, error: convError } = await supabase
-          .from("conversations")
-          .select("id, active_pdf_file_id, pdf_enabled")
-          .eq("id", currentConversationId)
-          .eq("user_id", userId)
-          .maybeSingle();
-
-        if (convError) {
-          console.error(
-            "Erro ao carregar conversa (PDF state):",
-            convError.message
-          );
-          return;
-        }
-
-        if (activeConversationIdRef.current !== currentConversationId) return;
-
-        const pdfEnabled = Boolean((conv as any)?.pdf_enabled);
-        const activePdfId = (conv as any)?.active_pdf_file_id as
-          | string
-          | null
-          | undefined;
-
-        if (!pdfEnabled) {
-          setAttachedPdf(null);
-          setShowPdfHint(false);
-          return;
-        }
-
-        if (activePdfId) {
-          const status = await fetchPdfStatus(activePdfId, currentConversationId);
-          if (status) {
-            setAttachedPdf(status);
-            const uiStatus = classifyPdfUiStatus(status);
-            setShowPdfHint(
-              uiStatus === "no_text" ||
-                uiStatus === "technical_error" ||
-                uiStatus === "large"
-            );
-          }
-          return;
-        }
-
-        const { data: lastPdf, error: lastPdfError } = await supabase
-          .from("pdf_files")
-          .select("id, created_at")
-          .eq("conversation_id", currentConversationId)
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (lastPdfError) {
-          console.error("Erro ao carregar último PDF:", lastPdfError.message);
-          setAttachedPdf(null);
-          return;
-        }
-
-        if (activeConversationIdRef.current !== currentConversationId) return;
-        if (!lastPdf?.id) {
-          setAttachedPdf(null);
-          setShowPdfHint(false);
-          return;
-        }
-
-        const status = await fetchPdfStatus(
-          String((lastPdf as any).id),
-          currentConversationId
-        );
-        if (status) {
-          setAttachedPdf(status);
-          const uiStatus = classifyPdfUiStatus(status);
-          setShowPdfHint(
-            uiStatus === "no_text" ||
-              uiStatus === "technical_error" ||
-              uiStatus === "large"
-          );
-        }
-
-        supabase
-          .from("conversations")
-          .update({ active_pdf_file_id: (lastPdf as any).id, pdf_enabled: true } as any)
-          .eq("id", currentConversationId)
-          .eq("user_id", userId)
-          .then(({ error }: any) => {
-            if (error) {
-              console.error(
-                "Falha ao setar active_pdf_file_id (fallback):",
-                error.message
-              );
-            }
-          });
+        await loadConversationPdfs(currentConversationId);
       } catch (e) {
-        console.error("Erro inesperado ao carregar PDF anexado:", e);
+        console.error("Erro inesperado ao carregar PDFs anexados:", e);
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
+        setShowPdfHint(false);
       }
     }
 
     loadMessages();
     loadAttachedPdf();
-  }, [activeConversationId, supabase, userId, fetchPdfStatus]);
+  }, [activeConversationId, supabase, userId, loadConversationPdfs]);
 
   async function createConversation(
     shouldResetState: boolean = false
@@ -746,7 +885,9 @@ export default function ChatPageClient({
 
       if (shouldResetState) {
         setMessages([]);
-        setAttachedPdf(null);
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
         setShowPdfQuickActions(false);
         setActionToast(null);
         setShowPdfHint(false);
@@ -796,7 +937,9 @@ export default function ChatPageClient({
     setMessages([]);
     setLoadingMessages(true);
 
-    setAttachedPdf(null);
+    setAttachedPdfs([]);
+    setActivePdfId(null);
+    setSelectedPdfIds([]);
     setShowPdfQuickActions(false);
     setIsMobileSidebarOpen(false);
     setShowPdfHint(false);
@@ -832,7 +975,9 @@ export default function ChatPageClient({
       activeConversationIdRef.current = null;
 
       setMessages([]);
-      setAttachedPdf(null);
+      setAttachedPdfs([]);
+      setActivePdfId(null);
+      setSelectedPdfIds([]);
       setShowPdfQuickActions(false);
       setActionToast(null);
       setShowPdfHint(false);
@@ -851,6 +996,20 @@ export default function ChatPageClient({
     return created;
   }
 
+  function getEffectivePdfSelectionForChat() {
+    if (!attachedPdfs.length) {
+      return {
+        pdfMode: "all" as const,
+        selectedPdfIds: [] as string[],
+      };
+    }
+
+    return {
+      pdfMode: "selected" as const,
+      selectedPdfIds,
+    };
+  }
+
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
     if (!trimmed) return;
@@ -860,6 +1019,16 @@ export default function ChatPageClient({
         type: "warning",
         persistent: true,
         cta: blockedCta,
+      });
+      return;
+    }
+
+    const pdfSelection = getEffectivePdfSelectionForChat();
+
+    if (attachedPdfs.length > 0 && pdfSelection.selectedPdfIds.length === 0) {
+      showToast("Selecione pelo menos 1 PDF para conversar no chat.", {
+        type: "warning",
+        persistent: true,
       });
       return;
     }
@@ -927,7 +1096,12 @@ export default function ChatPageClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ac.signal,
-        body: JSON.stringify({ conversationId, message: trimmed }),
+        body: JSON.stringify({
+          conversationId,
+          message: trimmed,
+          pdfMode: pdfSelection.pdfMode,
+          selectedPdfIds: pdfSelection.selectedPdfIds,
+        }),
       });
 
       if (!res.ok) {
@@ -1102,7 +1276,7 @@ export default function ChatPageClient({
     switch (kind) {
       case "resumo":
         prompt = `
-Com base no PDF anexado ( ${attachedPdf.fileName} ). Faça um resumo objetivo e didático, em linguagem simples, destacando:
+Com base no PDF ativo anexado ( ${attachedPdf.fileName} ). Faça um resumo objetivo e didático, em linguagem simples, destacando:
 - Contexto geral do documento;
 - Principais pontos normativos ou orientações;
 - Impactos práticos para a administração pública municipal.
@@ -1113,7 +1287,7 @@ Organize a resposta em tópicos e parágrafos curtos.
 
       case "pontos":
         prompt = `
-Considerando apenas o conteúdo do PDF anexado ( ${attachedPdf.fileName} ). Liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
+Considerando apenas o conteúdo do PDF ativo anexado ( ${attachedPdf.fileName} ). Liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
 - Obrigações principais;
 - Prazos relevantes;
 - Riscos para a administração pública municipal em caso de descumprimento.
@@ -1124,7 +1298,7 @@ Explique de forma clara, em linguagem acessível, e organize em tópicos.
 
       case "irregularidade":
         prompt = `
-Com base no conteúdo do PDF anexado ( ${attachedPdf.fileName} ). Identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção jurídica,
+Com base no conteúdo do PDF ativo anexado ( ${attachedPdf.fileName} ). Identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção jurídica,
 tanto formais quanto materiais, que possam gerar risco para a administração pública municipal.
 Aponte:
 - Dispositivos que possam gerar dúvidas ou conflitos com a legislação vigente;
@@ -1391,15 +1565,19 @@ Organize a resposta em tópicos, com explicações objetivas.
       };
 
       const status = await fetchPdfStatus(data.id, conversationId);
-      if (status) {
-        setAttachedPdf(status);
-      } else {
-        setAttachedPdf({
-          id: data.id,
-          fileName: data.fileName,
-          fileSize: data.fileSize,
-        });
-      }
+      const nextPdf: AttachedPdf = status ?? {
+        id: data.id,
+        fileName: data.fileName,
+        fileSize: data.fileSize,
+      };
+
+      setAttachedPdfs((prev) => {
+        const filtered = prev.filter((item) => item.id !== nextPdf.id);
+        return [...filtered, nextPdf];
+      });
+
+      setActivePdfId(data.id);
+      await loadConversationPdfs(conversationId);
 
       fetch("/api/pdf/index", {
         method: "POST",
@@ -1442,7 +1620,7 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
   }
 
-  async function handleRemovePdf() {
+  async function handleRemovePdf(pdfId: string) {
     if (isBlocked) {
       showToast(blockedMessage, {
         type: "warning",
@@ -1455,7 +1633,9 @@ Organize a resposta em tópicos, com explicações objetivas.
     try {
       const conversationId = activeConversationIdRef.current;
       if (!conversationId) {
-        setAttachedPdf(null);
+        setAttachedPdfs([]);
+        setActivePdfId(null);
+        setSelectedPdfIds([]);
         setShowPdfQuickActions(false);
         setShowPdfHint(false);
         return;
@@ -1464,7 +1644,7 @@ Organize a resposta em tópicos, com explicações objetivas.
       const res = await fetch("/api/pdf/detach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId }),
+        body: JSON.stringify({ conversationId, pdfFileId: pdfId }),
       });
 
       if (!res.ok) {
@@ -1476,9 +1656,38 @@ Organize a resposta em tópicos, com explicações objetivas.
         return;
       }
 
-      setAttachedPdf(null);
+      const data = (await res.json().catch(() => null)) as
+        | {
+            activePdfFileId?: string | null;
+          }
+        | null;
+
+      const remaining = attachedPdfs.filter((pdf) => pdf.id !== pdfId);
+      setAttachedPdfs(remaining);
+      setSelectedPdfIds((prev) => prev.filter((id) => id !== pdfId));
       setShowPdfQuickActions(false);
-      setShowPdfHint(false);
+
+      const nextActivePdfId =
+        typeof data?.activePdfFileId === "string" && data.activePdfFileId.trim()
+          ? data.activePdfFileId
+          : remaining[remaining.length - 1]?.id ?? null;
+
+      setActivePdfId(nextActivePdfId);
+
+      const nextActivePdf =
+        remaining.find((pdf) => pdf.id === nextActivePdfId) ??
+        remaining[remaining.length - 1] ??
+        null;
+
+      const uiStatus = classifyPdfUiStatus(nextActivePdf);
+      setShowPdfHint(
+        uiStatus === "no_text" ||
+          uiStatus === "technical_error" ||
+          uiStatus === "large"
+      );
+
+      await loadConversationPdfs(conversationId);
+
       showToast("PDF desanexado.", {
         type: "success",
         persistent: false,
@@ -1504,13 +1713,17 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
 
     const conversationId = activeConversationIdRef.current;
+    const currentAttachedPdf = attachedPdf;
 
-    if (conversationId) {
+    if (conversationId && currentAttachedPdf?.id) {
       try {
         const res = await fetch("/api/pdf/detach", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversationId }),
+          body: JSON.stringify({
+            conversationId,
+            pdfFileId: currentAttachedPdf.id,
+          }),
         });
 
         if (!res.ok) {
@@ -1521,6 +1734,8 @@ Organize a resposta em tópicos, com explicações objetivas.
           });
           return;
         }
+
+        await loadConversationPdfs(conversationId);
       } catch (e) {
         console.error("Erro ao desanexar PDF:", e);
         showToast("Não consegui desanexar o PDF agora. Tente novamente.", {
@@ -1531,7 +1746,6 @@ Organize a resposta em tópicos, com explicações objetivas.
       }
     }
 
-    setAttachedPdf(null);
     setShowPdfQuickActions(false);
     setShowPdfHint(false);
 
@@ -1546,6 +1760,15 @@ Organize a resposta em tópicos, com explicações objetivas.
 
   function handleDismissPdfHint() {
     setShowPdfHint(false);
+  }
+
+  function toggleSelectedPdf(pdfId: string) {
+    setSelectedPdfIds((prev) => {
+      if (prev.includes(pdfId)) {
+        return prev.filter((id) => id !== pdfId);
+      }
+      return [...prev, pdfId];
+    });
   }
 
   const toastStyles = useMemo(() => {
@@ -1578,7 +1801,6 @@ Organize a resposta em tópicos, com explicações objetivas.
   }, [toast]);
 
   const renderMain = () => {
-    const badge = getPdfBadge(attachedPdf);
     const hint = getPdfHint(attachedPdf);
 
     const showHint =
@@ -1697,12 +1919,12 @@ Organize a resposta em tópicos, com explicações objetivas.
               </div>
             )}
 
-            <div className="mb-2 flex flex-wrap items-center gap-3">
+            <div className="mb-2 flex items-center gap-2">
               <button
                 type="button"
                 onClick={handlePdfButtonClick}
                 disabled={isBlocked || accessLoading || isUploadingPdf}
-                className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
+                className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
                   isBlocked || accessLoading || isUploadingPdf
                     ? "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
                     : "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
@@ -1719,80 +1941,138 @@ Organize a resposta em tópicos, com explicações objetivas.
                 onChange={handlePdfChange}
               />
 
-              {attachedPdf && (
-                <div className="flex items-center gap-2 rounded-full bg-[#1b3a56] px-4 py-2 text-[11px] text-slate-100">
-                  <span className="max-w-[220px] truncate">{attachedPdf.fileName}</span>
-                  <span className="opacity-80">
-                    {Math.round(attachedPdf.fileSize / 1024)} KB
-                  </span>
+              <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
+                <div className="flex w-max items-center gap-2 pr-1">
+                  {attachedPdfs.map((pdf) => {
+                    const isActivePdf = pdf.id === attachedPdf?.id;
+                    const isSelectedPdf = selectedPdfIds.includes(pdf.id);
+                    const itemBadge = getPdfBadge(pdf);
 
-                  {badge && (
-                    <span className="ml-1 rounded-full bg-black/20 px-2 py-1 text-[10px] opacity-95">
-                      {badge}
-                    </span>
-                  )}
+                    return (
+                      <div
+                        key={pdf.id}
+                        className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-3 text-[10px] ${
+                          isActivePdf
+                            ? "border-white/40 bg-[#244861] text-slate-100"
+                            : "border-transparent bg-[#274760] text-slate-100"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const conversationId = activeConversationIdRef.current;
+                            if (!conversationId) return;
 
+                            const ok = await setPdfAsActive(conversationId, pdf.id);
+                            if (!ok) return;
+
+                            setActivePdfId(pdf.id);
+
+                            const uiStatus = classifyPdfUiStatus(pdf);
+                            setShowPdfHint(
+                              uiStatus === "no_text" ||
+                                uiStatus === "technical_error" ||
+                                uiStatus === "large"
+                            );
+
+                            await loadConversationPdfs(conversationId);
+                          }}
+                          className="max-w-[96px] truncate font-medium"
+                          title={pdf.fileName}
+                        >
+                          {truncatePdfName(pdf.fileName, 9)}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleSelectedPdf(pdf.id)}
+                          className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
+                            isSelectedPdf
+                              ? "bg-emerald-600 text-white"
+                              : "border border-slate-300/60 bg-transparent text-transparent hover:border-slate-200"
+                          }`}
+                          title={
+                            isSelectedPdf
+                              ? "Remover da seleção do chat"
+                              : "Selecionar para o chat"
+                          }
+                        >
+                          {isSelectedPdf ? "✓" : "○"}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePdf(pdf.id)}
+                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white hover:bg-red-600"
+                          title="Excluir PDF"
+                        >
+                          ×
+                        </button>
+
+                        {itemBadge && (
+                          <span className="rounded-full bg-black/20 px-2 py-[2px] text-[9px]">
+                            {itemBadge}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {attachedPdfs.length > 0 && (
+                <div ref={quickActionsRef} className="relative shrink-0">
                   <button
                     type="button"
-                    onClick={handleRemovePdf}
-                    className="ml-1 text-slate-100 hover:text-red-400"
+                    disabled={!attachedPdf || isBlocked || accessLoading}
+                    onClick={() =>
+                      attachedPdf && setShowPdfQuickActions((prev) => !prev)
+                    }
+                    className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
+                      attachedPdf && !isBlocked && !accessLoading
+                        ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
+                        : "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
+                    }`}
                   >
-                    ×
+                    AÇÕES RÁPIDAS COM O PDF ▾
                   </button>
+
+                  {showPdfQuickActions && attachedPdf && (
+                    <div className="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPdfQuickActions(false);
+                          handlePdfQuickAction("resumo");
+                        }}
+                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                      >
+                        Resumir PDF
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPdfQuickActions(false);
+                          handlePdfQuickAction("pontos");
+                        }}
+                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                      >
+                        Pontos de Atenção (Obrigações, prazos e riscos)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPdfQuickActions(false);
+                          handlePdfQuickAction("irregularidade");
+                        }}
+                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
+                      >
+                        Identificar irregularidades
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
-
-              <div className="relative">
-                <button
-                  type="button"
-                  disabled={!attachedPdf || isBlocked || accessLoading}
-                  onClick={() =>
-                    attachedPdf && setShowPdfQuickActions((prev) => !prev)
-                  }
-                  className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-[11px] font-semibold ${
-                    attachedPdf && !isBlocked && !accessLoading
-                      ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                      : "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
-                  }`}
-                >
-                  AÇÕES RÁPIDAS COM O PDF ▾
-                </button>
-
-                {showPdfQuickActions && attachedPdf && (
-                  <div className="absolute left-0 z-10 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowPdfQuickActions(false);
-                        handlePdfQuickAction("resumo");
-                      }}
-                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                    >
-                      Resumir PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowPdfQuickActions(false);
-                        handlePdfQuickAction("pontos");
-                      }}
-                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                    >
-                      Pontos de Atenção (Obrigações, prazos e riscos)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowPdfQuickActions(false);
-                        handlePdfQuickAction("irregularidade");
-                      }}
-                      className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                    >
-                      Identificar irregularidades
-                    </button>
-                  </div>
-                )}
-              </div>
             </div>
 
             {isUploadingPdf && (

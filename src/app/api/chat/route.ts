@@ -15,11 +15,14 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const openaiApiKey = process.env.OPENAI_API_KEY;
 
-const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+const EMBEDDING_MODEL =
+  process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 const RAG_TOP_K = Math.max(2, Math.min(10, Number(process.env.RAG_TOP_K ?? 4)));
 
-const OPENAI_MODEL_WITH_PDF = process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1";
-const OPENAI_MODEL_NO_PDF = process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
+const OPENAI_MODEL_WITH_PDF =
+  process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1";
+const OPENAI_MODEL_NO_PDF =
+  process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
 
 const SSE_HEADERS: HeadersInit = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -35,6 +38,8 @@ if (!openaiApiKey) {
 } else {
   openai = new OpenAI({ apiKey: openaiApiKey });
 }
+
+type PdfChatMode = "active" | "all" | "selected";
 
 type MessageRow = {
   id: string;
@@ -66,17 +71,25 @@ type ConversationPdfState = {
   active_pdf_file_id: string | null;
 };
 
-type PdfChatState =
+type ConversationPdfLinkRow = {
+  pdf_file_id: string | null;
+  is_active: boolean | null;
+  created_at: string | null;
+};
+
+type OrderedPdfLink = {
+  pdfFileId: string;
+  isActive: boolean;
+};
+
+type MatchPdfChunkRow = {
+  chunk_index: number;
+  content: string;
+};
+
+type PdfResolution =
   | {
-      kind: "none";
-      pdfRow: null;
-      pdfContext: "";
-      openaiFileId: null;
-      userError: null;
-      ocrSuggested: false;
-    }
-  | {
-      kind: "ready_context";
+      status: "ready_context";
       pdfRow: PdfFileRow;
       pdfContext: string;
       openaiFileId: null;
@@ -84,7 +97,7 @@ type PdfChatState =
       ocrSuggested: false;
     }
   | {
-      kind: "ready_file";
+      status: "ready_file";
       pdfRow: PdfFileRow;
       pdfContext: "";
       openaiFileId: string;
@@ -92,7 +105,7 @@ type PdfChatState =
       ocrSuggested: false;
     }
   | {
-      kind: "processing";
+      status: "processing";
       pdfRow: PdfFileRow;
       pdfContext: "";
       openaiFileId: null;
@@ -100,7 +113,7 @@ type PdfChatState =
       ocrSuggested: false;
     }
   | {
-      kind: "no_text";
+      status: "no_text";
       pdfRow: PdfFileRow;
       pdfContext: "";
       openaiFileId: null;
@@ -108,7 +121,7 @@ type PdfChatState =
       ocrSuggested: true;
     }
   | {
-      kind: "error";
+      status: "error";
       pdfRow: PdfFileRow;
       pdfContext: "";
       openaiFileId: null;
@@ -116,12 +129,84 @@ type PdfChatState =
       ocrSuggested: false;
     }
   | {
-      kind: "skipped_large";
+      status: "skipped_large";
       pdfRow: PdfFileRow;
       pdfContext: "";
       openaiFileId: null;
       userError: string;
       ocrSuggested: false;
+    };
+
+type PdfChatState =
+  | {
+      kind: "none";
+      pdfRows: [];
+      pdfContext: "";
+      openaiFileId: null;
+      userError: null;
+      ocrSuggested: false;
+      pdfCount: 0;
+      activePdfFileId: null;
+    }
+  | {
+      kind: "ready_context";
+      pdfRows: PdfFileRow[];
+      pdfContext: string;
+      openaiFileId: null;
+      userError: null;
+      ocrSuggested: false;
+      pdfCount: number;
+      activePdfFileId: string | null;
+    }
+  | {
+      kind: "ready_file";
+      pdfRows: [PdfFileRow];
+      pdfContext: "";
+      openaiFileId: string;
+      userError: null;
+      ocrSuggested: false;
+      pdfCount: 1;
+      activePdfFileId: string | null;
+    }
+  | {
+      kind: "processing";
+      pdfRows: PdfFileRow[];
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+      pdfCount: number;
+      activePdfFileId: string | null;
+    }
+  | {
+      kind: "no_text";
+      pdfRows: PdfFileRow[];
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: true;
+      pdfCount: number;
+      activePdfFileId: string | null;
+    }
+  | {
+      kind: "error";
+      pdfRows: PdfFileRow[];
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+      pdfCount: number;
+      activePdfFileId: string | null;
+    }
+  | {
+      kind: "skipped_large";
+      pdfRows: PdfFileRow[];
+      pdfContext: "";
+      openaiFileId: null;
+      userError: string;
+      ocrSuggested: false;
+      pdfCount: number;
+      activePdfFileId: string | null;
     };
 
 // --------------------
@@ -132,16 +217,17 @@ const MAX_PDF_CONTEXT_CHARS = 6000;
 const MAX_TOTAL_CHARS = 10000;
 const MAX_EXTRACTED_TEXT_CHARS = 150000;
 const MAX_FULL_FILE_FALLBACK_MB = 20;
+const MAX_MULTI_PDFS_IN_CONTEXT = 3;
 
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 const PDF_PROCESSING_MESSAGE =
-  "O PDF anexado ainda está sendo processado. Aguarde alguns instantes e tente novamente.";
+  "Os PDFs anexados ainda estão sendo processados. Aguarde alguns instantes e tente novamente.";
 const PDF_TECHNICAL_MESSAGE =
-  "O PDF foi anexado, mas houve uma falha técnica no processamento. Tente reprocessar ou reenviar o arquivo.";
+  "Os PDFs foram anexados, mas houve uma falha técnica no processamento. Tente reprocessar ou reenviar o arquivo.";
 const PDF_NO_TEXT_MESSAGE =
-  "Infelizmente não consigo acessar o PDF. Faça OCR e reenvie. Use o botão FAZER OCR abaixo para abrir aplicativo.";
+  "Infelizmente não consigo acessar o conteúdo dos PDFs. Faça OCR e reenvie. Use o botão FAZER OCR abaixo para abrir aplicativo.";
 const PDF_LARGE_MESSAGE =
-  "O PDF é grande demais para processamento automático neste momento. Envie uma versão menor ou reprocessada.";
+  "Um ou mais PDFs são grandes demais para processamento automático neste momento. Envie uma versão menor ou reprocessada.";
 
 function parseCookieHeader(cookieHeader: string | null) {
   const out: Record<string, string> = {};
@@ -228,6 +314,25 @@ function normalizeText(raw: string) {
   return text.trim();
 }
 
+function isNoTextPdfError(errorText: string | null | undefined) {
+  const msg = String(errorText ?? "").toLowerCase();
+
+  return (
+    msg.includes("sem texto detectável") ||
+    msg.includes("sem texto detectavel") ||
+    msg.includes("faça ocr e reenvie") ||
+    msg.includes("imagem/escaneado") ||
+    msg.includes("sem texto detectável para indexação") ||
+    msg.includes("sem texto detectavel para indexação")
+  );
+}
+
+function buildPdfLabel(pdfRow: PdfFileRow, index?: number) {
+  const name = String(pdfRow.file_name ?? "").trim();
+  if (name) return name;
+  return `PDF ${typeof index === "number" ? index + 1 : pdfRow.id.slice(0, 8)}`;
+}
+
 async function getConversationPdfState(
   client: any,
   conversationId: string,
@@ -246,57 +351,141 @@ async function getConversationPdfState(
 
   return {
     pdf_enabled: (data as any).pdf_enabled !== false,
-    active_pdf_file_id: ((data as any).active_pdf_file_id as string | null) ?? null,
+    active_pdf_file_id:
+      ((data as any).active_pdf_file_id as string | null) ?? null,
   };
 }
 
-async function getPdfForConversation(
+async function getPdfsForConversation(
   client: any,
   conversationId: string,
   userId: string,
   state: ConversationPdfState
-) {
-  if (!state.pdf_enabled) return null;
+): Promise<PdfFileRow[]> {
+  if (!state.pdf_enabled) return [];
 
-  if (state.active_pdf_file_id) {
-    const { data } = await client
+  const { data: links, error: linksError } = await client
+    .from("conversation_pdf_links")
+    .select("pdf_file_id, is_active, created_at")
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (linksError) {
+    console.error("[/api/chat] erro ao buscar vínculos dos PDFs:", linksError);
+    return [];
+  }
+
+  const orderedIdsRaw: OrderedPdfLink[] = ((links ?? []) as ConversationPdfLinkRow[])
+    .map((item: ConversationPdfLinkRow) => ({
+      pdfFileId: String(item?.pdf_file_id ?? "").trim(),
+      isActive: item?.is_active === true,
+    }))
+    .filter((item: OrderedPdfLink) => !!item.pdfFileId);
+
+  let orderedIds: string[] = orderedIdsRaw.map(
+    (item: OrderedPdfLink) => item.pdfFileId
+  );
+
+  const activeId = String(state.active_pdf_file_id ?? "").trim();
+  if (activeId && orderedIds.includes(activeId)) {
+    orderedIds = [
+      activeId,
+      ...orderedIds.filter((pdfFileId: string) => pdfFileId !== activeId),
+    ];
+  } else {
+    const activeFromLinks = orderedIdsRaw.find(
+      (item: OrderedPdfLink) => item.isActive
+    )?.pdfFileId;
+
+    if (activeFromLinks && orderedIds.includes(activeFromLinks)) {
+      orderedIds = [
+        activeFromLinks,
+        ...orderedIds.filter(
+          (pdfFileId: string) => pdfFileId !== activeFromLinks
+        ),
+      ];
+    }
+  }
+
+  if (!orderedIds.length) {
+    const { data: latest } = await client
       .from("pdf_files")
       .select(
         "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
       )
-      .eq("id", state.active_pdf_file_id)
       .eq("conversation_id", conversationId)
       .eq("user_id", userId)
-      .maybeSingle();
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    if (!data) return null;
-    if (!data.storage_path || String(data.storage_path).includes("..")) return null;
-
-    return data as PdfFileRow;
+    const rows = (latest ?? []) as PdfFileRow[];
+    return rows.filter(
+      (row: PdfFileRow) =>
+        row.storage_path && !String(row.storage_path).includes("..")
+    );
   }
 
-  const { data: latest } = await client
+  const { data: pdfRows, error: pdfError } = await client
     .from("pdf_files")
     .select(
       "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
     )
+    .in("id", orderedIds)
     .eq("conversation_id", conversationId)
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .eq("user_id", userId);
 
-  if (!latest) return null;
-  if (!latest.storage_path || String(latest.storage_path).includes("..")) return null;
+  if (pdfError || !pdfRows) {
+    console.error("[/api/chat] erro ao buscar PDFs da conversa:", pdfError);
+    return [];
+  }
 
-  client
-    .from("conversations")
-    .update({ active_pdf_file_id: latest.id, pdf_enabled: true } as any)
-    .eq("id", conversationId)
-    .eq("user_id", userId)
-    .then(() => {});
+  const byId = new Map<string, PdfFileRow>();
+  for (const row of pdfRows as PdfFileRow[]) {
+    if (!row.storage_path || String(row.storage_path).includes("..")) continue;
+    byId.set(row.id, row);
+  }
 
-  return latest as PdfFileRow;
+  return orderedIds
+    .map((id: string) => byId.get(id) ?? null)
+    .filter(Boolean) as PdfFileRow[];
+}
+
+function applyPdfChatMode(params: {
+  pdfRows: PdfFileRow[];
+  pdfMode: PdfChatMode;
+  selectedPdfIds: string[];
+  activePdfFileId: string | null;
+}) {
+  const { pdfRows, pdfMode, selectedPdfIds, activePdfFileId } = params;
+
+  if (!pdfRows.length) return [];
+
+  if (pdfMode === "active") {
+    const activeId = String(activePdfFileId ?? "").trim();
+    if (!activeId) return pdfRows.slice(0, 1);
+    return pdfRows.filter((row) => row.id === activeId).slice(0, 1);
+  }
+
+  if (pdfMode === "selected") {
+    const selectedSet = new Set(
+      selectedPdfIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    );
+
+    if (!selectedSet.size) return [];
+
+    const filtered = pdfRows.filter((row) => selectedSet.has(row.id));
+
+    const ordered = [
+      ...selectedPdfIds
+        .map((id) => filtered.find((row) => row.id === id) ?? null)
+        .filter(Boolean),
+    ] as PdfFileRow[];
+
+    return ordered;
+  }
+
+  return pdfRows;
 }
 
 async function getQueryEmbedding(query: string): Promise<number[] | null> {
@@ -316,7 +505,10 @@ async function getQueryEmbedding(query: string): Promise<number[] | null> {
   }
 }
 
-async function uploadPdfToOpenAI(client: any, pdfRow: PdfFileRow): Promise<string | null> {
+async function uploadPdfToOpenAI(
+  client: any,
+  pdfRow: PdfFileRow
+): Promise<string | null> {
   if (!openai) return null;
 
   const { data: fileData, error: downloadError } = await client.storage
@@ -328,7 +520,9 @@ async function uploadPdfToOpenAI(client: any, pdfRow: PdfFileRow): Promise<strin
   try {
     const buffer = Buffer.from(await fileData.arrayBuffer());
     const filename = pdfRow.file_name || "documento.pdf";
-    const fileForOpenAI = await toFile(buffer, filename, { type: "application/pdf" });
+    const fileForOpenAI = await toFile(buffer, filename, {
+      type: "application/pdf",
+    });
 
     const uploaded = await openai.files.create({
       file: fileForOpenAI,
@@ -341,24 +535,20 @@ async function uploadPdfToOpenAI(client: any, pdfRow: PdfFileRow): Promise<strin
   }
 }
 
-function isNoTextPdfError(errorText: string | null | undefined) {
-  const msg = String(errorText ?? "").toLowerCase();
-
-  return (
-    msg.includes("sem texto detectável") ||
-    msg.includes("sem texto detectavel") ||
-    msg.includes("faça ocr e reenvie") ||
-    msg.includes("imagem/escaneado") ||
-    msg.includes("sem texto detectável para indexação") ||
-    msg.includes("sem texto detectavel para indexação")
-  );
-}
-
-async function buildPdfContextFromExtractedText(pdfRow: PdfFileRow, message: string) {
-  if (String(pdfRow.extracted_text_status ?? "").toLowerCase() !== "ready") return "";
+async function buildPdfContextFromExtractedText(
+  pdfRow: PdfFileRow,
+  message: string,
+  maxChars: number
+) {
+  if (String(pdfRow.extracted_text_status ?? "").toLowerCase() !== "ready") {
+    return "";
+  }
   if (!pdfRow.extracted_text) return "";
 
-  const text = clampText(normalizeText(pdfRow.extracted_text), MAX_EXTRACTED_TEXT_CHARS);
+  const text = clampText(
+    normalizeText(pdfRow.extracted_text),
+    MAX_EXTRACTED_TEXT_CHARS
+  );
 
   const chunks = chunkText(text, {
     chunkSize: 1200,
@@ -367,24 +557,30 @@ async function buildPdfContextFromExtractedText(pdfRow: PdfFileRow, message: str
   });
 
   const picked = pickRelevantChunks(chunks, message, {
-    maxChunks: 5,
-    maxChars: MAX_PDF_CONTEXT_CHARS,
+    maxChunks: 4,
+    maxChars,
     minScore: 1,
   });
 
   if (!picked.length) return "";
 
+  const label = buildPdfLabel(pdfRow);
+
   const raw = picked
-    .map((c, i) => `Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`)
+    .map(
+      (c, i) =>
+        `[${label}] Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`
+    )
     .join("\n\n---\n\n");
 
-  return clampText(raw, MAX_PDF_CONTEXT_CHARS);
+  return clampText(raw, maxChars);
 }
 
 async function buildPdfContextFromVector(
   client: any,
   pdfRow: PdfFileRow,
-  message: string
+  message: string,
+  maxChars: number
 ): Promise<string> {
   const vectorReady =
     String(pdfRow.vector_index_status ?? "").toLowerCase() === "ready" &&
@@ -403,39 +599,37 @@ async function buildPdfContextFromVector(
 
   if (matchErr || !Array.isArray(matches) || !matches.length) return "";
 
-  const raw = matches
+  const label = buildPdfLabel(pdfRow);
+
+  const raw = (matches as MatchPdfChunkRow[])
     .map(
-      (m: any, i: number) => `Trecho ${i + 1} (chunk #${m.chunk_index}):\n${m.content}`
+      (m: MatchPdfChunkRow, i: number) =>
+        `[${label}] Trecho ${i + 1} (chunk #${m.chunk_index}):\n${m.content}`
     )
     .join("\n\n---\n\n");
 
-  return clampText(raw, MAX_PDF_CONTEXT_CHARS);
+  return clampText(raw, maxChars);
 }
 
-async function resolvePdfChatState(
+async function resolveSinglePdf(
   client: any,
-  pdfRow: PdfFileRow | null,
+  pdfRow: PdfFileRow,
   userId: string,
-  message: string
-): Promise<PdfChatState> {
-  if (!pdfRow) {
-    return {
-      kind: "none",
-      pdfRow: null,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: null,
-      ocrSuggested: false,
-    };
-  }
-
+  message: string,
+  maxCharsForThisPdf: number
+): Promise<PdfResolution> {
   const extractedStatus = String(pdfRow.extracted_text_status ?? "").toLowerCase();
   const vectorStatus = String(pdfRow.vector_index_status ?? "").toLowerCase();
 
-  const vectorContext = await buildPdfContextFromVector(client, pdfRow, message);
+  const vectorContext = await buildPdfContextFromVector(
+    client,
+    pdfRow,
+    message,
+    maxCharsForThisPdf
+  );
   if (vectorContext) {
     return {
-      kind: "ready_context",
+      status: "ready_context",
       pdfRow,
       pdfContext: vectorContext,
       openaiFileId: null,
@@ -444,10 +638,14 @@ async function resolvePdfChatState(
     };
   }
 
-  const extractedContext = await buildPdfContextFromExtractedText(pdfRow, message);
+  const extractedContext = await buildPdfContextFromExtractedText(
+    pdfRow,
+    message,
+    maxCharsForThisPdf
+  );
   if (extractedContext) {
     return {
-      kind: "ready_context",
+      status: "ready_context",
       pdfRow,
       pdfContext: extractedContext,
       openaiFileId: null,
@@ -458,7 +656,7 @@ async function resolvePdfChatState(
 
   if (extractedStatus === "pending" || extractedStatus === "processing") {
     return {
-      kind: "processing",
+      status: "processing",
       pdfRow,
       pdfContext: "",
       openaiFileId: null,
@@ -470,7 +668,7 @@ async function resolvePdfChatState(
   if (extractedStatus === "error") {
     if (isNoTextPdfError(pdfRow.extracted_text_error)) {
       return {
-        kind: "no_text",
+        status: "no_text",
         pdfRow,
         pdfContext: "",
         openaiFileId: null,
@@ -480,7 +678,7 @@ async function resolvePdfChatState(
     }
 
     return {
-      kind: "error",
+      status: "error",
       pdfRow,
       pdfContext: "",
       openaiFileId: null,
@@ -491,7 +689,7 @@ async function resolvePdfChatState(
 
   if (extractedStatus === "skipped_large") {
     return {
-      kind: "skipped_large",
+      status: "skipped_large",
       pdfRow,
       pdfContext: "",
       openaiFileId: null,
@@ -522,7 +720,7 @@ async function resolvePdfChatState(
 
       if (openaiFileId) {
         return {
-          kind: "ready_file",
+          status: "ready_file",
           pdfRow,
           pdfContext: "",
           openaiFileId,
@@ -534,12 +732,188 @@ async function resolvePdfChatState(
   }
 
   return {
-    kind: "error",
+    status: "error",
     pdfRow,
     pdfContext: "",
     openaiFileId: null,
     userError: PDF_TECHNICAL_MESSAGE,
     ocrSuggested: false,
+  };
+}
+
+async function resolvePdfChatState(
+  client: any,
+  pdfRows: PdfFileRow[],
+  userId: string,
+  message: string,
+  activePdfFileId: string | null
+): Promise<PdfChatState> {
+  if (!pdfRows.length) {
+    return {
+      kind: "none",
+      pdfRows: [],
+      pdfContext: "",
+      openaiFileId: null,
+      userError: null,
+      ocrSuggested: false,
+      pdfCount: 0,
+      activePdfFileId: null,
+    };
+  }
+
+  const rowsToUse = pdfRows.slice(0, MAX_MULTI_PDFS_IN_CONTEXT);
+  const maxCharsPerPdf = Math.max(
+    1400,
+    Math.floor(MAX_PDF_CONTEXT_CHARS / Math.max(1, rowsToUse.length))
+  );
+
+  const resolutions = await Promise.all(
+    rowsToUse.map((pdfRow: PdfFileRow) =>
+      resolveSinglePdf(client, pdfRow, userId, message, maxCharsPerPdf)
+    )
+  );
+
+  const readyContexts = resolutions.filter(
+    (item: PdfResolution) => item.status === "ready_context"
+  ) as Array<Extract<PdfResolution, { status: "ready_context" }>>;
+
+  if (readyContexts.length > 0) {
+    const combinedContext = clampText(
+      readyContexts
+        .map((item) => item.pdfContext)
+        .filter(Boolean)
+        .join("\n\n====================\n\n"),
+      MAX_PDF_CONTEXT_CHARS
+    );
+
+    return {
+      kind: "ready_context",
+      pdfRows: rowsToUse,
+      pdfContext: combinedContext,
+      openaiFileId: null,
+      userError: null,
+      ocrSuggested: false,
+      pdfCount: rowsToUse.length,
+      activePdfFileId,
+    };
+  }
+
+  if (rowsToUse.length === 1) {
+    const single = resolutions[0];
+
+    if (single.status === "ready_file" && single.openaiFileId) {
+      return {
+        kind: "ready_file",
+        pdfRows: [single.pdfRow],
+        pdfContext: "",
+        openaiFileId: single.openaiFileId,
+        userError: null,
+        ocrSuggested: false,
+        pdfCount: 1,
+        activePdfFileId,
+      };
+    }
+
+    if (single.status === "processing") {
+      return {
+        kind: "processing",
+        pdfRows: rowsToUse,
+        pdfContext: "",
+        openaiFileId: null,
+        userError: single.userError,
+        ocrSuggested: false,
+        pdfCount: 1,
+        activePdfFileId,
+      };
+    }
+
+    if (single.status === "no_text") {
+      return {
+        kind: "no_text",
+        pdfRows: rowsToUse,
+        pdfContext: "",
+        openaiFileId: null,
+        userError: single.userError,
+        ocrSuggested: true,
+        pdfCount: 1,
+        activePdfFileId,
+      };
+    }
+
+    if (single.status === "skipped_large") {
+      return {
+        kind: "skipped_large",
+        pdfRows: rowsToUse,
+        pdfContext: "",
+        openaiFileId: null,
+        userError: single.userError,
+        ocrSuggested: false,
+        pdfCount: 1,
+        activePdfFileId,
+      };
+    }
+
+    return {
+      kind: "error",
+      pdfRows: rowsToUse,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_TECHNICAL_MESSAGE,
+      ocrSuggested: false,
+      pdfCount: 1,
+      activePdfFileId,
+    };
+  }
+
+  if (resolutions.some((item: PdfResolution) => item.status === "processing")) {
+    return {
+      kind: "processing",
+      pdfRows: rowsToUse,
+      pdfContext: "",
+      openaiFileId: null,
+      userError:
+        "Nenhum dos PDFs anexados está pronto para consulta ainda. Aguarde o processamento e tente novamente.",
+      ocrSuggested: false,
+      pdfCount: rowsToUse.length,
+      activePdfFileId,
+    };
+  }
+
+  if (resolutions.every((item: PdfResolution) => item.status === "no_text")) {
+    return {
+      kind: "no_text",
+      pdfRows: rowsToUse,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_NO_TEXT_MESSAGE,
+      ocrSuggested: true,
+      pdfCount: rowsToUse.length,
+      activePdfFileId,
+    };
+  }
+
+  if (resolutions.some((item: PdfResolution) => item.status === "skipped_large")) {
+    return {
+      kind: "skipped_large",
+      pdfRows: rowsToUse,
+      pdfContext: "",
+      openaiFileId: null,
+      userError: PDF_LARGE_MESSAGE,
+      ocrSuggested: false,
+      pdfCount: rowsToUse.length,
+      activePdfFileId,
+    };
+  }
+
+  return {
+    kind: "error",
+    pdfRows: rowsToUse,
+    pdfContext: "",
+    openaiFileId: null,
+    userError: PDF_TECHNICAL_MESSAGE,
+    ocrSuggested: false,
+    pdfCount: rowsToUse.length,
+    activePdfFileId,
   };
 }
 
@@ -579,10 +953,13 @@ async function registerUsageEvent(
 
 export async function POST(req: Request) {
   if (!openai || !supabaseUrl || !supabaseAnonKey) {
-    return new Response(sseEvent("error", { error: "Servidor incompleto. Verifique envs." }), {
-      status: 500,
-      headers: SSE_HEADERS,
-    });
+    return new Response(
+      sseEvent("error", { error: "Servidor incompleto. Verifique envs." }),
+      {
+        status: 500,
+        headers: SSE_HEADERS,
+      }
+    );
   }
 
   const client = createAuthClient(req) as any;
@@ -591,25 +968,39 @@ export async function POST(req: Request) {
   try {
     body = await req.json();
   } catch {
-    return new Response(sseEvent("error", { error: "Corpo inválido. JSON era esperado." }), {
-      status: 400,
-      headers: SSE_HEADERS,
-    });
+    return new Response(
+      sseEvent("error", { error: "Corpo inválido. JSON era esperado." }),
+      {
+        status: 400,
+        headers: SSE_HEADERS,
+      }
+    );
   }
 
-  const { conversationId, message, temperature } = body as {
+  const {
+    conversationId,
+    message,
+    temperature,
+    pdfMode,
+    selectedPdfIds,
+  } = body as {
     conversationId: string;
     message: string;
     temperature?: number;
+    pdfMode?: PdfChatMode;
+    selectedPdfIds?: string[];
   };
 
   const temp = parseTemperature(temperature, 0.3);
 
   if (!conversationId) {
-    return new Response(sseEvent("error", { error: "conversationId é obrigatório." }), {
-      status: 400,
-      headers: SSE_HEADERS,
-    });
+    return new Response(
+      sseEvent("error", { error: "conversationId é obrigatório." }),
+      {
+        status: 400,
+        headers: SSE_HEADERS,
+      }
+    );
   }
 
   if (!message?.trim()) {
@@ -618,6 +1009,13 @@ export async function POST(req: Request) {
       headers: SSE_HEADERS,
     });
   }
+
+  const normalizedPdfMode: PdfChatMode =
+    pdfMode === "active" || pdfMode === "selected" ? pdfMode : "all";
+
+  const normalizedSelectedPdfIds = Array.isArray(selectedPdfIds)
+    ? selectedPdfIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
 
   const { data: authData } = await client.auth.getUser();
   if (!authData?.user) {
@@ -666,10 +1064,13 @@ export async function POST(req: Request) {
     .maybeSingle();
 
   if (!conv) {
-    return new Response(sseEvent("error", { error: "Conversa inválida ou sem permissão." }), {
-      status: 403,
-      headers: SSE_HEADERS,
-    });
+    return new Response(
+      sseEvent("error", { error: "Conversa inválida ou sem permissão." }),
+      {
+        status: 403,
+        headers: SSE_HEADERS,
+      }
+    );
   }
 
   const encoder = new TextEncoder();
@@ -796,7 +1197,11 @@ export async function POST(req: Request) {
 
         const { data: userMessageRow, error: insertUserError } = await client
           .from("messages")
-          .insert({ conversation_id: conversationId, role: "user", content: message } as any)
+          .insert({
+            conversation_id: conversationId,
+            role: "user",
+            content: message,
+          } as any)
           .select("*")
           .single();
 
@@ -806,22 +1211,50 @@ export async function POST(req: Request) {
         }
 
         if (insertUserError || !userMessageRow) {
-          safeSend("error", { error: "Não foi possível salvar a mensagem do usuário." });
+          safeSend("error", {
+            error: "Não foi possível salvar a mensagem do usuário.",
+          });
           safeClose();
           return;
         }
 
         const pdfState = await getConversationPdfState(client, conversationId, userId);
-        const pdfRow = await getPdfForConversation(client, conversationId, userId, pdfState);
+        const allPdfRows = await getPdfsForConversation(
+          client,
+          conversationId,
+          userId,
+          pdfState
+        );
 
         if (aborted || closed) {
           safeClose();
           return;
         }
 
-        const pdfChatState = await resolvePdfChatState(client, pdfRow, userId, message);
+        const pdfRows = applyPdfChatMode({
+          pdfRows: allPdfRows,
+          pdfMode: normalizedPdfMode,
+          selectedPdfIds: normalizedSelectedPdfIds,
+          activePdfFileId: pdfState.active_pdf_file_id,
+        });
+
+        const pdfChatState = await resolvePdfChatState(
+          client,
+          pdfRows,
+          userId,
+          message,
+          pdfState.active_pdf_file_id
+        );
 
         if (aborted || closed) {
+          safeClose();
+          return;
+        }
+
+        if (normalizedPdfMode === "selected" && allPdfRows.length > 0 && pdfRows.length === 0) {
+          safeSend("error", {
+            error: "Nenhum PDF foi selecionado para esta pergunta.",
+          });
           safeClose();
           return;
         }
@@ -832,8 +1265,18 @@ export async function POST(req: Request) {
           userMessage: userMessageRow,
           forceWebFirst,
           pdfFound: pdfChatState.kind !== "none",
-          extractedTextStatus: pdfChatState.pdfRow?.extracted_text_status ?? null,
-          vectorIndexStatus: pdfChatState.pdfRow?.vector_index_status ?? null,
+          pdfCount: pdfChatState.pdfCount,
+          activePdfFileId: pdfChatState.activePdfFileId,
+          pdfMode: normalizedPdfMode,
+          pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
+          extractedTextStatus:
+            pdfChatState.pdfRows.length === 1
+              ? pdfChatState.pdfRows[0]?.extracted_text_status ?? null
+              : null,
+          vectorIndexStatus:
+            pdfChatState.pdfRows.length === 1
+              ? pdfChatState.pdfRows[0]?.vector_index_status ?? null
+              : null,
           ocrUrl: OCR_URL,
         });
 
@@ -856,7 +1299,11 @@ export async function POST(req: Request) {
         if (historyRows.length > 0) {
           const historyText = historyRows
             .map(
-              (m) => `${m.role === "user" ? "Usuário" : "Publ.IA"}: ${clampText(m.content, 1200)}`
+              (m: MessageRow) =>
+                `${m.role === "user" ? "Usuário" : "Publ.IA"}: ${clampText(
+                  m.content,
+                  1200
+                )}`
             )
             .join("\n\n");
 
@@ -869,9 +1316,9 @@ export async function POST(req: Request) {
 
         if (pdfChatState.kind === "ready_context" && pdfChatState.pdfContext) {
           combinedText =
-            "CONTEXTO DO PDF (trechos selecionados):\n\n" +
+            "CONTEXTO DOS PDFs ANEXADOS (trechos selecionados e identificados por arquivo):\n\n" +
             pdfChatState.pdfContext +
-            "\n\n" +
+            "\n\nINSTRUÇÃO IMPORTANTE: ao comparar documentos, cite claramente o nome de cada PDF ao mencionar diferenças, convergências, riscos ou contradições.\n\n" +
             combinedText;
         }
 
@@ -886,7 +1333,10 @@ export async function POST(req: Request) {
         const userContent: any[] = [{ type: "input_text", text: combinedText }];
 
         if (pdfChatState.kind === "ready_file" && pdfChatState.openaiFileId) {
-          userContent.push({ type: "input_file", file_id: pdfChatState.openaiFileId });
+          userContent.push({
+            type: "input_file",
+            file_id: pdfChatState.openaiFileId,
+          });
         }
 
         const input: any[] = [{ role: "user", content: userContent }];
@@ -931,7 +1381,8 @@ export async function POST(req: Request) {
             if (event?.type === "response.completed") {
               const usage = event?.response?.usage;
 
-              inputTokensUsed = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0) || 0;
+              inputTokensUsed =
+                Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0) || 0;
               outputTokensUsed =
                 Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0) || 0;
             }
@@ -947,23 +1398,28 @@ export async function POST(req: Request) {
         }
 
         if (!assistantText.trim()) {
-          safeSend("error", { error: "Não foi possível obter uma resposta da IA." });
+          safeSend("error", {
+            error: "Não foi possível obter uma resposta da IA.",
+          });
           safeClose();
           return;
         }
 
-        const { data: assistantMessageRow, error: insertAssistantError } = await client
-          .from("messages")
-          .insert({
-            conversation_id: conversationId,
-            role: "assistant",
-            content: assistantText,
-          } as any)
-          .select("*")
-          .single();
+        const { data: assistantMessageRow, error: insertAssistantError } =
+          await client
+            .from("messages")
+            .insert({
+              conversation_id: conversationId,
+              role: "assistant",
+              content: assistantText,
+            } as any)
+            .select("*")
+            .single();
 
         if (insertAssistantError || !assistantMessageRow) {
-          safeSend("error", { error: "Não foi possível salvar a resposta da IA." });
+          safeSend("error", {
+            error: "Não foi possível salvar a resposta da IA.",
+          });
           safeClose();
           return;
         }
@@ -981,6 +1437,11 @@ export async function POST(req: Request) {
             model,
             hasPdf: pdfChatState.kind !== "none",
             pdfKind: pdfChatState.kind,
+            pdfMode: normalizedPdfMode,
+            pdfCount: pdfChatState.pdfCount,
+            activePdfFileId: pdfChatState.activePdfFileId,
+            selectedPdfIds: normalizedSelectedPdfIds,
+            pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
             forceWebFirst,
           },
         });
@@ -989,7 +1450,9 @@ export async function POST(req: Request) {
         safeClose();
       } catch (error) {
         console.error("Erro inesperado em /api/chat:", error);
-        safeSend("error", { error: "Erro inesperado ao processar a requisição." });
+        safeSend("error", {
+          error: "Erro inesperado ao processar a requisição.",
+        });
         safeClose();
       } finally {
         req.signal.removeEventListener("abort", onAbort);

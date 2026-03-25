@@ -1,4 +1,4 @@
-// src/app/api/upload-pdf/route.ts
+//src/app/api/upload-pdf/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -9,6 +9,9 @@ import {
 const PDF_UPLOAD_MAX_MB = 30;
 const TRIAL_PDF_LIMIT = 10;
 const SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
+
+const TRIAL_PDFS_PER_CONVERSATION = 1;
+const PAID_PDFS_PER_CONVERSATION = 3;
 
 type PdfPeriod = "account" | "month" | "admin" | null;
 
@@ -185,6 +188,90 @@ async function validatePdfUploadByPlan(
   };
 }
 
+async function getConversationPdfCount(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  conversationId: string
+) {
+  const { count, error } = await supabase
+    .from("conversation_pdf_links")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId);
+
+  if (error) {
+    throw new Error(
+      `Erro ao contar PDFs vinculados à conversa: ${error.message}`
+    );
+  }
+
+  return count ?? 0;
+}
+
+function getConversationPdfLimit(params: {
+  accessStatus: AccessStatus;
+  isAdmin: boolean;
+}) {
+  const { accessStatus, isAdmin } = params;
+
+  if (isAdmin) {
+    return PAID_PDFS_PER_CONVERSATION;
+  }
+
+  if (accessStatus === "trial_active") {
+    return TRIAL_PDFS_PER_CONVERSATION;
+  }
+
+  return PAID_PDFS_PER_CONVERSATION;
+}
+
+async function setConversationActivePdf(params: {
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  conversationId: string;
+  userId: string;
+  pdfFileId: string;
+}) {
+  const { supabase, conversationId, userId, pdfFileId } = params;
+
+  const { error: deactivateError } = await supabase
+    .from("conversation_pdf_links")
+    .update({ is_active: false } as never)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId);
+
+  if (deactivateError) {
+    throw new Error(
+      `Erro ao desativar PDFs anteriores da conversa: ${deactivateError.message}`
+    );
+  }
+
+  const { error: activateError } = await supabase
+    .from("conversation_pdf_links")
+    .update({ is_active: true } as never)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
+    .eq("pdf_file_id", pdfFileId);
+
+  if (activateError) {
+    throw new Error(
+      `Erro ao ativar o PDF atual da conversa: ${activateError.message}`
+    );
+  }
+
+  const { error: conversationUpdateError } = await supabase
+    .from("conversations")
+    .update({
+      active_pdf_file_id: pdfFileId,
+      pdf_enabled: true,
+    } as never)
+    .eq("id", conversationId)
+    .eq("user_id", userId);
+
+  if (conversationUpdateError) {
+    throw new Error(
+      `Erro ao atualizar conversa com PDF ativo: ${conversationUpdateError.message}`
+    );
+  }
+}
+
 async function registerPdfUploadEvent(params: {
   supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
   userId: string;
@@ -323,6 +410,43 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const conversationPdfLimit = getConversationPdfLimit({
+      accessStatus: planValidation.accessStatus,
+      isAdmin: planValidation.isAdmin,
+    });
+
+    const conversationPdfCount = await getConversationPdfCount(
+      supabase,
+      conversationId
+    );
+
+    if (conversationPdfCount >= conversationPdfLimit) {
+      return NextResponse.json(
+        {
+          error:
+            planValidation.accessStatus === "trial_active" &&
+            !planValidation.isAdmin
+              ? `No trial, cada conversa pode ter até ${TRIAL_PDFS_PER_CONVERSATION} PDF.`
+              : `Esta conversa já atingiu o limite de ${conversationPdfLimit} PDFs vinculados.`,
+          accessStatus: planValidation.accessStatus,
+          access_status: planValidation.accessStatus,
+          isAdmin: planValidation.isAdmin,
+          conversationPdfUsage: {
+            limit: conversationPdfLimit,
+            used: conversationPdfCount,
+            remaining: Math.max(conversationPdfLimit - conversationPdfCount, 0),
+          },
+          pdfUsage: {
+            limit: planValidation.limit,
+            used: planValidation.used,
+            remaining: planValidation.remaining,
+            period: planValidation.period,
+          },
+        },
+        { status: 403 }
+      );
+    }
+
     const pdfInsertPayload = {
       user_id: user.id,
       conversation_id: conversationId,
@@ -346,19 +470,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { error: conversationUpdateError } = await supabase
-      .from("conversations")
-      .update({
-        active_pdf_file_id: (insertedPdf as { id: string }).id,
-        pdf_enabled: true,
-      } as never)
-      .eq("id", conversationId)
-      .eq("user_id", user.id);
+    const insertedPdfId = (insertedPdf as { id: string }).id;
 
-    if (conversationUpdateError) {
+    const { error: linkInsertError } = await supabase
+      .from("conversation_pdf_links")
+      .insert({
+        conversation_id: conversationId,
+        pdf_file_id: insertedPdfId,
+        user_id: user.id,
+        is_active: false,
+      } as never);
+
+    if (linkInsertError) {
       console.error(
-        "Erro ao atualizar conversa com PDF ativo:",
-        conversationUpdateError.message
+        "Erro ao salvar conversation_pdf_links:",
+        linkInsertError.message
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível vincular o PDF à conversa." },
+        { status: 500 }
+      );
+    }
+
+    try {
+      await setConversationActivePdf({
+        supabase,
+        conversationId,
+        userId: user.id,
+        pdfFileId: insertedPdfId,
+      });
+    } catch (activePdfError) {
+      console.error(activePdfError);
+
+      return NextResponse.json(
+        {
+          error: "O PDF foi salvo, mas não foi possível defini-lo como ativo.",
+        },
+        { status: 500 }
       );
     }
 
@@ -381,7 +530,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       {
-        id: (insertedPdf as { id: string }).id,
+        id: insertedPdfId,
         fileName:
           (insertedPdf as { file_name?: string }).file_name ?? fileName,
         fileSize: Number(
@@ -397,6 +546,15 @@ export async function POST(request: NextRequest) {
               : Math.max(planValidation.remaining - 1, 0),
           period: planValidation.period,
         },
+        conversationPdfUsage: {
+          limit: conversationPdfLimit,
+          used: conversationPdfCount + 1,
+          remaining: Math.max(
+            conversationPdfLimit - (conversationPdfCount + 1),
+            0
+          ),
+        },
+        activePdfFileId: insertedPdfId,
       },
       { status: 200 }
     );
