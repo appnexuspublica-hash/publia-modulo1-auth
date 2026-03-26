@@ -20,6 +20,8 @@ type ExistingUserAccess = {
   subscription_ends_at: string | null;
 };
 
+type LogProcessingStatus = "received" | "ignored" | "processed" | "error";
+
 function onlyDigits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
@@ -366,8 +368,10 @@ function resolveDates(
     new Date().toISOString();
 
   const startedAt =
-    getEarlierDate(existingAccess?.subscription_started_at ?? null, baseStartedAt) ??
-    baseStartedAt;
+    getEarlierDate(
+      existingAccess?.subscription_started_at ?? null,
+      baseStartedAt
+    ) ?? baseStartedAt;
 
   let calculatedEndsAt: string;
 
@@ -410,6 +414,56 @@ function getActivationAction(
 }
 
 export async function POST(request: NextRequest) {
+  let supabase = null as ReturnType<typeof createSupabaseAdminClient> | null;
+  let payload: unknown = null;
+  let logId: string | null = null;
+  let eventType = "";
+  let orderStatus = "";
+  let cpfCnpj = "";
+  let subscriptionId: string | null = null;
+  let orderId: string | null = null;
+
+  const finish = async (
+    status: LogProcessingStatus,
+    body: Record<string, unknown>,
+    httpStatus: number,
+    extra?: {
+      action?: string | null;
+      reason?: string | null;
+      errorMessage?: string | null;
+      userId?: string | null;
+    }
+  ) => {
+    if (supabase && logId) {
+      const { error: logUpdateError } = await supabase
+        .from("kiwify_webhook_logs")
+        .update({
+          processing_status: status,
+          action: extra?.action ?? null,
+          reason: extra?.reason ?? null,
+          error_message: extra?.errorMessage ?? null,
+          user_id: extra?.userId ?? null,
+          event_type: eventType || null,
+          order_status: orderStatus || null,
+          cpf_cnpj: cpfCnpj || null,
+          order_id: orderId,
+          subscription_id: subscriptionId,
+          response: body,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", logId);
+
+      if (logUpdateError) {
+        console.error(
+          "[kiwify/webhook] erro ao atualizar log do webhook:",
+          logUpdateError
+        );
+      }
+    }
+
+    return NextResponse.json(body, { status: httpStatus });
+  };
+
   try {
     const url = new URL(request.url);
     const signature = url.searchParams.get("signature");
@@ -441,13 +495,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const payload = (await request.json()) as unknown;
+    payload = (await request.json()) as unknown;
 
-    const eventType = getEventType(payload);
-    const orderStatus = getOrderStatus(payload);
-    const cpfCnpj = getCustomerCpfCnpj(payload);
-    const subscriptionId = getSubscriptionId(payload);
-    const orderId = getOrderId(payload);
+    eventType = getEventType(payload);
+    orderStatus = getOrderStatus(payload);
+    cpfCnpj = getCustomerCpfCnpj(payload);
+    subscriptionId = getSubscriptionId(payload);
+    orderId = getOrderId(payload);
 
     console.log("[kiwify/webhook] evento recebido", {
       eventType,
@@ -457,17 +511,48 @@ export async function POST(request: NextRequest) {
       orderId,
     });
 
-    if (!cpfCnpj || (cpfCnpj.length !== 11 && cpfCnpj.length !== 14)) {
-      return NextResponse.json({
-        ok: true,
-        ignored: true,
-        reason: "cpf_cnpj_not_found_or_invalid",
-        eventType,
-        orderStatus,
-      });
+    supabase = createSupabaseAdminClient();
+
+    const { data: logInsert, error: logInsertError } = await supabase
+      .from("kiwify_webhook_logs")
+      .insert({
+        event_type: eventType || null,
+        order_status: orderStatus || null,
+        processing_status: "received",
+        cpf_cnpj: cpfCnpj || null,
+        order_id: orderId,
+        subscription_id: subscriptionId,
+        payload: payload,
+        updated_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (logInsertError) {
+      console.error(
+        "[kiwify/webhook] erro ao criar log inicial do webhook:",
+        logInsertError
+      );
+    } else {
+      logId = logInsert?.id ?? null;
     }
 
-    const supabase = createSupabaseAdminClient();
+    if (!cpfCnpj || (cpfCnpj.length !== 11 && cpfCnpj.length !== 14)) {
+      return finish(
+        "ignored",
+        {
+          ok: true,
+          ignored: true,
+          reason: "cpf_cnpj_not_found_or_invalid",
+          eventType,
+          orderStatus,
+        },
+        200,
+        {
+          reason: "cpf_cnpj_not_found_or_invalid",
+        }
+      );
+    }
 
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
@@ -478,24 +563,35 @@ export async function POST(request: NextRequest) {
     if (profileError) {
       console.error("[kiwify/webhook] erro ao buscar profile:", profileError);
 
-      return NextResponse.json(
+      return finish(
+        "error",
         {
           ok: false,
           error: "Erro ao buscar perfil do comprador.",
         },
-        { status: 500 }
+        500,
+        {
+          errorMessage: "Erro ao buscar perfil do comprador.",
+        }
       );
     }
 
     if (!profile?.user_id) {
-      return NextResponse.json({
-        ok: true,
-        ignored: true,
-        reason: "profile_not_found",
-        cpfCnpj,
-        eventType,
-        orderStatus,
-      });
+      return finish(
+        "ignored",
+        {
+          ok: true,
+          ignored: true,
+          reason: "profile_not_found",
+          cpfCnpj,
+          eventType,
+          orderStatus,
+        },
+        200,
+        {
+          reason: "profile_not_found",
+        }
+      );
     }
 
     const { data: existingAccess, error: existingAccessError } = await supabase
@@ -512,12 +608,17 @@ export async function POST(request: NextRequest) {
         existingAccessError
       );
 
-      return NextResponse.json(
+      return finish(
+        "error",
         {
           ok: false,
           error: "Erro ao carregar acesso atual do usuário.",
         },
-        { status: 500 }
+        500,
+        {
+          errorMessage: "Erro ao carregar acesso atual do usuário.",
+          userId: profile.user_id,
+        }
       );
     }
 
@@ -530,7 +631,8 @@ export async function POST(request: NextRequest) {
           subscription_started_at:
             existingAccess?.subscription_started_at ?? getSubscriptionStart(payload),
           subscription_ends_at:
-            existingAccess?.subscription_ends_at ?? getSubscriptionNextPayment(payload),
+            existingAccess?.subscription_ends_at ??
+            getSubscriptionNextPayment(payload),
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id" }
@@ -542,48 +644,77 @@ export async function POST(request: NextRequest) {
           expireError
         );
 
-        return NextResponse.json(
+        return finish(
+          "error",
           {
             ok: false,
             error: "Erro ao atualizar status da assinatura.",
           },
-          { status: 500 }
+          500,
+          {
+            errorMessage: "Erro ao atualizar status da assinatura.",
+            userId: profile.user_id,
+          }
         );
       }
 
-      return NextResponse.json({
-        ok: true,
-        processed: true,
-        action: "subscription_expired",
-        userId: profile.user_id,
-        cpfCnpj,
-        eventType,
-        orderStatus,
-      });
+      return finish(
+        "processed",
+        {
+          ok: true,
+          processed: true,
+          action: "subscription_expired",
+          userId: profile.user_id,
+          cpfCnpj,
+          eventType,
+          orderStatus,
+        },
+        200,
+        {
+          action: "subscription_expired",
+          userId: profile.user_id,
+        }
+      );
     }
 
     if (!isApprovalEvent(payload)) {
-      return NextResponse.json({
-        ok: true,
-        ignored: true,
-        reason: "event_not_approved",
-        cpfCnpj,
-        eventType,
-        orderStatus,
-      });
+      return finish(
+        "ignored",
+        {
+          ok: true,
+          ignored: true,
+          reason: "event_not_approved",
+          cpfCnpj,
+          eventType,
+          orderStatus,
+        },
+        200,
+        {
+          reason: "event_not_approved",
+          userId: profile.user_id,
+        }
+      );
     }
 
     const plan = mapPlan(payload) ?? existingAccess?.subscription_plan ?? null;
 
     if (!plan) {
-      return NextResponse.json({
-        ok: true,
-        ignored: true,
-        reason: "plan_not_mapped",
-        cpfCnpj,
-        eventType,
-        orderStatus,
-      });
+      return finish(
+        "ignored",
+        {
+          ok: true,
+          ignored: true,
+          reason: "plan_not_mapped",
+          cpfCnpj,
+          eventType,
+          orderStatus,
+        },
+        200,
+        {
+          reason: "plan_not_mapped",
+          userId: profile.user_id,
+        }
+      );
     }
 
     const { startedAt, endsAt } = resolveDates(payload, plan, existingAccess ?? null);
@@ -607,31 +738,76 @@ export async function POST(request: NextRequest) {
         activateError
       );
 
-      return NextResponse.json(
+      return finish(
+        "error",
         {
           ok: false,
           error: "Erro ao ativar ou renovar assinatura.",
         },
-        { status: 500 }
+        500,
+        {
+          errorMessage: "Erro ao ativar ou renovar assinatura.",
+          userId: profile.user_id,
+        }
       );
     }
 
-    return NextResponse.json({
-      ok: true,
-      processed: true,
-      action,
-      userId: profile.user_id,
-      cpfCnpj,
-      plan,
-      startedAt,
-      endsAt,
-      eventType,
-      orderStatus,
-      subscriptionId,
-      orderId,
-    });
+    return finish(
+      "processed",
+      {
+        ok: true,
+        processed: true,
+        action,
+        userId: profile.user_id,
+        cpfCnpj,
+        plan,
+        startedAt,
+        endsAt,
+        eventType,
+        orderStatus,
+        subscriptionId,
+        orderId,
+      },
+      200,
+      {
+        action,
+        userId: profile.user_id,
+      }
+    );
   } catch (error) {
     console.error("[kiwify/webhook] erro inesperado:", error);
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "Erro inesperado ao processar webhook da Kiwify.";
+
+    if (supabase && logId) {
+      const { error: logUpdateError } = await supabase
+        .from("kiwify_webhook_logs")
+        .update({
+          processing_status: "error",
+          error_message: errorMessage,
+          event_type: eventType || null,
+          order_status: orderStatus || null,
+          cpf_cnpj: cpfCnpj || null,
+          order_id: orderId,
+          subscription_id: subscriptionId,
+          response: {
+            ok: false,
+            error: "Erro inesperado ao processar webhook da Kiwify.",
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", logId);
+
+      if (logUpdateError) {
+        console.error(
+          "[kiwify/webhook] erro ao atualizar log após exceção:",
+          logUpdateError
+        );
+      }
+    }
 
     return NextResponse.json(
       {
