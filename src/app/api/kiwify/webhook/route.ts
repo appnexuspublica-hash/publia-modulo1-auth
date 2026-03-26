@@ -10,20 +10,17 @@ type AccessStatus =
   | "subscription_active"
   | "subscription_expired";
 
-type KiwifyPayload = Record<string, unknown>;
+type JsonRecord = Record<string, unknown>;
 
 function onlyDigits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function getNestedValue(
-  source: Record<string, unknown>,
-  path: string[]
-): unknown {
+function getNestedValue(source: unknown, path: string[]): unknown {
   let current: unknown = source;
 
   for (const key of path) {
@@ -37,10 +34,7 @@ function getNestedValue(
   return current ?? null;
 }
 
-function getFirstAvailable(
-  source: Record<string, unknown>,
-  paths: string[][]
-): unknown {
+function getFirstAvailable(source: unknown, paths: string[][]): unknown {
   for (const path of paths) {
     const value = getNestedValue(source, path);
 
@@ -76,10 +70,14 @@ function addYears(baseIso: string, years: number): string {
   return date.toISOString();
 }
 
-function getEventType(payload: KiwifyPayload): string {
-  if (!isRecord(payload)) return "";
+function getOrderRoot(payload: unknown): unknown {
+  return getFirstAvailable(payload, [["order"]]) ?? payload;
+}
 
-  const raw = getFirstAvailable(payload, [
+function getEventType(payload: unknown): string {
+  const root = getOrderRoot(payload);
+
+  const raw = getFirstAvailable(root, [
     ["webhook_event_type"],
     ["event"],
     ["type"],
@@ -89,22 +87,23 @@ function getEventType(payload: KiwifyPayload): string {
   return String(raw ?? "").trim().toLowerCase();
 }
 
-function getOrderStatus(payload: KiwifyPayload): string {
-  if (!isRecord(payload)) return "";
+function getOrderStatus(payload: unknown): string {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
-    ["status_do_pedido"],
+  const raw = getFirstAvailable(root, [
     ["order_status"],
+    ["status_do_pedido"],
     ["status"],
   ]);
 
   return String(raw ?? "").trim().toLowerCase();
 }
 
-function getApprovedAt(payload: KiwifyPayload): string | null {
-  if (!isRecord(payload)) return null;
+function getApprovedAt(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
+  const raw = getFirstAvailable(root, [
+    ["approved_date"],
     ["data_aprovada"],
     ["approved_at"],
     ["order_approved_at"],
@@ -113,80 +112,80 @@ function getApprovedAt(payload: KiwifyPayload): string | null {
   return parseIsoDate(raw);
 }
 
-function getCustomerCpfCnpj(payload: KiwifyPayload): string {
-  if (!isRecord(payload)) return "";
+function getCustomerCpfCnpj(payload: unknown): string {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
-    ["Cliente", "CPF"],
-    ["Cliente", "cpf"],
+  const raw = getFirstAvailable(root, [
+    ["Customer", "CPF"],
+    ["Customer", "cpf"],
+    ["Customer", "cnpj"],
+    ["customer", "CPF"],
+    ["customer", "cpf"],
+    ["customer", "cnpj"],
     ["cliente", "CPF"],
     ["cliente", "cpf"],
-    ["customer", "cpf"],
-    ["customer", "document"],
-    ["buyer", "document"],
+    ["cliente", "cnpj"],
   ]);
 
   return onlyDigits(raw);
 }
 
-function getSubscriptionStatus(payload: KiwifyPayload): string {
-  if (!isRecord(payload)) return "";
+function getSubscriptionStatus(payload: unknown): string {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "status"],
+    ["subscription", "status"],
     ["Subscrição", "status"],
     ["Subscricao", "status"],
-    ["subscription", "status"],
   ]);
 
   return String(raw ?? "").trim().toLowerCase();
 }
 
-function getSubscriptionFrequency(payload: KiwifyPayload): string {
-  if (!isRecord(payload)) return "";
+function getSubscriptionFrequency(payload: unknown): string {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "plan", "frequency"],
+    ["subscription", "plan", "frequency"],
     ["plano", "frequência"],
     ["plano", "frequencia"],
     ["plan", "frequency"],
-    ["Subscrição", "plano", "frequência"],
-    ["Subscrição", "plano", "frequencia"],
-    ["Subscricao", "plano", "frequência"],
-    ["Subscricao", "plano", "frequencia"],
-    ["subscription", "plan", "frequency"],
   ]);
 
   return String(raw ?? "").trim().toLowerCase();
 }
 
-function getSubscriptionStart(payload: KiwifyPayload): string | null {
-  if (!isRecord(payload)) return null;
+function getSubscriptionStart(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "start_date"],
+    ["subscription", "start_date"],
     ["Subscrição", "data_de_início"],
     ["Subscrição", "data_de_inicio"],
-    ["Subscricao", "data_de_início"],
     ["Subscricao", "data_de_inicio"],
-    ["subscription", "start_date"],
   ]);
 
   return parseIsoDate(raw);
 }
 
-function getSubscriptionNextPayment(payload: KiwifyPayload): string | null {
-  if (!isRecord(payload)) return null;
+function getSubscriptionNextPayment(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
 
-  const raw = getFirstAvailable(payload, [
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "next_payment"],
+    ["subscription", "next_payment"],
     ["Subscrição", "próximo_pagamento"],
     ["Subscrição", "proximo_pagamento"],
-    ["Subscricao", "próximo_pagamento"],
     ["Subscricao", "proximo_pagamento"],
-    ["subscription", "next_payment"],
   ]);
 
   return parseIsoDate(raw);
 }
 
-function mapPlan(payload: KiwifyPayload): SubscriptionPlan | null {
+function mapPlan(payload: unknown): SubscriptionPlan | null {
   const frequency = getSubscriptionFrequency(payload);
 
   if (
@@ -209,7 +208,7 @@ function mapPlan(payload: KiwifyPayload): SubscriptionPlan | null {
   return null;
 }
 
-function isApprovalEvent(payload: KiwifyPayload): boolean {
+function isApprovalEvent(payload: unknown): boolean {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
   const approvedAt = getApprovedAt(payload);
@@ -223,7 +222,8 @@ function isApprovalEvent(payload: KiwifyPayload): boolean {
     eventType.includes("approved") ||
     eventType.includes("paid") ||
     eventType.includes("renewed") ||
-    eventType === "compra_aprovada"
+    eventType === "compra_aprovada" ||
+    eventType === "order_approved"
   ) {
     return true;
   }
@@ -239,7 +239,7 @@ function isApprovalEvent(payload: KiwifyPayload): boolean {
   return false;
 }
 
-function isNegativeEvent(payload: KiwifyPayload): boolean {
+function isNegativeEvent(payload: unknown): boolean {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
   const subscriptionStatus = getSubscriptionStatus(payload);
@@ -278,7 +278,7 @@ function isNegativeEvent(payload: KiwifyPayload): boolean {
   return false;
 }
 
-function resolveDates(payload: KiwifyPayload, plan: SubscriptionPlan): {
+function resolveDates(payload: unknown, plan: SubscriptionPlan): {
   startedAt: string;
   endsAt: string;
 } {
@@ -315,6 +315,8 @@ export async function POST(request: NextRequest) {
     const expectedSignature = process.env.KIWIFY_WEBHOOK_SECRET;
 
     if (!expectedSignature) {
+      console.error("[kiwify/webhook] KIWIFY_WEBHOOK_SECRET ausente no ambiente");
+
       return NextResponse.json(
         {
           ok: false,
@@ -325,6 +327,10 @@ export async function POST(request: NextRequest) {
     }
 
     if (!signature || signature !== expectedSignature) {
+      console.error("[kiwify/webhook] assinatura inválida", {
+        received: signature,
+      });
+
       return NextResponse.json(
         {
           ok: false,
@@ -334,11 +340,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const payload = (await request.json()) as KiwifyPayload;
+    const payload = (await request.json()) as unknown;
 
     const eventType = getEventType(payload);
     const orderStatus = getOrderStatus(payload);
     const cpfCnpj = getCustomerCpfCnpj(payload);
+
+    console.log("[kiwify/webhook] evento recebido", {
+      eventType,
+      orderStatus,
+      cpfCnpj,
+    });
 
     if (!cpfCnpj || (cpfCnpj.length !== 11 && cpfCnpj.length !== 14)) {
       return NextResponse.json({
