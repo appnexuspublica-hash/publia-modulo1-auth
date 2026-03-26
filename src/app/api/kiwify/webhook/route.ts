@@ -1,27 +1,67 @@
-//src/app/api/kiwify/webhook/route.ts
+// src/app/api/kiwify/webhook/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type SubscriptionPlan = "monthly" | "annual";
+
 type AccessStatus =
   | "trial_active"
   | "trial_expired"
   | "subscription_active"
   | "subscription_expired";
 
-type KiwifyPayload = Record<string, any>;
+type KiwifyPayload = Record<string, unknown>;
 
 function onlyDigits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
-function parseDate(value: unknown): string | null {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getNestedValue(
+  source: Record<string, unknown>,
+  path: string[]
+): unknown {
+  let current: unknown = source;
+
+  for (const key of path) {
+    if (!isRecord(current)) {
+      return null;
+    }
+
+    current = current[key];
+  }
+
+  return current ?? null;
+}
+
+function getFirstAvailable(
+  source: Record<string, unknown>,
+  paths: string[][]
+): unknown {
+  for (const path of paths) {
+    const value = getNestedValue(source, path);
+
+    if (value !== null && value !== undefined && value !== "") {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function parseIsoDate(value: unknown): string | null {
   if (!value) return null;
 
-  const date = new Date(String(value));
-  if (Number.isNaN(date.getTime())) return null;
+  const parsed = new Date(String(value));
 
-  return date.toISOString();
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString();
 }
 
 function addMonths(baseIso: string, months: number): string {
@@ -36,43 +76,25 @@ function addYears(baseIso: string, years: number): string {
   return date.toISOString();
 }
 
-function getNested(obj: Record<string, any>, paths: string[][]): unknown {
-  for (const path of paths) {
-    let current: any = obj;
-
-    for (const key of path) {
-      if (current == null || typeof current !== "object") {
-        current = undefined;
-        break;
-      }
-
-      current = current[key];
-    }
-
-    if (current !== undefined && current !== null && current !== "") {
-      return current;
-    }
-  }
-
-  return null;
-}
-
 function getEventType(payload: KiwifyPayload): string {
-  const raw = getNested(payload, [
+  if (!isRecord(payload)) return "";
+
+  const raw = getFirstAvailable(payload, [
     ["webhook_event_type"],
-    ["evento", "tipo"],
     ["event"],
     ["type"],
+    ["evento"],
   ]);
 
   return String(raw ?? "").trim().toLowerCase();
 }
 
 function getOrderStatus(payload: KiwifyPayload): string {
-  const raw = getNested(payload, [
+  if (!isRecord(payload)) return "";
+
+  const raw = getFirstAvailable(payload, [
     ["status_do_pedido"],
     ["order_status"],
-    ["pedido", "status"],
     ["status"],
   ]);
 
@@ -80,18 +102,24 @@ function getOrderStatus(payload: KiwifyPayload): string {
 }
 
 function getApprovedAt(payload: KiwifyPayload): string | null {
-  const raw = getNested(payload, [
+  if (!isRecord(payload)) return null;
+
+  const raw = getFirstAvailable(payload, [
     ["data_aprovada"],
     ["approved_at"],
     ["order_approved_at"],
   ]);
 
-  return parseDate(raw);
+  return parseIsoDate(raw);
 }
 
-function getCustomerCpf(payload: KiwifyPayload): string {
-  const raw = getNested(payload, [
+function getCustomerCpfCnpj(payload: KiwifyPayload): string {
+  if (!isRecord(payload)) return "";
+
+  const raw = getFirstAvailable(payload, [
     ["Cliente", "CPF"],
+    ["Cliente", "cpf"],
+    ["cliente", "CPF"],
     ["cliente", "cpf"],
     ["customer", "cpf"],
     ["customer", "document"],
@@ -101,51 +129,64 @@ function getCustomerCpf(payload: KiwifyPayload): string {
   return onlyDigits(raw);
 }
 
-function getSubscriptionFrequency(payload: KiwifyPayload): string {
-  const raw = getNested(payload, [
-    ["Subscrição", "plano", "frequência"],
-    ["Subscrição", "plano", "frequencia"],
-    ["Subscrição", "plano", "frequency"],
-    ["plano", "frequência"],
-    ["plano", "frequencia"],
-    ["plan", "frequency"],
-  ]);
-
-  return String(raw ?? "").trim().toLowerCase();
-}
-
-function getSubscriptionStart(payload: KiwifyPayload): string | null {
-  const raw = getNested(payload, [
-    ["Subscrição", "data_de_início"],
-    ["Subscrição", "data_de_inicio"],
-    ["Subscrição", "start_date"],
-    ["subscription", "start_date"],
-  ]);
-
-  return parseDate(raw);
-}
-
-function getSubscriptionNextPayment(payload: KiwifyPayload): string | null {
-  const raw = getNested(payload, [
-    ["Subscrição", "próximo_pagamento"],
-    ["Subscrição", "proximo_pagamento"],
-    ["Subscrição", "next_payment"],
-    ["subscription", "next_payment"],
-  ]);
-
-  return parseDate(raw);
-}
-
 function getSubscriptionStatus(payload: KiwifyPayload): string {
-  const raw = getNested(payload, [
+  if (!isRecord(payload)) return "";
+
+  const raw = getFirstAvailable(payload, [
     ["Subscrição", "status"],
+    ["Subscricao", "status"],
     ["subscription", "status"],
   ]);
 
   return String(raw ?? "").trim().toLowerCase();
 }
 
-function mapPlanFromPayload(payload: KiwifyPayload): SubscriptionPlan | null {
+function getSubscriptionFrequency(payload: KiwifyPayload): string {
+  if (!isRecord(payload)) return "";
+
+  const raw = getFirstAvailable(payload, [
+    ["plano", "frequência"],
+    ["plano", "frequencia"],
+    ["plan", "frequency"],
+    ["Subscrição", "plano", "frequência"],
+    ["Subscrição", "plano", "frequencia"],
+    ["Subscricao", "plano", "frequência"],
+    ["Subscricao", "plano", "frequencia"],
+    ["subscription", "plan", "frequency"],
+  ]);
+
+  return String(raw ?? "").trim().toLowerCase();
+}
+
+function getSubscriptionStart(payload: KiwifyPayload): string | null {
+  if (!isRecord(payload)) return null;
+
+  const raw = getFirstAvailable(payload, [
+    ["Subscrição", "data_de_início"],
+    ["Subscrição", "data_de_inicio"],
+    ["Subscricao", "data_de_início"],
+    ["Subscricao", "data_de_inicio"],
+    ["subscription", "start_date"],
+  ]);
+
+  return parseIsoDate(raw);
+}
+
+function getSubscriptionNextPayment(payload: KiwifyPayload): string | null {
+  if (!isRecord(payload)) return null;
+
+  const raw = getFirstAvailable(payload, [
+    ["Subscrição", "próximo_pagamento"],
+    ["Subscrição", "proximo_pagamento"],
+    ["Subscricao", "próximo_pagamento"],
+    ["Subscricao", "proximo_pagamento"],
+    ["subscription", "next_payment"],
+  ]);
+
+  return parseIsoDate(raw);
+}
+
+function mapPlan(payload: KiwifyPayload): SubscriptionPlan | null {
   const frequency = getSubscriptionFrequency(payload);
 
   if (
@@ -198,7 +239,7 @@ function isApprovalEvent(payload: KiwifyPayload): boolean {
   return false;
 }
 
-function isNegativeSubscriptionEvent(payload: KiwifyPayload): boolean {
+function isNegativeEvent(payload: KiwifyPayload): boolean {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
   const subscriptionStatus = getSubscriptionStatus(payload);
@@ -237,25 +278,33 @@ function isNegativeSubscriptionEvent(payload: KiwifyPayload): boolean {
   return false;
 }
 
-function resolveSubscriptionDates(payload: KiwifyPayload, plan: SubscriptionPlan) {
+function resolveDates(payload: KiwifyPayload, plan: SubscriptionPlan): {
+  startedAt: string;
+  endsAt: string;
+} {
   const approvedAt = getApprovedAt(payload);
   const subscriptionStart = getSubscriptionStart(payload);
   const nextPayment = getSubscriptionNextPayment(payload);
 
   const startedAt = approvedAt ?? subscriptionStart ?? new Date().toISOString();
 
-  let endsAt: string;
   if (nextPayment) {
-    endsAt = nextPayment;
-  } else if (plan === "monthly") {
-    endsAt = addMonths(startedAt, 1);
-  } else {
-    endsAt = addYears(startedAt, 1);
+    return {
+      startedAt,
+      endsAt: nextPayment,
+    };
+  }
+
+  if (plan === "monthly") {
+    return {
+      startedAt,
+      endsAt: addMonths(startedAt, 1),
+    };
   }
 
   return {
     startedAt,
-    endsAt,
+    endsAt: addYears(startedAt, 1),
   };
 }
 
@@ -267,14 +316,20 @@ export async function POST(request: NextRequest) {
 
     if (!expectedSignature) {
       return NextResponse.json(
-        { ok: false, error: "KIWIFY_WEBHOOK_SECRET não configurada." },
+        {
+          ok: false,
+          error: "KIWIFY_WEBHOOK_SECRET não configurada no ambiente.",
+        },
         { status: 500 }
       );
     }
 
     if (!signature || signature !== expectedSignature) {
       return NextResponse.json(
-        { ok: false, error: "Webhook não autorizado." },
+        {
+          ok: false,
+          error: "Webhook não autorizado.",
+        },
         { status: 401 }
       );
     }
@@ -283,13 +338,13 @@ export async function POST(request: NextRequest) {
 
     const eventType = getEventType(payload);
     const orderStatus = getOrderStatus(payload);
-    const cpf = getCustomerCpf(payload);
+    const cpfCnpj = getCustomerCpfCnpj(payload);
 
-    if (!cpf || (cpf.length !== 11 && cpf.length !== 14)) {
+    if (!cpfCnpj || (cpfCnpj.length !== 11 && cpfCnpj.length !== 14)) {
       return NextResponse.json({
         ok: true,
         ignored: true,
-        reason: "cpf_not_found_or_invalid",
+        reason: "cpf_cnpj_not_found_or_invalid",
         eventType,
         orderStatus,
       });
@@ -300,14 +355,17 @@ export async function POST(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("user_id, cpf_cnpj")
-      .eq("cpf_cnpj", cpf)
+      .eq("cpf_cnpj", cpfCnpj)
       .maybeSingle();
 
     if (profileError) {
-      console.error("[kiwify/webhook] erro ao buscar profile", profileError);
+      console.error("[kiwify/webhook] erro ao buscar profile:", profileError);
 
       return NextResponse.json(
-        { ok: false, error: "Erro ao buscar perfil do comprador." },
+        {
+          ok: false,
+          error: "Erro ao buscar perfil do comprador.",
+        },
         { status: 500 }
       );
     }
@@ -316,30 +374,34 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         ok: true,
         ignored: true,
-        reason: "user_not_found_by_cpf",
-        cpf,
+        reason: "profile_not_found",
+        cpfCnpj,
         eventType,
         orderStatus,
       });
     }
 
-    if (isNegativeSubscriptionEvent(payload)) {
-      const { error: updateError } = await supabase
-        .from("user_access")
-        .upsert(
-          {
-            user_id: profile.user_id,
-            access_status: "subscription_expired" as AccessStatus,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "user_id" }
+    if (isNegativeEvent(payload)) {
+      const { error: expireError } = await supabase.from("user_access").upsert(
+        {
+          user_id: profile.user_id,
+          access_status: "subscription_expired" as AccessStatus,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id" }
+      );
+
+      if (expireError) {
+        console.error(
+          "[kiwify/webhook] erro ao marcar assinatura expirada:",
+          expireError
         );
 
-      if (updateError) {
-        console.error("[kiwify/webhook] erro ao expirar assinatura", updateError);
-
         return NextResponse.json(
-          { ok: false, error: "Erro ao atualizar assinatura expirada." },
+          {
+            ok: false,
+            error: "Erro ao atualizar status da assinatura.",
+          },
           { status: 500 }
         );
       }
@@ -349,7 +411,7 @@ export async function POST(request: NextRequest) {
         processed: true,
         action: "subscription_expired",
         userId: profile.user_id,
-        cpf,
+        cpfCnpj,
         eventType,
         orderStatus,
       });
@@ -360,46 +422,50 @@ export async function POST(request: NextRequest) {
         ok: true,
         ignored: true,
         reason: "event_not_approved",
-        cpf,
+        cpfCnpj,
         eventType,
         orderStatus,
       });
     }
 
-    const plan = mapPlanFromPayload(payload);
+    const plan = mapPlan(payload);
 
     if (!plan) {
       return NextResponse.json({
         ok: true,
         ignored: true,
-        reason: "unknown_plan_frequency",
-        cpf,
+        reason: "plan_not_mapped",
+        cpfCnpj,
         eventType,
         orderStatus,
       });
     }
 
-    const { startedAt, endsAt } = resolveSubscriptionDates(payload, plan);
+    const { startedAt, endsAt } = resolveDates(payload, plan);
 
-    const { error: upsertError } = await supabase
-      .from("user_access")
-      .upsert(
-        {
-          user_id: profile.user_id,
-          access_status: "subscription_active" as AccessStatus,
-          subscription_plan: plan,
-          subscription_started_at: startedAt,
-          subscription_ends_at: endsAt,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
+    const { error: activateError } = await supabase.from("user_access").upsert(
+      {
+        user_id: profile.user_id,
+        access_status: "subscription_active" as AccessStatus,
+        subscription_plan: plan,
+        subscription_started_at: startedAt,
+        subscription_ends_at: endsAt,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
+
+    if (activateError) {
+      console.error(
+        "[kiwify/webhook] erro ao ativar assinatura:",
+        activateError
       );
 
-    if (upsertError) {
-      console.error("[kiwify/webhook] erro ao ativar assinatura", upsertError);
-
       return NextResponse.json(
-        { ok: false, error: "Erro ao ativar assinatura." },
+        {
+          ok: false,
+          error: "Erro ao ativar assinatura.",
+        },
         { status: 500 }
       );
     }
@@ -409,7 +475,7 @@ export async function POST(request: NextRequest) {
       processed: true,
       action: "subscription_activated",
       userId: profile.user_id,
-      cpf,
+      cpfCnpj,
       plan,
       startedAt,
       endsAt,
@@ -417,10 +483,13 @@ export async function POST(request: NextRequest) {
       orderStatus,
     });
   } catch (error) {
-    console.error("[kiwify/webhook] erro inesperado", error);
+    console.error("[kiwify/webhook] erro inesperado:", error);
 
     return NextResponse.json(
-      { ok: false, error: "Erro inesperado ao processar webhook da Kiwify." },
+      {
+        ok: false,
+        error: "Erro inesperado ao processar webhook da Kiwify.",
+      },
       { status: 500 }
     );
   }
