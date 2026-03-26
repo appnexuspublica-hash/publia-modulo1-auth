@@ -12,6 +12,14 @@ type AccessStatus =
 
 type JsonRecord = Record<string, unknown>;
 
+type ExistingUserAccess = {
+  user_id: string;
+  access_status: AccessStatus;
+  subscription_plan: SubscriptionPlan | null;
+  subscription_started_at: string | null;
+  subscription_ends_at: string | null;
+};
+
 function onlyDigits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
@@ -185,6 +193,34 @@ function getSubscriptionNextPayment(payload: unknown): string | null {
   return parseIsoDate(raw);
 }
 
+function getSubscriptionId(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
+
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "id"],
+    ["subscription", "id"],
+    ["Subscrição", "id"],
+    ["Subscricao", "id"],
+  ]);
+
+  const value = String(raw ?? "").trim();
+  return value || null;
+}
+
+function getOrderId(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
+
+  const raw = getFirstAvailable(root, [
+    ["order_id"],
+    ["id"],
+    ["ID do pedido"],
+    ["orderId"],
+  ]);
+
+  const value = String(raw ?? "").trim();
+  return value || null;
+}
+
 function mapPlan(payload: unknown): SubscriptionPlan | null {
   const frequency = getSubscriptionFrequency(payload);
 
@@ -239,6 +275,17 @@ function isApprovalEvent(payload: unknown): boolean {
   return false;
 }
 
+function isRenewalEvent(payload: unknown): boolean {
+  const eventType = getEventType(payload);
+
+  return (
+    eventType.includes("renew") ||
+    eventType.includes("recurring") ||
+    eventType.includes("subscription_renewed") ||
+    eventType.includes("invoice_paid")
+  );
+}
+
 function isNegativeEvent(payload: unknown): boolean {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
@@ -251,7 +298,9 @@ function isNegativeEvent(payload: unknown): boolean {
     eventType.includes("delinquent") ||
     eventType.includes("refused") ||
     eventType.includes("chargeback") ||
-    eventType.includes("expired")
+    eventType.includes("expired") ||
+    eventType.includes("unpaid") ||
+    eventType.includes("overdue")
   ) {
     return true;
   }
@@ -260,7 +309,9 @@ function isNegativeEvent(payload: unknown): boolean {
     orderStatus === "refused" ||
     orderStatus === "canceled" ||
     orderStatus === "cancelled" ||
-    orderStatus === "expired"
+    orderStatus === "expired" ||
+    orderStatus === "unpaid" ||
+    orderStatus === "overdue"
   ) {
     return true;
   }
@@ -270,7 +321,9 @@ function isNegativeEvent(payload: unknown): boolean {
     subscriptionStatus === "cancelled" ||
     subscriptionStatus === "late" ||
     subscriptionStatus === "expired" ||
-    subscriptionStatus === "inactive"
+    subscriptionStatus === "inactive" ||
+    subscriptionStatus === "unpaid" ||
+    subscriptionStatus === "overdue"
   ) {
     return true;
   }
@@ -278,7 +331,27 @@ function isNegativeEvent(payload: unknown): boolean {
   return false;
 }
 
-function resolveDates(payload: unknown, plan: SubscriptionPlan): {
+function getLaterDate(a: string | null, b: string | null): string | null {
+  if (!a && !b) return null;
+  if (!a) return b;
+  if (!b) return a;
+
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
+}
+
+function getEarlierDate(a: string | null, b: string | null): string | null {
+  if (!a && !b) return null;
+  if (!a) return b;
+  if (!b) return a;
+
+  return new Date(a).getTime() <= new Date(b).getTime() ? a : b;
+}
+
+function resolveDates(
+  payload: unknown,
+  plan: SubscriptionPlan,
+  existingAccess: ExistingUserAccess | null
+): {
   startedAt: string;
   endsAt: string;
 } {
@@ -286,26 +359,54 @@ function resolveDates(payload: unknown, plan: SubscriptionPlan): {
   const subscriptionStart = getSubscriptionStart(payload);
   const nextPayment = getSubscriptionNextPayment(payload);
 
-  const startedAt = approvedAt ?? subscriptionStart ?? new Date().toISOString();
+  const baseStartedAt =
+    approvedAt ??
+    subscriptionStart ??
+    existingAccess?.subscription_started_at ??
+    new Date().toISOString();
+
+  const startedAt =
+    getEarlierDate(existingAccess?.subscription_started_at ?? null, baseStartedAt) ??
+    baseStartedAt;
+
+  let calculatedEndsAt: string;
 
   if (nextPayment) {
-    return {
-      startedAt,
-      endsAt: nextPayment,
-    };
+    calculatedEndsAt = nextPayment;
+  } else {
+    const extensionBase =
+      getLaterDate(existingAccess?.subscription_ends_at ?? null, baseStartedAt) ??
+      baseStartedAt;
+
+    calculatedEndsAt =
+      plan === "monthly"
+        ? addMonths(extensionBase, 1)
+        : addYears(extensionBase, 1);
   }
 
-  if (plan === "monthly") {
-    return {
-      startedAt,
-      endsAt: addMonths(startedAt, 1),
-    };
-  }
+  const endsAt =
+    getLaterDate(existingAccess?.subscription_ends_at ?? null, calculatedEndsAt) ??
+    calculatedEndsAt;
 
   return {
     startedAt,
-    endsAt: addYears(startedAt, 1),
+    endsAt,
   };
+}
+
+function getActivationAction(
+  payload: unknown,
+  existingAccess: ExistingUserAccess | null
+): "subscription_activated" | "subscription_renewed" {
+  if (isRenewalEvent(payload)) {
+    return "subscription_renewed";
+  }
+
+  if (existingAccess?.access_status === "subscription_active") {
+    return "subscription_renewed";
+  }
+
+  return "subscription_activated";
 }
 
 export async function POST(request: NextRequest) {
@@ -345,11 +446,15 @@ export async function POST(request: NextRequest) {
     const eventType = getEventType(payload);
     const orderStatus = getOrderStatus(payload);
     const cpfCnpj = getCustomerCpfCnpj(payload);
+    const subscriptionId = getSubscriptionId(payload);
+    const orderId = getOrderId(payload);
 
     console.log("[kiwify/webhook] evento recebido", {
       eventType,
       orderStatus,
       cpfCnpj,
+      subscriptionId,
+      orderId,
     });
 
     if (!cpfCnpj || (cpfCnpj.length !== 11 && cpfCnpj.length !== 14)) {
@@ -393,11 +498,39 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const { data: existingAccess, error: existingAccessError } = await supabase
+      .from("user_access")
+      .select(
+        "user_id, access_status, subscription_plan, subscription_started_at, subscription_ends_at"
+      )
+      .eq("user_id", profile.user_id)
+      .maybeSingle<ExistingUserAccess>();
+
+    if (existingAccessError) {
+      console.error(
+        "[kiwify/webhook] erro ao buscar user_access existente:",
+        existingAccessError
+      );
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Erro ao carregar acesso atual do usuário.",
+        },
+        { status: 500 }
+      );
+    }
+
     if (isNegativeEvent(payload)) {
       const { error: expireError } = await supabase.from("user_access").upsert(
         {
           user_id: profile.user_id,
           access_status: "subscription_expired" as AccessStatus,
+          subscription_plan: existingAccess?.subscription_plan ?? mapPlan(payload),
+          subscription_started_at:
+            existingAccess?.subscription_started_at ?? getSubscriptionStart(payload),
+          subscription_ends_at:
+            existingAccess?.subscription_ends_at ?? getSubscriptionNextPayment(payload),
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id" }
@@ -440,7 +573,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const plan = mapPlan(payload);
+    const plan = mapPlan(payload) ?? existingAccess?.subscription_plan ?? null;
 
     if (!plan) {
       return NextResponse.json({
@@ -453,7 +586,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const { startedAt, endsAt } = resolveDates(payload, plan);
+    const { startedAt, endsAt } = resolveDates(payload, plan, existingAccess ?? null);
+    const action = getActivationAction(payload, existingAccess ?? null);
 
     const { error: activateError } = await supabase.from("user_access").upsert(
       {
@@ -469,14 +603,14 @@ export async function POST(request: NextRequest) {
 
     if (activateError) {
       console.error(
-        "[kiwify/webhook] erro ao ativar assinatura:",
+        "[kiwify/webhook] erro ao ativar/renovar assinatura:",
         activateError
       );
 
       return NextResponse.json(
         {
           ok: false,
-          error: "Erro ao ativar assinatura.",
+          error: "Erro ao ativar ou renovar assinatura.",
         },
         { status: 500 }
       );
@@ -485,7 +619,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       ok: true,
       processed: true,
-      action: "subscription_activated",
+      action,
       userId: profile.user_id,
       cpfCnpj,
       plan,
@@ -493,6 +627,8 @@ export async function POST(request: NextRequest) {
       endsAt,
       eventType,
       orderStatus,
+      subscriptionId,
+      orderId,
     });
   } catch (error) {
     console.error("[kiwify/webhook] erro inesperado:", error);
