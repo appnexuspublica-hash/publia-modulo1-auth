@@ -5,6 +5,8 @@ export type AccessStatus =
   | "subscription_active"
   | "subscription_expired";
 
+export type SubscriptionPlan = "monthly" | "annual" | null;
+
 export type PdfPeriod = "account" | "month" | "admin" | null;
 
 export type PdfUsageSummary = {
@@ -21,6 +23,7 @@ export type FrontendAccessSummary = {
   blocked_message?: string | null;
   trialEndsAt: string | null;
   subscriptionEndsAt: string | null;
+  subscriptionPlan: SubscriptionPlan;
   messagesUsed: number;
   trialMessageLimit: number | null;
   pdfUsage: PdfUsageSummary;
@@ -92,6 +95,10 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
     blocked_message: data.blocked_message ?? null,
     trialEndsAt: data.trialEndsAt ?? null,
     subscriptionEndsAt: data.subscriptionEndsAt ?? null,
+    subscriptionPlan:
+      data.subscriptionPlan === "monthly" || data.subscriptionPlan === "annual"
+        ? data.subscriptionPlan
+        : null,
     messagesUsed: typeof data.messagesUsed === "number" ? data.messagesUsed : 0,
     trialMessageLimit:
       typeof data.trialMessageLimit === "number"

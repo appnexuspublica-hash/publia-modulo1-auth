@@ -45,7 +45,7 @@ function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
 
   if (isAdmin) {
     return {
-      label: "ATIVO",
+      label: "ADMIN",
       className: "bg-[#e1e1e1] text-slate-800",
     };
   }
@@ -59,8 +59,8 @@ function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
 
   if (status === "subscription_active") {
     return {
-      label: "ATIVO",
-      className: "bg-emerald-100 text-emerald-700",
+      label: "ASSINANTE",
+      className: "bg-[#e1e1e1] text-slate-800",
     };
   }
 
@@ -85,6 +85,19 @@ function getTrialDaysRemaining(trialEndsAt?: string | null) {
   const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
 
   return Math.max(diffDays, 0);
+}
+
+function getSubscriptionPlanLabel(
+  access?: FrontendAccessSummary | null
+): string | null {
+  const rawPlan = access?.subscriptionPlan ?? null;
+
+  if (!rawPlan) return null;
+
+  if (rawPlan === "monthly") return "MENSAL";
+  if (rawPlan === "annual") return "ANUAL";
+
+  return String(rawPlan).toUpperCase();
 }
 
 export function ChatSidebar({
@@ -117,7 +130,13 @@ export function ChatSidebar({
     [access?.trialEndsAt]
   );
 
+  const subscriptionPlanLabel = useMemo(
+    () => getSubscriptionPlanLabel(access),
+    [access]
+  );
+
   const isAdmin = access?.isAdmin === true;
+  const status = access?.access_status ?? access?.accessStatus;
 
   const messagesUsed =
     typeof access?.messagesUsed === "number" ? access.messagesUsed : null;
@@ -186,7 +205,7 @@ export function ChatSidebar({
                   onClick={toggleStatusDetails}
                   className="inline-flex items-center justify-center rounded-full bg-[#f5a000] px-3 py-1 text-[10px] font-semibold leading-none text-white transition hover:brightness-105"
                 >
-                  {showStatusDetails ? "OCULTAR" : "VER STATUS"}
+                  {showStatusDetails ? "OCULTAR" : "STATUS"}
                 </button>
               </div>
             ) : (
@@ -211,7 +230,7 @@ export function ChatSidebar({
                 )}
 
                 {pdfUsed !== null && (
-                  <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="mb-2 rounded-lg bg-white px-3 py-2">
                     <div className="text-[11px] font-semibold text-slate-900">
                       PDFs
                     </div>
@@ -220,6 +239,15 @@ export function ChatSidebar({
                     </div>
                   </div>
                 )}
+
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="text-[11px] font-semibold text-slate-900">
+                    Assinatura
+                  </div>
+                  <div className="mt-1 text-[12px] font-semibold text-slate-700">
+                    ADMIN
+                  </div>
+                </div>
               </>
             ) : (
               <>
@@ -249,7 +277,13 @@ export function ChatSidebar({
                 )}
 
                 {pdfUsed !== null && (
-                  <div className="rounded-lg bg-white px-3 py-2">
+                  <div
+                    className={`rounded-lg bg-white px-3 py-2 ${
+                      status === "subscription_active" || subscriptionPlanLabel
+                        ? "mb-2"
+                        : ""
+                    }`}
+                  >
                     <div className="text-[11px] font-semibold text-slate-900">
                       PDFs
                     </div>
@@ -258,6 +292,17 @@ export function ChatSidebar({
                         ? `${pdfUsed}/${pdfLimit} usados`
                         : `${pdfUsed} usados`}
                       {pdfPeriod === "month" ? " neste mês" : ""}
+                    </div>
+                  </div>
+                )}
+
+                {(status === "subscription_active" || subscriptionPlanLabel) && (
+                  <div className="rounded-lg bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-900">
+                      Assinatura
+                    </div>
+                    <div className="mt-1 text-[12px] font-semibold text-slate-700">
+                      {subscriptionPlanLabel ?? "ASSINANTE"}
                     </div>
                   </div>
                 )}

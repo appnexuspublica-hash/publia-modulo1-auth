@@ -14,6 +14,8 @@ type AccessStatus =
   | "subscription_active"
   | "subscription_expired";
 
+type SubscriptionPlan = "monthly" | "annual" | null;
+
 type PdfUsageSummary = {
   limit: number | null;
   used: number;
@@ -138,6 +140,14 @@ function buildBlockedMessage(accessStatus: AccessStatus): string | null {
   return null;
 }
 
+function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
+  if (value === "monthly" || value === "annual") {
+    return value;
+  }
+
+  return null;
+}
+
 export async function GET() {
   try {
     const supabase = await createSupabaseServerClient();
@@ -174,6 +184,10 @@ export async function GET() {
       isAdmin
     );
 
+    const subscriptionPlan = normalizeSubscriptionPlan(
+      "subscription_plan" in access ? access.subscription_plan : null
+    );
+
     return NextResponse.json({
       accessStatus,
       access_status: accessStatus,
@@ -192,14 +206,14 @@ export async function GET() {
         typeof access.subscription_ends_at === "string"
           ? access.subscription_ends_at
           : null,
+      subscriptionPlan,
       messagesUsed:
         typeof access.messages_used === "number" ? access.messages_used : 0,
-      trialMessageLimit:
-  isAdmin
-    ? null
-    : typeof access.trial_message_limit === "number"
-      ? access.trial_message_limit
-      : null,
+      trialMessageLimit: isAdmin
+        ? null
+        : typeof access.trial_message_limit === "number"
+          ? access.trial_message_limit
+          : null,
       pdfUsage,
       isAdmin,
     });
