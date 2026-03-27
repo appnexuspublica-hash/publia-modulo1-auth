@@ -1,3 +1,4 @@
+//src/app/(auth)/criar-conta/formActions.ts
 "use server";
 
 import { z } from "zod";
@@ -9,6 +10,7 @@ export type SignUpState = {
   ok: boolean;
   error?: string;
   redirect?: string;
+  code?: string;
 };
 
 function admin() {
@@ -52,9 +54,11 @@ const schema = z.object({
     .min(2, "Estado/UF inválido")
     .max(2, "Estado/UF inválido")
     .transform((v) => v.trim().toUpperCase()),
+  porte_municipio: z
+    .string()
+    .refine((v) => ["pequeno", "medio", "grande"].includes(v), "Selecione o porte do município"),
   senha: z.string().min(8, "A senha precisa ter 8+ caracteres"),
   tk: z.string().optional(),
-
   company: z.string().optional(),
   ts: z.string().optional(),
 });
@@ -95,8 +99,20 @@ export async function criarConta(
 
   try {
     const raw = Object.fromEntries(formData.entries());
-    const { nome, cpf_cnpj, email, telefone, municipio, uf, senha, tk, company, ts } =
-      schema.parse(raw);
+
+    const {
+      nome,
+      cpf_cnpj,
+      email,
+      telefone,
+      municipio,
+      uf,
+      porte_municipio,
+      senha,
+      tk,
+      company,
+      ts,
+    } = schema.parse(raw);
 
     if (company && company.trim().length > 0) {
       return { ok: false, error: "Não foi possível concluir o cadastro agora." };
@@ -137,6 +153,7 @@ export async function criarConta(
       return {
         ok: false,
         error: "Link de cadastro inválido. Volte e clique em “Criar conta” novamente.",
+        code: "signup_token_missing",
       };
     }
 
@@ -150,6 +167,7 @@ export async function criarConta(
       console.error("[signup] erro ao verificar CPF/CNPJ", existsCpfErr);
       return { ok: false, error: "Falha ao verificar CPF/CNPJ. Tente novamente." };
     }
+
     if (existingCpf) {
       return { ok: false, error: "Já existe um cadastro com este CPF/CNPJ." };
     }
@@ -164,6 +182,7 @@ export async function criarConta(
       console.error("[signup] erro ao verificar e-mail", existsEmailErr);
       return { ok: false, error: "Falha ao verificar e-mail. Tente novamente." };
     }
+
     if (existingEmail) {
       return { ok: false, error: "Já existe um cadastro com este e-mail." };
     }
@@ -183,6 +202,7 @@ export async function criarConta(
       return {
         ok: false,
         error: "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
+        code: "signup_token_invalid",
       };
     }
 
@@ -220,6 +240,7 @@ export async function criarConta(
       municipio,
       uf,
       cidade_uf: `${municipio} / ${uf}`,
+      porte_municipio,
     });
 
     if (profileErr) {
@@ -236,6 +257,7 @@ export async function criarConta(
   } catch (e: any) {
     console.error("[signup] error", e);
     const zIssue = e?.issues?.[0]?.message;
+
     return {
       ok: false,
       error: zIssue || e?.message || "Não foi possível concluir o cadastro agora.",

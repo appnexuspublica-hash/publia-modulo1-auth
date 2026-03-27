@@ -1,3 +1,4 @@
+//src/app/(auth)/criar-conta/CriarContaPageClient.tsx
 "use client";
 
 import * as React from "react";
@@ -76,119 +77,190 @@ function CriarContaInner({ tk }: { tk: string }) {
 
   return (
     <AuthShell title="Publ.IA - Nexus Pública" subtitle="Crie sua conta para acessar o painel.">
-      {state.error && !state.ok && (
-        <div className="space-y-2">
-          <Alert type="error">{state.error}</Alert>
+      <div className="mx-auto w-full max-w-2xl">
+        {state.error && !state.ok && (
+          <div className="space-y-2">
+            <Alert type="error">{state.error}</Alert>
 
-          {showRegen && (
-            <button
-              type="button"
-              onClick={handleGenerateNewLink}
-              disabled={regenLoading}
-              className="w-full rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
-            >
-              {regenLoading ? "Gerando novo link..." : "Gerar novo link de cadastro"}
-            </button>
-          )}
-        </div>
-      )}
-
-      <form action={formAction} className="mt-2 space-y-4">
-        <input type="hidden" name="tk" value={tk} />
-        <input type="hidden" name="ts" value={ts} />
-
-        <div
-          style={{
-            position: "absolute",
-            left: "-5000px",
-            top: "auto",
-            width: "1px",
-            height: "1px",
-            overflow: "hidden",
-          }}
-          aria-hidden="true"
-        >
-          <label htmlFor="company">Company</label>
-          <input id="company" name="company" type="text" tabIndex={-1} autoComplete="off" />
-        </div>
-
-        <AuthInput
-          name="cpf_cnpj"
-          label="CPF / CNPJ"
-          placeholder="Digite seu CPF ou CNPJ"
-          disabled={disabled}
-          required
-        />
-
-        <AuthInput
-          name="nome"
-          label="Nome ou Razão Social"
-          placeholder="Seu nome completo ou razão social"
-          disabled={disabled}
-          required
-        />
-
-        <AuthInput
-          name="email"
-          type="email"
-          label="E-mail"
-          placeholder="Seu melhor e-mail"
-          disabled={disabled}
-          required
-        />
-
-        <AuthInput
-          name="telefone"
-          label="Telefone/WhatsApp"
-          placeholder="(00) 00000-0000"
-          disabled={disabled}
-          required
-        />
-
-        <AuthInput
-          name="municipio"
-          label="Município"
-          placeholder="Ex.: Santana do Itararé"
-          disabled={disabled}
-          required
-        />
-
-        <AuthInput
-          name="uf"
-          label="Estado / UF"
-          placeholder="Ex.: PR"
-          disabled={disabled}
-          required
-        />
-
-        <AuthPasswordInput
-          name="senha"
-          label="Senha (mínimo 8 caracteres)"
-          placeholder="Crie uma senha segura"
-          disabled={disabled}
-          minLength={8}
-          required
-        />
-
-        <div className="pt-2">
-          <SubmitButton disabled={disabled}>ENVIAR</SubmitButton>
-        </div>
-
-        {state.ok && (
-          <div className="mt-4 space-y-2">
-            <Alert type="success">Conta criada com sucesso! Você já pode fazer LOGIN.</Alert>
-
-            <div className="text-center">
-              <Link
-                href={state.redirect || "/login"}
-                className="inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            {showRegen && (
+              <button
+                type="button"
+                onClick={handleGenerateNewLink}
+                disabled={regenLoading}
+                className="w-full rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
               >
-                FAZER LOGIN
-              </Link>
-            </div>
+                {regenLoading ? "Gerando novo link..." : "Gerar novo link de cadastro"}
+              </button>
+            )}
           </div>
         )}
-      </form>
+
+        <form action={formAction} className="mt-2 space-y-4">
+          <input type="hidden" name="tk" value={tk} />
+          <input type="hidden" name="ts" value={ts} />
+
+          <div
+            style={{
+              position: "absolute",
+              left: "-5000px",
+              top: "auto",
+              width: "1px",
+              height: "1px",
+              overflow: "hidden",
+            }}
+            aria-hidden="true"
+          >
+            <label htmlFor="company">Company</label>
+            <input id="company" name="company" type="text" tabIndex={-1} autoComplete="off" />
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="md:col-span-2">
+              <AuthInput
+                name="cpf_cnpj"
+                label="CPF / CNPJ"
+                placeholder="Digite seu CPF ou CNPJ"
+                disabled={disabled}
+                required
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <AuthInput
+                name="nome"
+                label="Nome ou Razão Social"
+                placeholder="Seu nome completo ou razão social"
+                disabled={disabled}
+                required
+              />
+            </div>
+
+            <AuthInput
+              name="telefone"
+              label="Telefone/WhatsApp"
+              placeholder="(00) 00000-0000"
+              disabled={disabled}
+              required
+            />
+
+            <AuthInput
+              name="email"
+              type="email"
+              label="E-mail"
+              placeholder="Seu melhor e-mail"
+              disabled={disabled}
+              required
+            />
+
+            <AuthInput
+              name="municipio"
+              label="Município"
+              placeholder="Ex.: Santana do Itararé"
+              disabled={disabled}
+              required
+            />
+
+            <AuthInput
+              name="uf"
+              label="Estado / UF"
+              placeholder="Ex.: PR"
+              disabled={disabled}
+              required
+            />
+
+            <div className="md:col-span-2">
+              <fieldset disabled={disabled} className="space-y-2">
+                <legend className="block text-sm font-medium text-slate-700">
+                  Porte do Município
+                </legend>
+
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                  <label className="flex min-h-[96px] cursor-pointer items-start gap-3 rounded-md border border-slate-300 bg-white px-3 py-3 text-sm text-slate-700 transition hover:border-slate-400">
+                    <input
+                      type="radio"
+                      name="porte_municipio"
+                      value="pequeno"
+                      className="mt-1"
+                      required
+                      disabled={disabled}
+                    />
+                    <span>
+                      <span className="block font-medium">Pequeno</span>
+                      <span className="block text-xs leading-5 text-slate-500">
+                        até 50 mil habitantes
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="flex min-h-[96px] cursor-pointer items-start gap-3 rounded-md border border-slate-300 bg-white px-3 py-3 text-sm text-slate-700 transition hover:border-slate-400">
+                    <input
+                      type="radio"
+                      name="porte_municipio"
+                      value="medio"
+                      className="mt-1"
+                      required
+                      disabled={disabled}
+                    />
+                    <span>
+                      <span className="block font-medium">Médio</span>
+                      <span className="block text-xs leading-5 text-slate-500">
+                        de 50 mil até 200 mil habitantes
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="flex min-h-[96px] cursor-pointer items-start gap-3 rounded-md border border-slate-300 bg-white px-3 py-3 text-sm text-slate-700 transition hover:border-slate-400">
+                    <input
+                      type="radio"
+                      name="porte_municipio"
+                      value="grande"
+                      className="mt-1"
+                      required
+                      disabled={disabled}
+                    />
+                    <span>
+                      <span className="block font-medium">Grande</span>
+                      <span className="block text-xs leading-5 text-slate-500">
+                        acima de 200 mil habitantes
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+
+            <div className="md:col-span-2">
+              <AuthPasswordInput
+                name="senha"
+                label="Senha (mínimo 8 caracteres)"
+                placeholder="Crie uma senha segura"
+                disabled={disabled}
+                minLength={8}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="pt-2">
+            <SubmitButton disabled={disabled}>ENVIAR</SubmitButton>
+          </div>
+
+          {state.ok && (
+            <div className="mt-4 space-y-2">
+              <Alert type="success">Conta criada com sucesso! Você já pode fazer LOGIN.</Alert>
+
+              <div className="text-center">
+                <Link
+                  href={state.redirect || "/login"}
+                  className="inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                >
+                  FAZER LOGIN
+                </Link>
+              </div>
+            </div>
+          )}
+        </form>
+      </div>
     </AuthShell>
   );
 }
