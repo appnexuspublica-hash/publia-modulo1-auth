@@ -1,4 +1,3 @@
-// src/app/api/chat/route.ts
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
@@ -85,6 +84,12 @@ type OrderedPdfLink = {
 type MatchPdfChunkRow = {
   chunk_index: number;
   content: string;
+};
+
+type UserProfileContext = {
+  municipio: string | null;
+  uf: string | null;
+  porte_municipio: string | null;
 };
 
 type PdfResolution =
@@ -331,6 +336,68 @@ function buildPdfLabel(pdfRow: PdfFileRow, index?: number) {
   const name = String(pdfRow.file_name ?? "").trim();
   if (name) return name;
   return `PDF ${typeof index === "number" ? index + 1 : pdfRow.id.slice(0, 8)}`;
+}
+
+function formatPorteMunicipioLabel(value: string | null | undefined) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (normalized === "pequeno") return "Pequeno";
+  if (normalized === "medio") return "Médio";
+  if (normalized === "grande") return "Grande";
+
+  return "";
+}
+
+function buildUserProfileContextText(profile: UserProfileContext | null) {
+  if (!profile) return "";
+
+  const municipio = String(profile.municipio ?? "").trim();
+  const uf = String(profile.uf ?? "").trim().toUpperCase();
+  const porte = formatPorteMunicipioLabel(profile.porte_municipio);
+
+  const lines: string[] = [];
+
+  if (municipio || uf) {
+    lines.push(
+      `Município/UF do usuário cadastrado: ${[municipio, uf].filter(Boolean).join(" / ")}`
+    );
+  }
+
+  if (porte) {
+    lines.push(`Porte do município cadastrado: ${porte}`);
+  }
+
+  if (!lines.length) return "";
+
+  return (
+    "CONTEXTO CADASTRAL DO USUÁRIO (usar como referência padrão da conversa, sem perguntar novamente esses dados por rotina):\n\n" +
+    lines.join("\n") +
+    "\n\nINSTRUÇÃO IMPORTANTE: use esse contexto cadastral como base inicial da resposta. Só peça confirmação de município/UF ou Tribunal de Contas competente se o usuário indicar outra localidade, outro ente, consórcio, órgão estadual/federal, ou se houver dúvida real de jurisdição."
+  );
+}
+
+async function getUserProfileContext(
+  client: any,
+  userId: string
+): Promise<UserProfileContext | null> {
+  const { data, error } = await client
+    .from("profiles")
+    .select("municipio, uf, porte_municipio")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[/api/chat] erro ao buscar contexto do profile:", error);
+    return null;
+  }
+
+  if (!data) return null;
+
+  return {
+    municipio: (data as any).municipio ?? null,
+    uf: (data as any).uf ?? null,
+    porte_municipio: (data as any).porte_municipio ?? null,
+  };
 }
 
 async function getConversationPdfState(
@@ -1218,6 +1285,8 @@ export async function POST(req: Request) {
           return;
         }
 
+        const userProfile = await getUserProfileContext(client, userId);
+
         const pdfState = await getConversationPdfState(client, conversationId, userId);
         const allPdfRows = await getPdfsForConversation(
           client,
@@ -1312,6 +1381,14 @@ export async function POST(req: Request) {
             clampText(historyText, 4500) +
             "\n\nNova pergunta:\n" +
             message.trim();
+        }
+
+        const userProfileContextText = buildUserProfileContextText(userProfile);
+        if (userProfileContextText) {
+          combinedText =
+            userProfileContextText +
+            "\n\n" +
+            combinedText;
         }
 
         if (pdfChatState.kind === "ready_context" && pdfChatState.pdfContext) {
@@ -1443,6 +1520,7 @@ export async function POST(req: Request) {
             selectedPdfIds: normalizedSelectedPdfIds,
             pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
             forceWebFirst,
+            userProfileContextApplied: !!userProfileContextText,
           },
         });
 
