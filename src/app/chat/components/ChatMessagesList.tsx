@@ -1,4 +1,4 @@
-// src/app/chat/components/ChatMessagesList.tsx
+//src/app/chat/components/ChatMessagesList.tsx
 "use client";
 
 import {
@@ -196,6 +196,74 @@ function tableElementToMatrix(tableEl: HTMLTableElement): string[][] {
   return trs.map((tr) =>
     Array.from(tr.querySelectorAll("th,td")).map((cell) => (cell.textContent ?? "").trim())
   );
+}
+
+function normalizeBareLinksInText(input: string): string {
+  if (!input) return "";
+
+  const parts = input.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+
+  const processed = parts.map((part) => {
+    if (!part) return part;
+
+    if (
+      (part.startsWith("```") && part.endsWith("```")) ||
+      (part.startsWith("`") && part.endsWith("`"))
+    ) {
+      return part;
+    }
+
+    let text = part;
+
+    text = text.replace(
+      /(^|[\s(>])((?:https?:\/\/)[^\s<]+)/gi,
+      (match, prefix: string, url: string) => {
+        const cleaned = url.replace(/[),.;:!?]+$/, "");
+        const trailing = url.slice(cleaned.length);
+
+        if (/\]\([^)]+\)$/.test(prefix + cleaned)) {
+          return match;
+        }
+
+        return `${prefix}[${cleaned}](${cleaned})${trailing}`;
+      }
+    );
+
+    text = text.replace(
+      /(^|[\s(>])((?:www\.)[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s<]*)?)/gi,
+      (match, prefix: string, domain: string) => {
+        const cleaned = domain.replace(/[),.;:!?]+$/, "");
+        const trailing = domain.slice(cleaned.length);
+
+        return `${prefix}[${cleaned}](https://${cleaned})${trailing}`;
+      }
+    );
+
+    text = text.replace(
+      /(^|[\s(>])((?!https?:\/\/)(?!www\.)(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s<]*)?)/gi,
+      (match, prefix: string, domain: string) => {
+        const cleaned = domain.replace(/[),.;:!?]+$/, "");
+        const trailing = domain.slice(cleaned.length);
+
+        const lower = cleaned.toLowerCase();
+
+        if (
+          lower.startsWith("mailto:") ||
+          lower.includes("@") ||
+          lower.startsWith("localhost") ||
+          lower.startsWith("127.0.0.1")
+        ) {
+          return match;
+        }
+
+        return `${prefix}[${cleaned}](https://${cleaned})${trailing}`;
+      }
+    );
+
+    return text;
+  });
+
+  return processed.join("");
 }
 
 function TableWithDownloads({
@@ -449,6 +517,8 @@ export function ChatMessagesList({
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
 
           const { main, footer } = splitMarkdownFooter(msg.content);
+          const mainWithLinks = normalizeBareLinksInText(main);
+          const footerWithLinks = normalizeBareLinksInText(footer);
 
           const markdownComponentsMain: any = {
             a: ({ node, ...props }: any) => (
@@ -605,7 +675,7 @@ export function ChatMessagesList({
 
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
-                        {main}
+                        {mainWithLinks}
                       </ReactMarkdown>
                     </div>
 
@@ -615,7 +685,7 @@ export function ChatMessagesList({
                           remarkPlugins={[remarkGfm]}
                           components={markdownComponentsFooter}
                         >
-                          {footer}
+                          {footerWithLinks}
                         </ReactMarkdown>
                       </div>
                     )}

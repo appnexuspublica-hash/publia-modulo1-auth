@@ -1,7 +1,7 @@
+//src/app/api/chat/route.ts
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
-
 import { publiaPrompt } from "@/lib/publiaPrompt";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
@@ -279,8 +279,83 @@ function parseTemperature(input: unknown, fallback = 0.3) {
   return Math.max(0, Math.min(2, n));
 }
 
+function stripTrailingUrlPunctuation(url: string) {
+  const cleaned = String(url ?? "").trim().replace(/[),.;:!?]+$/g, "");
+  const trailing = String(url ?? "").slice(cleaned.length);
+  return { cleaned, trailing };
+}
+
+function convertNamedLinksToMarkdown(text: string) {
+  let out = String(text || "");
+
+  // Caso:
+  // Título do site
+  // Endereço completo: https://...
+  out = out.replace(
+    /(^|\n)([^\n]{3,160})\n{1,2}(?:\*\*|__)?(?:Endere[cç]o completo|URL|Link|Acesse em)(?:\*\*|__)?\s*:\s*(https?:\/\/[^\s<]+)/gim,
+    (match, prefix: string, label: string, rawUrl: string) => {
+      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
+      const safeLabel = label.trim();
+      if (!safeLabel || !cleaned) return match;
+      return `${prefix}[${safeLabel}](${cleaned})${trailing}`;
+    }
+  );
+
+  // Caso:
+  // Nome do portal: https://...
+  out = out.replace(
+    /(^|\n)([-*]\s*)?([^\n:]{3,180})\s*:\s*(https?:\/\/[^\s<]+)/gim,
+    (match, prefix: string, bullet: string = "", label: string, rawUrl: string) => {
+      const safeLabel = label.trim();
+      const lower = safeLabel.toLowerCase();
+
+      if (
+        lower === "base legal" ||
+        lower === "referências oficiais consultadas" ||
+        lower === "referencias oficiais consultadas"
+      ) {
+        return match;
+      }
+
+      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
+      if (!safeLabel || !cleaned) return match;
+
+      return `${prefix}${bullet}[${safeLabel}](${cleaned})${trailing}`;
+    }
+  );
+
+  // Caso:
+  // Nome do portal
+  // https://...
+  out = out.replace(
+    /(^|\n)([^\n]{3,180})\n{1,2}(https?:\/\/[^\s<]+)/gim,
+    (match, prefix: string, label: string, rawUrl: string) => {
+      const safeLabel = label.trim();
+      const lower = safeLabel.toLowerCase();
+
+      if (
+        lower === "base legal" ||
+        lower === "referências oficiais consultadas" ||
+        lower === "referencias oficiais consultadas" ||
+        lower.startsWith("- ") ||
+        lower.startsWith("• ")
+      ) {
+        return match;
+      }
+
+      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
+      if (!safeLabel || !cleaned) return match;
+
+      return `${prefix}[${safeLabel}](${cleaned})${trailing}`;
+    }
+  );
+
+  return out;
+}
+
 function formatAssistantText(text: string) {
-  return String(text || "").trim();
+  const trimmed = String(text || "").trim();
+  return convertNamedLinksToMarkdown(trimmed);
 }
 
 function shouldForceWebFirst(text: string) {
@@ -303,6 +378,43 @@ function shouldForceWebFirst(text: string) {
   ];
 
   return keywords.some((k) => t.includes(k));
+}
+
+function shouldForceOfficialLinks(text: string) {
+  const t = String(text || "").toLowerCase();
+
+  const keywords = [
+    "site",
+    "sites",
+    "portal",
+    "portais",
+    "link",
+    "links",
+    "url",
+    "urls",
+    "acesse",
+    "acessar",
+    "consultar",
+    "onde consultar",
+    "onde posso consultar",
+    "endereço",
+    "endereco",
+    "página oficial",
+    "pagina oficial",
+  ];
+
+  return keywords.some((k) => t.includes(k));
+}
+
+function buildOfficialLinksInstruction() {
+  return [
+    "INSTRUÇÃO OBRIGATÓRIA SOBRE LINKS:",
+    "- Quando citar site, portal, sistema, manual, tribunal ou página oficial, escreva SEMPRE a URL oficial completa.",
+    "- Sempre prefira o formato Markdown clicável: [Nome do portal](https://url-oficial).",
+    "- Nunca escreva apenas o nome do portal sem URL.",
+    "- Se citar mais de um site, cada um deve aparecer com seu respectivo link clicável.",
+    "- Se necessário, use web_search_preview para localizar a URL oficial exata antes de responder.",
+  ].join("\n");
 }
 
 function clampText(value: string, max: number) {
@@ -1246,6 +1358,7 @@ export async function POST(req: Request) {
         }, 15000);
 
         const forceWebFirstRequested = shouldForceWebFirst(message);
+        const forceOfficialLinksRequested = shouldForceOfficialLinks(message);
 
         const { data: historyData } = await client
           .from("messages")
@@ -1329,6 +1442,8 @@ export async function POST(req: Request) {
         }
 
         const forceWebFirst = forceWebFirstRequested && pdfChatState.kind === "none";
+        const shouldOfferWebTool =
+          (forceWebFirst || forceOfficialLinksRequested) && pdfChatState.kind === "none";
 
         safeSend("meta", {
           userMessage: userMessageRow,
@@ -1399,6 +1514,13 @@ export async function POST(req: Request) {
             combinedText;
         }
 
+        if (forceOfficialLinksRequested) {
+          combinedText =
+            buildOfficialLinksInstruction() +
+            "\n\n" +
+            combinedText;
+        }
+
         if (forceWebFirst) {
           combinedText =
             "WEB-FIRST recomendado: confirme em fonte oficial via web_search_preview.\n\n" +
@@ -1436,8 +1558,11 @@ export async function POST(req: Request) {
             stream: true,
           };
 
-          if (forceWebFirst) {
+          if (shouldOfferWebTool) {
             reqObj.tools = [{ type: "web_search_preview" }];
+          }
+
+          if (forceWebFirst) {
             reqObj.tool_choice = { type: "web_search_preview" };
           }
 
@@ -1520,6 +1645,7 @@ export async function POST(req: Request) {
             selectedPdfIds: normalizedSelectedPdfIds,
             pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
             forceWebFirst,
+            forceOfficialLinksRequested,
             userProfileContextApplied: !!userProfileContextText,
           },
         });
