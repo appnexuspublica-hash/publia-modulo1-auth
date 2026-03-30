@@ -1,6 +1,5 @@
 //src/app/chat/components/ChatMessagesList.tsx
 "use client";
-
 import {
   useEffect,
   useRef,
@@ -198,18 +197,22 @@ function tableElementToMatrix(tableEl: HTMLTableElement): string[][] {
   );
 }
 
-function normalizeBareLinksInText(input: string): string {
+function normalizeBareLinksInText(input: string) {
   if (!input) return "";
 
-  const parts = input.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+  const parts = input.split(
+    /(```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^)]+\))/g
+  );
 
   const processed = parts.map((part) => {
     if (!part) return part;
 
-    if (
+    const isProtectedBlock =
       (part.startsWith("```") && part.endsWith("```")) ||
-      (part.startsWith("`") && part.endsWith("`"))
-    ) {
+      (part.startsWith("`") && part.endsWith("`")) ||
+      /^\[[^\]]+\]\([^)]+\)$/.test(part);
+
+    if (isProtectedBlock) {
       return part;
     }
 
@@ -220,10 +223,6 @@ function normalizeBareLinksInText(input: string): string {
       (match, prefix: string, url: string) => {
         const cleaned = url.replace(/[),.;:!?]+$/, "");
         const trailing = url.slice(cleaned.length);
-
-        if (/\]\([^)]+\)$/.test(prefix + cleaned)) {
-          return match;
-        }
 
         return `${prefix}[${cleaned}](${cleaned})${trailing}`;
       }

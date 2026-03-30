@@ -280,13 +280,144 @@ function parseTemperature(input: unknown, fallback = 0.3) {
 }
 
 function stripTrailingUrlPunctuation(url: string) {
-  const cleaned = String(url ?? "").trim().replace(/[),.;:!?]+$/g, "");
-  const trailing = String(url ?? "").slice(cleaned.length);
+  const source = String(url ?? "").trim();
+  const cleaned = source.replace(/[),.;:!?]+$/g, "");
+  const trailing = source.slice(cleaned.length);
   return { cleaned, trailing };
+}
+
+function isLikelyUrlOrDomain(value: string) {
+  const v = String(value ?? "").trim().replace(/^\((.*)\)$/, "$1");
+  if (!v) return false;
+
+  return /^(https?:\/\/|www\.)/i.test(v) || /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/.*)?$/i.test(v);
+}
+
+function normalizeUrlOrDomain(raw: string) {
+  const trimmed = String(raw ?? "")
+    .trim()
+    .replace(/^\((.*)\)$/, "$1")
+    .replace(/^URL:\s*/i, "")
+    .replace(/^Link:\s*/i, "")
+    .replace(/^Acesse em:\s*/i, "")
+    .replace(/^Endere[cç]o completo:\s*/i, "");
+
+  const { cleaned, trailing } = stripTrailingUrlPunctuation(trimmed);
+
+  if (!cleaned) {
+    return { url: "", trailing: "" };
+  }
+
+  if (/^https?:\/\//i.test(cleaned)) {
+    return { url: cleaned, trailing };
+  }
+
+  if (/^www\./i.test(cleaned)) {
+    return { url: `https://${cleaned}`, trailing };
+  }
+
+  if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/.*)?$/i.test(cleaned)) {
+    return { url: `https://${cleaned}`, trailing };
+  }
+
+  return { url: "", trailing: "" };
+}
+
+function shouldSkipLabelForAutoLink(label: string) {
+  const lower = String(label ?? "").trim().toLowerCase();
+
+  if (!lower) return true;
+  if (/\[[^\]]+\]\([^)]+\)/.test(lower)) return true;
+  if (isLikelyUrlOrDomain(lower)) return true;
+
+  return (
+    lower === "base legal" ||
+    lower === "referências oficiais consultadas" ||
+    lower === "referencias oficiais consultadas" ||
+    lower === "nome do portal" ||
+    lower === "endereço completo" ||
+    lower === "endereco completo" ||
+    lower === "url" ||
+    lower === "link"
+  );
+}
+
+function convertLabelParenDomainLines(text: string) {
+  return String(text || "").replace(
+    /^(\s*[-*]?\s*)(.+?)\s+\((https?:\/\/[^\s)]+|www\.[^\s)]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)]*)?)\)\s*$/gim,
+    (match, prefix: string, rawLabel: string, rawUrl: string) => {
+      const label = rawLabel.trim();
+      if (shouldSkipLabelForAutoLink(label)) return match;
+
+      const { url } = normalizeUrlOrDomain(rawUrl);
+      if (!url) return match;
+
+      return `${prefix}[${label}](${url})`;
+    }
+  );
+}
+
+function convertLabelColonDomainLines(text: string) {
+  return String(text || "").replace(
+    /^(\s*[-*]?\s*)(.+?)\s*:\s*(https?:\/\/\S+|www\.\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?)\s*$/gim,
+    (match, prefix: string, rawLabel: string, rawUrl: string) => {
+      const label = rawLabel.trim();
+      if (shouldSkipLabelForAutoLink(label)) return match;
+
+      const { url, trailing } = normalizeUrlOrDomain(rawUrl);
+      if (!url) return match;
+
+      return `${prefix}[${label}](${url})${trailing}`;
+    }
+  );
+}
+
+function convertLabelNextLineUrl(text: string) {
+  const lines = String(text || "").split("\n");
+  const out: string[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = lines[i];
+    const next = lines[i + 1];
+
+    if (!next) {
+      out.push(current);
+      continue;
+    }
+
+    const currentTrim = current.trim();
+    const nextTrim = next.trim();
+
+    if (
+      currentTrim &&
+      nextTrim &&
+      !shouldSkipLabelForAutoLink(currentTrim) &&
+      isLikelyUrlOrDomain(nextTrim)
+    ) {
+      const { url, trailing } = normalizeUrlOrDomain(nextTrim);
+      if (url) {
+        const prefixMatch = current.match(/^(\s*[-*]?\s*)(.*)$/);
+        const prefix = prefixMatch?.[1] ?? "";
+        const label = prefixMatch?.[2]?.trim() ?? currentTrim;
+
+        out.push(`${prefix}[${label}](${url})${trailing}`);
+        i += 1;
+        continue;
+      }
+    }
+
+    out.push(current);
+  }
+
+  return out.join("\n");
 }
 
 function convertNamedLinksToMarkdown(text: string) {
   let out = String(text || "");
+
+  out = convertLabelParenDomainLines(out);
+  out = convertLabelColonDomainLines(out);
+  out = convertLabelNextLineUrl(out);
 
   // Caso:
   // Título do site
@@ -294,57 +425,11 @@ function convertNamedLinksToMarkdown(text: string) {
   out = out.replace(
     /(^|\n)([^\n]{3,160})\n{1,2}(?:\*\*|__)?(?:Endere[cç]o completo|URL|Link|Acesse em)(?:\*\*|__)?\s*:\s*(https?:\/\/[^\s<]+)/gim,
     (match, prefix: string, label: string, rawUrl: string) => {
-      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
       const safeLabel = label.trim();
-      if (!safeLabel || !cleaned) return match;
-      return `${prefix}[${safeLabel}](${cleaned})${trailing}`;
-    }
-  );
-
-  // Caso:
-  // Nome do portal: https://...
-  out = out.replace(
-    /(^|\n)([-*]\s*)?([^\n:]{3,180})\s*:\s*(https?:\/\/[^\s<]+)/gim,
-    (match, prefix: string, bullet: string = "", label: string, rawUrl: string) => {
-      const safeLabel = label.trim();
-      const lower = safeLabel.toLowerCase();
-
-      if (
-        lower === "base legal" ||
-        lower === "referências oficiais consultadas" ||
-        lower === "referencias oficiais consultadas"
-      ) {
-        return match;
-      }
+      if (shouldSkipLabelForAutoLink(safeLabel)) return match;
 
       const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
-      if (!safeLabel || !cleaned) return match;
-
-      return `${prefix}${bullet}[${safeLabel}](${cleaned})${trailing}`;
-    }
-  );
-
-  // Caso:
-  // Nome do portal
-  // https://...
-  out = out.replace(
-    /(^|\n)([^\n]{3,180})\n{1,2}(https?:\/\/[^\s<]+)/gim,
-    (match, prefix: string, label: string, rawUrl: string) => {
-      const safeLabel = label.trim();
-      const lower = safeLabel.toLowerCase();
-
-      if (
-        lower === "base legal" ||
-        lower === "referências oficiais consultadas" ||
-        lower === "referencias oficiais consultadas" ||
-        lower.startsWith("- ") ||
-        lower.startsWith("• ")
-      ) {
-        return match;
-      }
-
-      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
-      if (!safeLabel || !cleaned) return match;
+      if (!cleaned) return match;
 
       return `${prefix}[${safeLabel}](${cleaned})${trailing}`;
     }
