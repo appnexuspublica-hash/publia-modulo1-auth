@@ -214,6 +214,12 @@ type PdfChatState =
       activePdfFileId: string | null;
     };
 
+type LegalBaseLinkRule = {
+  pattern: RegExp;
+  label: string;
+  url: string;
+};
+
 // --------------------
 // LIMITES
 // --------------------
@@ -233,6 +239,44 @@ const PDF_NO_TEXT_MESSAGE =
   "Infelizmente não consigo acessar o conteúdo dos PDFs. Faça OCR e reenvie. Use o botão FAZER OCR abaixo para abrir aplicativo.";
 const PDF_LARGE_MESSAGE =
   "Um ou mais PDFs são grandes demais para processamento automático neste momento. Envie uma versão menor ou reprocessada.";
+
+const LEGAL_BASE_LINK_RULES: LegalBaseLinkRule[] = [
+  {
+    pattern:
+      /\bConstitui[cç][aã]o\s+Federal\s+de\s+1988\b|\bConstitui[cç][aã]o\s+da\s+Rep[úu]blica\s+Federativa\s+do\s+Brasil\s+de\s+1988\b/i,
+    label: "Constituição Federal de 1988",
+    url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+  },
+  {
+    pattern:
+      /\bLei\s+Complementar\s+n[ºo°]?\s*101\s*\/\s*2000\b|\bLC\s*n[ºo°]?\s*101\s*\/\s*2000\b|\bLei\s+de\s+Responsabilidade\s+Fiscal\b/i,
+    label: "Lei Complementar nº 101/2000",
+    url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
+  },
+  {
+    pattern: /\bLei\s+n[ºo°]?\s*4\.?320\s*\/\s*1964\b/i,
+    label: "Lei nº 4.320/1964",
+    url: "https://www.planalto.gov.br/ccivil_03/leis/l4320.htm",
+  },
+  {
+    pattern:
+      /\bLei\s+n[ºo°]?\s*12\.?527\s*\/\s*2011\b|\bLei\s+de\s+Acesso\s+[àa]\s+Informa[cç][aã]o\b/i,
+    label: "Lei nº 12.527/2011",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm",
+  },
+  {
+    pattern:
+      /\bLei\s+n[ºo°]?\s*13\.?709\s*\/\s*2018\b|\bLGPD\b|\bLei\s+Geral\s+de\s+Prote[cç][aã]o\s+de\s+Dados\b/i,
+    label: "Lei nº 13.709/2018",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
+  },
+  {
+    pattern:
+      /\bLei\s+n[ºo°]?\s*14\.?133\s*\/\s*2021\b|\bLei\s+de\s+Licita[cç][õo]es\s+e\s+Contratos\b/i,
+    label: "Lei nº 14.133/2021",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+  },
+];
 
 function parseCookieHeader(cookieHeader: string | null) {
   const out: Record<string, string> = {};
@@ -412,6 +456,70 @@ function convertLabelNextLineUrl(text: string) {
   return out.join("\n");
 }
 
+function isBaseLegalHeader(line: string) {
+  const normalized = String(line ?? "")
+    .replace(/\*\*/g, "")
+    .trim()
+    .toLowerCase();
+
+  return normalized === "base legal:" || normalized === "base legal";
+}
+
+function isReferencesHeader(line: string) {
+  const normalized = String(line ?? "")
+    .replace(/\*\*/g, "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    normalized === "referências oficiais consultadas:" ||
+    normalized === "referências oficiais consultadas" ||
+    normalized === "referencias oficiais consultadas:" ||
+    normalized === "referencias oficiais consultadas"
+  );
+}
+
+function applyLegalBaseLinks(text: string) {
+  const lines = String(text || "").split("\n");
+  let inBaseLegalSection = false;
+
+  const transformed = lines.map((line) => {
+    if (isBaseLegalHeader(line)) {
+      inBaseLegalSection = true;
+      return line;
+    }
+
+    if (inBaseLegalSection && isReferencesHeader(line)) {
+      inBaseLegalSection = false;
+      return line;
+    }
+
+    if (!inBaseLegalSection) {
+      return line;
+    }
+
+    if (!line.trim()) {
+      return line;
+    }
+
+    let nextLine = line;
+
+    for (const rule of LEGAL_BASE_LINK_RULES) {
+      if (/\[[^\]]+\]\([^)]+\)/.test(nextLine)) {
+        break;
+      }
+
+      nextLine = nextLine.replace(rule.pattern, (foundText) => {
+        return `[${foundText}](${rule.url})`;
+      });
+    }
+
+    return nextLine;
+  });
+
+  return transformed.join("\n");
+}
+
 function convertNamedLinksToMarkdown(text: string) {
   let out = String(text || "");
 
@@ -419,9 +527,6 @@ function convertNamedLinksToMarkdown(text: string) {
   out = convertLabelColonDomainLines(out);
   out = convertLabelNextLineUrl(out);
 
-  // Caso:
-  // Título do site
-  // Endereço completo: https://...
   out = out.replace(
     /(^|\n)([^\n]{3,160})\n{1,2}(?:\*\*|__)?(?:Endere[cç]o completo|URL|Link|Acesse em)(?:\*\*|__)?\s*:\s*(https?:\/\/[^\s<]+)/gim,
     (match, prefix: string, label: string, rawUrl: string) => {
@@ -440,7 +545,8 @@ function convertNamedLinksToMarkdown(text: string) {
 
 function formatAssistantText(text: string) {
   const trimmed = String(text || "").trim();
-  return convertNamedLinksToMarkdown(trimmed);
+  const withNamedLinks = convertNamedLinksToMarkdown(trimmed);
+  return applyLegalBaseLinks(withNamedLinks);
 }
 
 function shouldForceWebFirst(text: string) {
