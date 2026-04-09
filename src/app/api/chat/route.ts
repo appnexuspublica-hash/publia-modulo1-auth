@@ -248,6 +248,11 @@ type LegalBaseLinkRule = {
   url: string;
 };
 
+type ContinuationAcceptanceParseResult = {
+  accepted: boolean;
+  refinement: string | null;
+};
+
 // --------------------
 // LIMITES
 // --------------------
@@ -863,8 +868,13 @@ function normalizeContinuationMessage(value: string) {
     .trim();
 }
 
-function isShortContinuationAcceptance(message: string) {
-  const normalized = normalizeContinuationMessage(message);
+function parseContinuationAcceptance(message: string): ContinuationAcceptanceParseResult {
+  const raw = String(message ?? "").trim();
+  const normalized = normalizeContinuationMessage(raw);
+
+  if (!normalized) {
+    return { accepted: false, refinement: null };
+  }
 
   const exactMatches = new Set([
     "eu quero",
@@ -898,25 +908,69 @@ function isShortContinuationAcceptance(message: string) {
     "prosseguir",
   ]);
 
-  if (exactMatches.has(normalized)) return true;
-
-  if (normalized.startsWith("eu quero ") && normalized.split(" ").length <= 4) {
-    return true;
+  if (exactMatches.has(normalized)) {
+    return { accepted: true, refinement: null };
   }
 
-  if (normalized.startsWith("ok ") && normalized.split(" ").length <= 4) {
-    return true;
+  const prefixPatterns: Array<{ regex: RegExp; strip: RegExp }> = [
+    { regex: /^eu quero\b/i, strip: /^eu quero\b[\s,:;.-]*/i },
+    { regex: /^quero\b/i, strip: /^quero\b[\s,:;.-]*/i },
+    { regex: /^ok\b/i, strip: /^ok\b[\s,:;.-]*/i },
+    { regex: /^sim\b/i, strip: /^sim\b[\s,:;.-]*/i },
+    { regex: /^pode\b/i, strip: /^pode\b[\s,:;.-]*/i },
+    { regex: /^vamos em frente\b/i, strip: /^vamos em frente\b[\s,:;.-]*/i },
+    { regex: /^vamos seguir\b/i, strip: /^vamos seguir\b[\s,:;.-]*/i },
+    { regex: /^vamos continuar\b/i, strip: /^vamos continuar\b[\s,:;.-]*/i },
+    { regex: /^concordo\b/i, strip: /^concordo\b[\s,:;.-]*/i },
+    { regex: /^de acordo\b/i, strip: /^de acordo\b[\s,:;.-]*/i },
+    { regex: /^pode prosseguir\b/i, strip: /^pode prosseguir\b[\s,:;.-]*/i },
+    { regex: /^prosseguir\b/i, strip: /^prosseguir\b[\s,:;.-]*/i },
+  ];
+
+  for (const item of prefixPatterns) {
+    if (!item.regex.test(raw)) continue;
+
+    const remainder = raw.replace(item.strip, "").trim();
+
+    if (!remainder) {
+      return { accepted: true, refinement: null };
+    }
+
+    return {
+      accepted: true,
+      refinement: clampText(remainder, 400),
+    };
   }
 
-  if (normalized.startsWith("vamos ") && normalized.split(" ").length <= 4) {
-    return true;
+  if (normalized.startsWith("eu quero ") && normalized.split(" ").length <= 8) {
+    return {
+      accepted: true,
+      refinement: clampText(raw.replace(/^eu quero\b[\s,:;.-]*/i, "").trim(), 400) || null,
+    };
   }
 
-  if (normalized.startsWith("concordo") && normalized.split(" ").length <= 4) {
-    return true;
+  if (normalized.startsWith("ok ") && normalized.split(" ").length <= 8) {
+    return {
+      accepted: true,
+      refinement: clampText(raw.replace(/^ok\b[\s,:;.-]*/i, "").trim(), 400) || null,
+    };
   }
 
-  return false;
+  if (normalized.startsWith("vamos ") && normalized.split(" ").length <= 8) {
+    return {
+      accepted: true,
+      refinement: clampText(raw.replace(/^vamos\b[\s,:;.-]*/i, "").trim(), 400) || null,
+    };
+  }
+
+  if (normalized.startsWith("concordo") && normalized.split(" ").length <= 8) {
+    return {
+      accepted: true,
+      refinement: clampText(raw.replace(/^concordo\b[\s,:;.-]*/i, "").trim(), 400) || null,
+    };
+  }
+
+  return { accepted: false, refinement: null };
 }
 
 function lastAssistantOfferToContinue(historyRows: MessageRow[]) {
@@ -968,8 +1022,9 @@ function lastAssistantOfferToContinue(historyRows: MessageRow[]) {
 function buildContinuationAcceptanceInstruction(params: {
   userMessage: string;
   offerText: string;
+  refinement?: string | null;
 }) {
-  return [
+  const lines = [
     "CONTINUIDADE CONVERSACIONAL OBRIGATÓRIA:",
     "- O usuário respondeu com uma aceitação curta da sugestão imediatamente anterior da IA.",
     "- NÃO trate isso como mensagem incompleta.",
@@ -981,9 +1036,24 @@ function buildContinuationAcceptanceInstruction(params: {
     params.offerText,
     "",
     `MENSAGEM CURTA DO USUÁRIO: ${params.userMessage.trim()}`,
+  ];
+
+  if (params.refinement?.trim()) {
+    lines.push(
+      "",
+      "REFINAMENTO ADICIONAL DO USUÁRIO A SER INCORPORADO:",
+      params.refinement.trim(),
+      "",
+      "INSTRUÇÃO EXTRA: continue a sugestão anterior já incorporando esse refinamento específico."
+    );
+  }
+
+  lines.push(
     "",
-    "INSTRUÇÃO FINAL: responda já entregando o conteúdo prometido na sugestão anterior.",
-  ].join("\n");
+    "INSTRUÇÃO FINAL: responda já entregando o conteúdo prometido na sugestão anterior."
+  );
+
+  return lines.join("\n");
 }
 
 async function getUserProfileContext(
@@ -1923,9 +1993,9 @@ export async function POST(req: Request) {
         const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
         historyRows.reverse();
 
+        const continuationAcceptance = parseContinuationAcceptance(message);
         const continuationOfferText =
-          isShortContinuationAcceptance(message) &&
-          historyRows.length > 0
+          continuationAcceptance.accepted && historyRows.length > 0
             ? lastAssistantOfferToContinue(historyRows)
             : null;
 
@@ -2061,6 +2131,7 @@ export async function POST(req: Request) {
             buildContinuationAcceptanceInstruction({
               userMessage: message,
               offerText: continuationOfferText,
+              refinement: continuationAcceptance.refinement,
             }) +
             "\n\n" +
             combinedText;
@@ -2229,6 +2300,10 @@ export async function POST(req: Request) {
             userProfileContextApplied: !!userProfileContextText,
             maxMultiPdfsInContext,
             shortContinuationAccepted: !!continuationOfferText,
+            shortContinuationRefinement:
+              continuationOfferText && continuationAcceptance.refinement
+                ? continuationAcceptance.refinement
+                : null,
           },
         });
 
