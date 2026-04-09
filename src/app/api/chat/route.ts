@@ -2,9 +2,15 @@
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
-import { publiaPrompt } from "@/lib/publiaPrompt";
+import { buildProductScopedPrompt } from "@/lib/publiaPrompt";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
-import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
+import {
+  getAccessSummary,
+  resolveChatResponseModeAccess,
+  syncEffectiveAccessStatus,
+  type ChatResponseMode,
+} from "@/lib/access-control";
+import { shouldForceWebFirst } from "@/lib/webFirstDetector";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +45,28 @@ if (!openaiApiKey) {
 }
 
 type PdfChatMode = "active" | "all" | "selected";
+
+type InternalResponseMode = ChatResponseMode;
+
+function buildResponseModeInstruction(
+  responseMode: InternalResponseMode
+): string {
+  switch (responseMode) {
+    case "summary":
+      return "MODO DE RESPOSTA: Resumo. Responda de forma sintética, priorizando visão geral, pontos centrais e conclusão prática.";
+    case "manager_guidance":
+      return "MODO DE RESPOSTA: Orientação ao gestor. Estruture a resposta com foco em tomada de decisão, implicações práticas, providências e encaminhamentos recomendados para gestão pública.";
+    case "checklist":
+      return "MODO DE RESPOSTA: Checklist. Responda em formato de checklist objetivo, com itens acionáveis e verificáveis.";
+    case "step_by_step":
+      return "MODO DE RESPOSTA: Passo a passo. Estruture a resposta em sequência operacional, com ordem lógica de execução.";
+    case "document_draft":
+      return "MODO DE RESPOSTA: Minuta de documento. Quando fizer sentido, entregue uma minuta inicial prática, estruturada e editável, deixando claro o que precisa ser validado antes do uso oficial.";
+    case "objective":
+    default:
+      return "MODO DE RESPOSTA: Padrão. Responda de forma natural, direta, clara e técnica, sem forçar checklist, passo a passo ou minuta, preservando precisão e aplicabilidade prática.";
+  }
+}
 
 type MessageRow = {
   id: string;
@@ -228,7 +256,8 @@ const MAX_PDF_CONTEXT_CHARS = 6000;
 const MAX_TOTAL_CHARS = 10000;
 const MAX_EXTRACTED_TEXT_CHARS = 150000;
 const MAX_FULL_FILE_FALLBACK_MB = 20;
-const MAX_MULTI_PDFS_IN_CONTEXT = 3;
+const DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT = 3;
+const STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT = 5;
 
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 const PDF_PROCESSING_MESSAGE =
@@ -479,6 +508,15 @@ function isReferencesHeader(line: string) {
   );
 }
 
+function normalizeFooterHeadings(text: string) {
+  return String(text || "")
+    .replace(/^\s*\*\*?\s*base legal\s*:?\s*\*\*?\s*$/gim, "**Base legal:**")
+    .replace(
+      /^\s*\*\*?\s*refer[eê]ncias oficiais consultadas\s*:?\s*\*\*?\s*$/gim,
+      "**Referências oficiais consultadas:**"
+    );
+}
+
 function applyLegalBaseLinks(text: string) {
   const lines = String(text || "").split("\n");
   let inBaseLegalSection = false;
@@ -543,32 +581,148 @@ function convertNamedLinksToMarkdown(text: string) {
   return out;
 }
 
-function formatAssistantText(text: string) {
-  const trimmed = String(text || "").trim();
-  const withNamedLinks = convertNamedLinksToMarkdown(trimmed);
-  return applyLegalBaseLinks(withNamedLinks);
+function detectLegalBasesFromText(text: string) {
+  const found: string[] = [];
+
+  for (const rule of LEGAL_BASE_LINK_RULES) {
+    if (rule.pattern.test(text)) {
+      found.push(`- [${rule.label}](${rule.url})`);
+    }
+  }
+
+  const unique = Array.from(new Set(found));
+
+  if (unique.length > 0) return unique;
+
+  const lower = String(text || "").toLowerCase();
+
+  if (
+    lower.includes("licitação") ||
+    lower.includes("licitacao") ||
+    lower.includes("contrato administrativo") ||
+    lower.includes("dispensa") ||
+    lower.includes("inexigibilidade")
+  ) {
+    return ["- [Lei nº 14.133/2021](https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm)"];
+  }
+
+  if (
+    lower.includes("orçamento") ||
+    lower.includes("orcamento") ||
+    lower.includes("empenho") ||
+    lower.includes("liquidação") ||
+    lower.includes("liquidacao") ||
+    lower.includes("pagamento") ||
+    lower.includes("lrf")
+  ) {
+    return [
+      "- [Lei nº 4.320/1964](https://www.planalto.gov.br/ccivil_03/leis/l4320.htm)",
+      "- [Lei Complementar nº 101/2000](https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm)",
+    ];
+  }
+
+  if (
+    lower.includes("transparência") ||
+    lower.includes("transparencia") ||
+    lower.includes("lai")
+  ) {
+    return ["- [Lei nº 12.527/2011](https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm)"];
+  }
+
+  if (
+    lower.includes("lgpd") ||
+    lower.includes("dados pessoais") ||
+    lower.includes("proteção de dados") ||
+    lower.includes("protecao de dados")
+  ) {
+    return ["- [Lei nº 13.709/2018](https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm)"];
+  }
+
+  return ["- [Constituição Federal de 1988](https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm)"];
 }
 
-function shouldForceWebFirst(text: string) {
-  const t = String(text || "").toLowerCase();
+function hasFooterSection(text: string, kind: "base_legal" | "references") {
+  const normalized = String(text || "").toLowerCase();
 
-  const keywords = [
-    "prazo",
-    "limite",
-    "valor",
-    "multa",
-    "lei",
-    "decreto",
-    "portaria",
-    "tce",
-    "tcm",
-    "instrução normativa",
-    "resolução",
-    "vigente",
-    "atualizado",
-  ];
+  if (kind === "base_legal") {
+    return normalized.includes("base legal");
+  }
 
-  return keywords.some((k) => t.includes(k));
+  return (
+    normalized.includes("referências oficiais consultadas") ||
+    normalized.includes("referencias oficiais consultadas")
+  );
+}
+
+function ensureNormativeFooter(params: {
+  text: string;
+  forceWebFirst: boolean;
+  forceOfficialLinksRequested: boolean;
+}) {
+  const { text, forceWebFirst, forceOfficialLinksRequested } = params;
+
+  let out = String(text || "").trim();
+
+  const needsBaseLegal = !hasFooterSection(out, "base_legal");
+  const needsReferences = !hasFooterSection(out, "references");
+
+  if (!needsBaseLegal && !needsReferences) {
+    return out;
+  }
+
+  const chunks: string[] = [out];
+
+  if (needsBaseLegal) {
+    const bases = detectLegalBasesFromText(out);
+    chunks.push(["**Base legal:**", ...bases].join("\n"));
+  }
+
+  if (needsReferences) {
+    const webWasMandatory = forceWebFirst;
+    const onlyLinkIntent = !forceWebFirst && forceOfficialLinksRequested;
+
+    if (webWasMandatory) {
+      chunks.push(
+        [
+          "**Referências oficiais consultadas:**",
+          "- Consultar a Web (web First) era obrigatório, mas a consulta ficou indisponível neste momento.",
+        ].join("\n")
+      );
+    } else if (onlyLinkIntent) {
+      chunks.push(
+        [
+          "**Referências oficiais consultadas:**",
+          "- Não houve consulta web nesta resposta (resposta geral/conceitual).",
+        ].join("\n")
+      );
+    } else {
+      chunks.push(
+        [
+          "**Referências oficiais consultadas:**",
+          "- Não houve consulta web nesta resposta (resposta geral/conceitual).",
+        ].join("\n")
+      );
+    }
+  }
+
+  return chunks.join("\n\n").trim();
+}
+
+function formatAssistantText(params: {
+  text: string;
+  forceWebFirst: boolean;
+  forceOfficialLinksRequested: boolean;
+}) {
+  const trimmed = String(params.text || "").trim();
+  const normalizedHeadings = normalizeFooterHeadings(trimmed);
+  const withNamedLinks = convertNamedLinksToMarkdown(normalizedHeadings);
+  const withLegalLinks = applyLegalBaseLinks(withNamedLinks);
+
+  return ensureNormativeFooter({
+    text: withLegalLinks,
+    forceWebFirst: params.forceWebFirst,
+    forceOfficialLinksRequested: params.forceOfficialLinksRequested,
+  });
 }
 
 function shouldForceOfficialLinks(text: string) {
@@ -677,6 +831,159 @@ function buildUserProfileContextText(profile: UserProfileContext | null) {
     lines.join("\n") +
     "\n\nINSTRUÇÃO IMPORTANTE: use esse contexto cadastral como base inicial da resposta. Só peça confirmação de município/UF ou Tribunal de Contas competente se o usuário indicar outra localidade, outro ente, consórcio, órgão estadual/federal, ou se houver dúvida real de jurisdição."
   );
+}
+
+function getMaxMultiPdfsInContext(params: {
+  accessSummary: any;
+  productTier: string;
+}) {
+  const capabilityLimit = Number(
+    params?.accessSummary?.capabilities?.maxPdfsPerConversation ?? NaN
+  );
+
+  if (Number.isFinite(capabilityLimit) && capabilityLimit > 0) {
+    return Math.max(1, Math.floor(capabilityLimit));
+  }
+
+  if (params.productTier === "strategic") {
+    return STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT;
+  }
+
+  return DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT;
+}
+
+function normalizeContinuationMessage(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[“”"'`´]/g, "")
+    .replace(/[.!?,;:()\-_/\\]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isShortContinuationAcceptance(message: string) {
+  const normalized = normalizeContinuationMessage(message);
+
+  const exactMatches = new Set([
+    "eu quero",
+    "quero",
+    "quero sim",
+    "sim",
+    "sim quero",
+    "sim eu quero",
+    "pode",
+    "pode sim",
+    "ok",
+    "ok pode",
+    "isso",
+    "isso mesmo",
+    "faça isso",
+    "faca isso",
+    "pode fazer",
+    "pode continuar",
+    "continue",
+    "continua",
+    "pode seguir",
+    "segue",
+    "quero isso",
+    "vamos em frente",
+    "vamos seguir",
+    "vamos continuar",
+    "concordo",
+    "concordo sim",
+    "de acordo",
+    "pode prosseguir",
+    "prosseguir",
+  ]);
+
+  if (exactMatches.has(normalized)) return true;
+
+  if (normalized.startsWith("eu quero ") && normalized.split(" ").length <= 4) {
+    return true;
+  }
+
+  if (normalized.startsWith("ok ") && normalized.split(" ").length <= 4) {
+    return true;
+  }
+
+  if (normalized.startsWith("vamos ") && normalized.split(" ").length <= 4) {
+    return true;
+  }
+
+  if (normalized.startsWith("concordo") && normalized.split(" ").length <= 4) {
+    return true;
+  }
+
+  return false;
+}
+
+function lastAssistantOfferToContinue(historyRows: MessageRow[]) {
+  const lastAssistant = [...historyRows]
+    .reverse()
+    .find((row) => row.role === "assistant" && String(row.content ?? "").trim());
+
+  if (!lastAssistant) return null;
+
+  const content = String(lastAssistant.content ?? "").trim();
+  const normalized = normalizeContinuationMessage(content);
+
+  const offerPatterns = [
+    "se voce quiser",
+    "posso em uma proxima resposta",
+    "posso em uma resposta seguinte",
+    "posso sugerir",
+    "posso montar",
+    "posso estruturar",
+    "posso elaborar",
+    "posso transformar",
+    "posso gerar",
+    "posso criar",
+    "posso adaptar",
+    "quer que eu",
+    "deseja que eu",
+  ];
+
+  const hasOfferPattern = offerPatterns.some((pattern) =>
+    normalized.includes(pattern)
+  );
+
+  if (!hasOfferPattern) return null;
+
+  const paragraphs = content
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const offerParagraph =
+    [...paragraphs].reverse().find((part) => {
+      const partNormalized = normalizeContinuationMessage(part);
+      return offerPatterns.some((pattern) => partNormalized.includes(pattern));
+    }) ?? content;
+
+  return clampText(offerParagraph, 1400);
+}
+
+function buildContinuationAcceptanceInstruction(params: {
+  userMessage: string;
+  offerText: string;
+}) {
+  return [
+    "CONTINUIDADE CONVERSACIONAL OBRIGATÓRIA:",
+    "- O usuário respondeu com uma aceitação curta da sugestão imediatamente anterior da IA.",
+    "- NÃO trate isso como mensagem incompleta.",
+    "- NÃO peça para o usuário reformular, completar a frase ou escolher novamente.",
+    "- Continue exatamente a linha proposta na última resposta da IA, executando a sugestão oferecida.",
+    "- Só peça esclarecimento adicional se houver ambiguidade real e incontornável.",
+    "",
+    "ÚLTIMA SUGESTÃO OBJETIVA DA IA A SER CONTINUADA:",
+    params.offerText,
+    "",
+    `MENSAGEM CURTA DO USUÁRIO: ${params.userMessage.trim()}`,
+    "",
+    "INSTRUÇÃO FINAL: responda já entregando o conteúdo prometido na sugestão anterior.",
+  ].join("\n");
 }
 
 async function getUserProfileContext(
@@ -1116,7 +1423,8 @@ async function resolvePdfChatState(
   pdfRows: PdfFileRow[],
   userId: string,
   message: string,
-  activePdfFileId: string | null
+  activePdfFileId: string | null,
+  maxMultiPdfsInContext: number
 ): Promise<PdfChatState> {
   if (!pdfRows.length) {
     return {
@@ -1131,9 +1439,14 @@ async function resolvePdfChatState(
     };
   }
 
-  const rowsToUse = pdfRows.slice(0, MAX_MULTI_PDFS_IN_CONTEXT);
+  const safeMaxMultiPdfsInContext = Math.max(
+    1,
+    Math.floor(maxMultiPdfsInContext || DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT)
+  );
+
+  const rowsToUse = pdfRows.slice(0, safeMaxMultiPdfsInContext);
   const maxCharsPerPdf = Math.max(
-    1400,
+    900,
     Math.floor(MAX_PDF_CONTEXT_CHARS / Math.max(1, rowsToUse.length))
   );
 
@@ -1353,12 +1666,14 @@ export async function POST(req: Request) {
     temperature,
     pdfMode,
     selectedPdfIds,
+    responseMode,
   } = body as {
     conversationId: string;
     message: string;
     temperature?: number;
     pdfMode?: PdfChatMode;
     selectedPdfIds?: string[];
+    responseMode?: string;
   };
 
   const temp = parseTemperature(temperature, 0.3);
@@ -1425,6 +1740,48 @@ export async function POST(req: Request) {
       }
     );
   }
+
+  const responseModeAccess = resolveChatResponseModeAccess({
+    summary: accessSummary,
+    requestedResponseMode: responseMode,
+  });
+
+  if (responseModeAccess.rejected) {
+    const errorMessage =
+      responseModeAccess.rejectionReason ===
+      "response_mode_not_available_for_tier"
+        ? "O modo de resposta não está disponível para o seu plano atual."
+        : responseModeAccess.rejectionReason === "response_mode_not_allowed"
+          ? "O modo de resposta informado não é permitido para o seu plano atual."
+          : "O modo de resposta informado é inválido.";
+
+    return new Response(
+      sseEvent("error", {
+        error: errorMessage,
+        responseModeBlocked: true,
+        productTier: responseModeAccess.productTier,
+        allowedResponseModes: responseModeAccess.allowedModes,
+        reason: responseModeAccess.rejectionReason,
+      }),
+      {
+        status: 403,
+        headers: SSE_HEADERS,
+      }
+    );
+  }
+
+  const effectiveResponseMode: InternalResponseMode =
+    responseModeAccess.effectiveMode;
+
+  const scopedPrompt = buildProductScopedPrompt({
+    productTier: responseModeAccess.productTier,
+    responseMode: effectiveResponseMode,
+  });
+
+  const maxMultiPdfsInContext = getMaxMultiPdfsInContext({
+    accessSummary,
+    productTier: responseModeAccess.productTier,
+  });
 
   const { data: conv } = await client
     .from("conversations")
@@ -1566,6 +1923,12 @@ export async function POST(req: Request) {
         const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
         historyRows.reverse();
 
+        const continuationOfferText =
+          isShortContinuationAcceptance(message) &&
+          historyRows.length > 0
+            ? lastAssistantOfferToContinue(historyRows)
+            : null;
+
         const { data: userMessageRow, error: insertUserError } = await client
           .from("messages")
           .insert({
@@ -1616,7 +1979,8 @@ export async function POST(req: Request) {
           pdfRows,
           userId,
           message,
-          pdfState.active_pdf_file_id
+          pdfState.active_pdf_file_id,
+          maxMultiPdfsInContext
         );
 
         if (aborted || closed) {
@@ -1653,6 +2017,9 @@ export async function POST(req: Request) {
               ? pdfChatState.pdfRows[0]?.vector_index_status ?? null
               : null,
           ocrUrl: OCR_URL,
+          productTier: responseModeAccess.productTier,
+          allowedResponseModes: responseModeAccess.allowedModes,
+          effectiveResponseMode,
         });
 
         if (
@@ -1689,6 +2056,16 @@ export async function POST(req: Request) {
             message.trim();
         }
 
+        if (continuationOfferText) {
+          combinedText =
+            buildContinuationAcceptanceInstruction({
+              userMessage: message,
+              offerText: continuationOfferText,
+            }) +
+            "\n\n" +
+            combinedText;
+        }
+
         const userProfileContextText = buildUserProfileContextText(userProfile);
         if (userProfileContextText) {
           combinedText =
@@ -1704,6 +2081,9 @@ export async function POST(req: Request) {
             "\n\nINSTRUÇÃO IMPORTANTE: ao comparar documentos, cite claramente o nome de cada PDF ao mencionar diferenças, convergências, riscos ou contradições.\n\n" +
             combinedText;
         }
+
+        combinedText =
+          buildResponseModeInstruction(effectiveResponseMode) + "\n\n" + combinedText;
 
         if (forceOfficialLinksRequested) {
           combinedText =
@@ -1743,7 +2123,7 @@ export async function POST(req: Request) {
         try {
           const reqObj: any = {
             model,
-            instructions: publiaPrompt,
+            instructions: scopedPrompt,
             input,
             temperature: temp,
             stream: true,
@@ -1782,7 +2162,12 @@ export async function POST(req: Request) {
           }
 
           flush();
-          assistantText = formatAssistantText(assistantText);
+
+          assistantText = formatAssistantText({
+            text: assistantText,
+            forceWebFirst,
+            forceOfficialLinksRequested,
+          });
         } catch (error) {
           console.error("Erro OpenAI em /api/chat:", error);
           safeSend("error", { error: "Erro ao gerar resposta da IA." });
@@ -1837,7 +2222,13 @@ export async function POST(req: Request) {
             pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
             forceWebFirst,
             forceOfficialLinksRequested,
+            responseMode: effectiveResponseMode,
+            responseModeRequested: responseModeAccess.requestedMode,
+            responseModeAllowedForTier: responseModeAccess.canUseResponseMode,
+            productTier: responseModeAccess.productTier,
             userProfileContextApplied: !!userProfileContextText,
+            maxMultiPdfsInContext,
+            shortContinuationAccepted: !!continuationOfferText,
           },
         });
 

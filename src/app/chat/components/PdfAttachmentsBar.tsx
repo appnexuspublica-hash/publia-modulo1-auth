@@ -8,22 +8,26 @@ export type PdfFile = {
   file_name: string;
   created_at?: string;
   file_size_kb?: number;
-  // storage_path?: string; // podemos usar depois se quiser link para download
 };
 
 type PdfAttachmentsBarProps = {
   pdfs: PdfFile[];
   onUploadClick: () => void;
   onRemovePdf: (id: string) => void;
+  maxPdfsPerConversation?: number | null;
 };
 
-export function PdfAttachmentsBar({ pdfs, onUploadClick, onRemovePdf }: PdfAttachmentsBarProps) {
+export function PdfAttachmentsBar({
+  pdfs,
+  onUploadClick,
+  onRemovePdf,
+  maxPdfsPerConversation = null,
+}: PdfAttachmentsBarProps) {
   const hasPdfs = pdfs && pdfs.length > 0;
 
   return (
     <div className="px-8 pt-2 pb-1">
-      {/* Botão simples "Anexar PDF" alinhado com o chat */}
-      <div className="w-full max-w-3xl mx-auto flex justify-start">
+      <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-3">
         <button
           type="button"
           onClick={onUploadClick}
@@ -31,11 +35,17 @@ export function PdfAttachmentsBar({ pdfs, onUploadClick, onRemovePdf }: PdfAttac
         >
           Anexar PDF
         </button>
+
+        {typeof maxPdfsPerConversation === "number" && (
+          <span className="text-[11px] text-slate-200">
+            Limite por conversa: {maxPdfsPerConversation} PDF
+            {maxPdfsPerConversation === 1 ? "" : "s"}
+          </span>
+        )}
       </div>
 
-      {/* Chips de PDFs anexados (quando houver) */}
       {hasPdfs && (
-        <div className="mt-2 w-full max-w-3xl mx-auto flex flex-wrap gap-2">
+        <div className="mt-2 mx-auto flex w-full max-w-3xl flex-wrap gap-2">
           {pdfs.map((pdf) => (
             <div
               key={pdf.id}
@@ -44,9 +54,9 @@ export function PdfAttachmentsBar({ pdfs, onUploadClick, onRemovePdf }: PdfAttac
               <span className="max-w-[160px] truncate" title={pdf.file_name}>
                 {pdf.file_name}
               </span>
-              {pdf.file_size_kb && (
+              {pdf.file_size_kb ? (
                 <span className="text-[10px] text-slate-300">~{pdf.file_size_kb} KB</span>
-              )}
+              ) : null}
               <button
                 type="button"
                 onClick={() => onRemovePdf(pdf.id)}

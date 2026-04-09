@@ -1,26 +1,16 @@
-// src/lib/access-control.ts
+//src/lib/access-control.ts
+import type {
+  AccessStatus,
+  BillingCycle,
+  BrandConfig,
+  FeatureCapabilities,
+  ProductTier,
+  ScopeType,
+  SubscriptionPlan,
+  UserAccessSummary,
+} from "@/types/access";
 
-export type AccessStatus =
-  | "trial_active"
-  | "trial_expired"
-  | "subscription_active"
-  | "subscription_expired";
-
-export type AccessSummary = {
-  user_id: string;
-  access_status: AccessStatus;
-  trial_started_at: string | null;
-  trial_ends_at: string | null;
-  trial_message_limit: number;
-  subscription_plan: string | null;
-  subscription_started_at: string | null;
-  subscription_ends_at: string | null;
-  messages_used: number;
-  pdf_uploads_used: number;
-  input_tokens_used: number;
-  output_tokens_used: number;
-  total_tokens_used: number;
-};
+export type AccessSummary = UserAccessSummary;
 
 export type AccessDecision = {
   allowed: boolean;
@@ -35,10 +25,359 @@ export type AccessDecision = {
   message: string | null;
 };
 
+export type ChatResponseMode =
+  | "objective"
+  | "summary"
+  | "step_by_step"
+  | "checklist"
+  | "document_draft"
+  | "manager_guidance";
+
+export type ChatResponseModeResolution = {
+  productTier: ProductTier;
+  allowedModes: ChatResponseMode[];
+  requestedMode: ChatResponseMode | null;
+  effectiveMode: ChatResponseMode;
+  canUseResponseMode: boolean;
+  rejected: boolean;
+  rejectionReason:
+    | null
+    | "response_mode_not_available_for_tier"
+    | "response_mode_invalid"
+    | "response_mode_not_allowed";
+};
+
+const ESSENTIAL_TRIAL_MESSAGE_LIMIT = 75;
+const STRATEGIC_TRIAL_MESSAGE_LIMIT = 100;
+const GOVERNANCE_TRIAL_MESSAGE_LIMIT = 75;
+
+const TRIAL_PDF_LIMIT = 10;
+
+const ESSENTIAL_SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
+const STRATEGIC_SUBSCRIPTION_PDF_LIMIT_MONTH = 40;
+
+const STRATEGIC_CHAT_RESPONSE_MODES = [
+  "objective",
+  "summary",
+  "step_by_step",
+  "checklist",
+  "document_draft",
+  "manager_guidance",
+] as const;
+
+const GOVERNANCE_CHAT_RESPONSE_MODES = [
+  ...STRATEGIC_CHAT_RESPONSE_MODES,
+] as const;
+
+const CHAT_RESPONSE_MODE_SET = new Set<string>([
+  ...STRATEGIC_CHAT_RESPONSE_MODES,
+  ...GOVERNANCE_CHAT_RESPONSE_MODES,
+]);
+
 function toDate(value: string | null | undefined) {
   if (!value) return null;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function normalizeProductTier(value: unknown): ProductTier {
+  if (value === "essential" || value === "strategic" || value === "governance") {
+    return value;
+  }
+
+  return "essential";
+}
+
+export function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
+  if (value === "monthly" || value === "annual") {
+    return value;
+  }
+
+  return null;
+}
+
+export function resolveProductTier(summary?: Partial<AccessSummary> | null): ProductTier {
+  return normalizeProductTier(summary?.product_tier);
+}
+
+export function getTrialMessageLimitForTier(productTier: ProductTier): number {
+  switch (productTier) {
+    case "strategic":
+      return STRATEGIC_TRIAL_MESSAGE_LIMIT;
+    case "governance":
+      return GOVERNANCE_TRIAL_MESSAGE_LIMIT;
+    case "essential":
+    default:
+      return ESSENTIAL_TRIAL_MESSAGE_LIMIT;
+  }
+}
+
+export function getPdfUploadsPerMonthForTier(productTier: ProductTier): number | null {
+  switch (productTier) {
+    case "strategic":
+      return STRATEGIC_SUBSCRIPTION_PDF_LIMIT_MONTH;
+    case "governance":
+      return null;
+    case "essential":
+    default:
+      return ESSENTIAL_SUBSCRIPTION_PDF_LIMIT_MONTH;
+  }
+}
+
+function getEffectiveTrialMessageLimit(summary: AccessSummary): number {
+  const productTier = resolveProductTier(summary);
+  const tierLimit = getTrialMessageLimitForTier(productTier);
+  const storedLimit = Number(summary.trial_message_limit ?? 0);
+
+  if (!Number.isFinite(storedLimit) || storedLimit <= 0) {
+    return tierLimit;
+  }
+
+  return Math.max(storedLimit, tierLimit);
+}
+
+export function deriveBillingCycle(params: {
+  accessStatus: AccessStatus;
+  subscriptionPlan?: unknown;
+  isAdmin?: boolean;
+}): BillingCycle {
+  const { accessStatus, subscriptionPlan, isAdmin = false } = params;
+
+  if (isAdmin) return "none";
+
+  const normalizedPlan = normalizeSubscriptionPlan(subscriptionPlan);
+
+  if (accessStatus === "trial_active") return "trial";
+  if (normalizedPlan === "monthly") return "monthly";
+  if (normalizedPlan === "annual") return "annual";
+
+  return "none";
+}
+
+export function deriveScopeType(productTier: ProductTier): ScopeType {
+  return productTier === "governance" ? "organization" : "individual";
+}
+
+export function getBrandConfig(productTier: ProductTier): BrandConfig {
+  switch (productTier) {
+    case "strategic":
+      return {
+        productName: "Publ.IA Estratégico",
+        productLabel: "Publ.IA ESTRATÉGICO",
+        versionLabel: "2.0",
+        vendorLabel: "Nexus Pública",
+        accentVariant: "strategic",
+      };
+
+    case "governance":
+      return {
+        productName: "Publ.IA Governança",
+        productLabel: "Publ.IA GOVERNANÇA",
+        versionLabel: "3.0",
+        vendorLabel: "Nexus Pública",
+        accentVariant: "governance",
+      };
+
+    case "essential":
+    default:
+      return {
+        productName: "Publ.IA Essencial",
+        productLabel: "Publ.IA ESSENCIAL",
+        versionLabel: "1.7",
+        vendorLabel: "Nexus Pública",
+        accentVariant: "essential",
+      };
+  }
+}
+
+export function getCapabilitiesForTier(productTier: ProductTier): FeatureCapabilities {
+  switch (productTier) {
+    case "strategic":
+      return {
+        maxPdfsPerConversation: 5,
+        maxPdfUploadsPerAccount: TRIAL_PDF_LIMIT,
+        maxPdfUploadsPerMonth: STRATEGIC_SUBSCRIPTION_PDF_LIMIT_MONTH,
+        responseModes: [...STRATEGIC_CHAT_RESPONSE_MODES],
+        canRenameConversation: true,
+        canSearchHistory: true,
+        canFavoriteConversation: true,
+        canShareConversation: true,
+        canUseSuggestions: true,
+        canUseDeliverables: true,
+        canUseRiskClassification: true,
+        canUseLocalNorm: true,
+        canUseLegalBase: true,
+        canUseTemplates: true,
+        canUseOrganizationFeatures: false,
+      };
+
+    case "governance":
+      return {
+        maxPdfsPerConversation: 7,
+        maxPdfUploadsPerAccount: null,
+        maxPdfUploadsPerMonth: null,
+        responseModes: [...GOVERNANCE_CHAT_RESPONSE_MODES],
+        canRenameConversation: true,
+        canSearchHistory: true,
+        canFavoriteConversation: true,
+        canShareConversation: true,
+        canUseSuggestions: true,
+        canUseDeliverables: true,
+        canUseRiskClassification: true,
+        canUseLocalNorm: true,
+        canUseLegalBase: true,
+        canUseTemplates: true,
+        canUseOrganizationFeatures: true,
+      };
+
+    case "essential":
+    default:
+      return {
+        maxPdfsPerConversation: 3,
+        maxPdfUploadsPerAccount: TRIAL_PDF_LIMIT,
+        maxPdfUploadsPerMonth: ESSENTIAL_SUBSCRIPTION_PDF_LIMIT_MONTH,
+        responseModes: [],
+        canRenameConversation: false,
+        canSearchHistory: false,
+        canFavoriteConversation: false,
+        canShareConversation: true,
+        canUseSuggestions: false,
+        canUseDeliverables: false,
+        canUseRiskClassification: false,
+        canUseLocalNorm: false,
+        canUseLegalBase: false,
+        canUseTemplates: false,
+        canUseOrganizationFeatures: false,
+      };
+  }
+}
+
+export function buildAccessContext(params: {
+  summary: AccessSummary;
+  effectiveStatus: AccessStatus;
+  isAdmin?: boolean;
+}) {
+  const { summary, effectiveStatus, isAdmin = false } = params;
+
+  const productTier = resolveProductTier(summary);
+  const billingCycle = deriveBillingCycle({
+    accessStatus: effectiveStatus,
+    subscriptionPlan: summary.subscription_plan,
+    isAdmin,
+  });
+  const scopeType = deriveScopeType(productTier);
+  const capabilities = getCapabilitiesForTier(productTier);
+  const brand = getBrandConfig(productTier);
+
+  return {
+    productTier,
+    billingCycle,
+    scopeType,
+    capabilities,
+    brand,
+  };
+}
+
+export function getAllowedChatResponseModesForTier(
+  productTier: ProductTier
+): ChatResponseMode[] {
+  switch (productTier) {
+    case "strategic":
+      return [...STRATEGIC_CHAT_RESPONSE_MODES];
+    case "governance":
+      return [...GOVERNANCE_CHAT_RESPONSE_MODES];
+    case "essential":
+    default:
+      return [];
+  }
+}
+
+export function normalizeRequestedChatResponseMode(
+  value: unknown
+): ChatResponseMode | null {
+  const normalized = String(value ?? "").trim();
+
+  if (!normalized) return null;
+
+  if (!CHAT_RESPONSE_MODE_SET.has(normalized)) {
+    return null;
+  }
+
+  return normalized as ChatResponseMode;
+}
+
+export function resolveChatResponseModeAccess(params: {
+  summary: AccessSummary;
+  requestedResponseMode: unknown;
+}): ChatResponseModeResolution {
+  const { summary, requestedResponseMode } = params;
+
+  const productTier = resolveProductTier(summary);
+  const allowedModes = getAllowedChatResponseModesForTier(productTier);
+  const canUseResponseMode = allowedModes.length > 0;
+
+  const rawRequested = String(requestedResponseMode ?? "").trim();
+  const requestedWasProvided = rawRequested.length > 0;
+
+  if (!requestedWasProvided) {
+    return {
+      productTier,
+      allowedModes,
+      requestedMode: null,
+      effectiveMode: "objective",
+      canUseResponseMode,
+      rejected: false,
+      rejectionReason: null,
+    };
+  }
+
+  if (!canUseResponseMode) {
+    return {
+      productTier,
+      allowedModes,
+      requestedMode: null,
+      effectiveMode: "objective",
+      canUseResponseMode: false,
+      rejected: true,
+      rejectionReason: "response_mode_not_available_for_tier",
+    };
+  }
+
+  const normalizedRequested = normalizeRequestedChatResponseMode(rawRequested);
+
+  if (!normalizedRequested) {
+    return {
+      productTier,
+      allowedModes,
+      requestedMode: null,
+      effectiveMode: "objective",
+      canUseResponseMode,
+      rejected: true,
+      rejectionReason: "response_mode_invalid",
+    };
+  }
+
+  if (!allowedModes.includes(normalizedRequested)) {
+    return {
+      productTier,
+      allowedModes,
+      requestedMode: normalizedRequested,
+      effectiveMode: "objective",
+      canUseResponseMode,
+      rejected: true,
+      rejectionReason: "response_mode_not_allowed",
+    };
+  }
+
+  return {
+    productTier,
+    allowedModes,
+    requestedMode: normalizedRequested,
+    effectiveMode: normalizedRequested,
+    canUseResponseMode,
+    rejected: false,
+    rejectionReason: null,
+  };
 }
 
 export function evaluateAccess(summary: AccessSummary): AccessDecision {
@@ -48,7 +387,7 @@ export function evaluateAccess(summary: AccessSummary): AccessDecision {
   const subscriptionEndsAt = toDate(summary.subscription_ends_at);
 
   const messagesUsed = Number(summary.messages_used ?? 0);
-  const trialMessageLimit = Number(summary.trial_message_limit ?? 75);
+  const trialMessageLimit = getEffectiveTrialMessageLimit(summary);
 
   if (summary.access_status === "subscription_active") {
     if (subscriptionEndsAt && subscriptionEndsAt.getTime() < now.getTime()) {
@@ -177,7 +516,7 @@ async function ensureUserAccessRow(client: any, userId: string) {
     access_status: "trial_active",
     trial_started_at: now.toISOString(),
     trial_ends_at: trialEndsAt.toISOString(),
-    trial_message_limit: 75,
+    trial_message_limit: ESSENTIAL_TRIAL_MESSAGE_LIMIT,
   });
 
   if (insertErr) {
@@ -210,7 +549,10 @@ async function getAccessSummaryFromView(
     return null;
   }
 
-  return data as AccessSummary;
+  return {
+    ...(data as AccessSummary),
+    product_tier: resolveProductTier(data as Partial<AccessSummary>),
+  };
 }
 
 async function getAccessSummaryFromTables(
@@ -282,7 +624,9 @@ async function getAccessSummaryFromTables(
     access_status: accessRow.access_status as AccessStatus,
     trial_started_at: accessRow.trial_started_at,
     trial_ends_at: accessRow.trial_ends_at,
-    trial_message_limit: Number(accessRow.trial_message_limit ?? 75),
+    trial_message_limit: Number(
+      accessRow.trial_message_limit ?? ESSENTIAL_TRIAL_MESSAGE_LIMIT
+    ),
     subscription_plan: accessRow.subscription_plan ?? null,
     subscription_started_at: accessRow.subscription_started_at ?? null,
     subscription_ends_at: accessRow.subscription_ends_at ?? null,
@@ -291,6 +635,7 @@ async function getAccessSummaryFromTables(
     input_tokens_used: inputTokensUsed,
     output_tokens_used: outputTokensUsed,
     total_tokens_used: totalTokensUsed,
+    product_tier: "essential",
   };
 }
 
@@ -315,7 +660,10 @@ export async function getAccessSummary(
   return null;
 }
 
-export async function syncEffectiveAccessStatus(client: any, summary: AccessSummary) {
+export async function syncEffectiveAccessStatus(
+  client: any,
+  summary: AccessSummary
+) {
   const isAdmin = await getIsAdmin(client, summary.user_id);
 
   if (isAdmin) {

@@ -20,6 +20,12 @@ export type ChatMessage = {
   created_at?: string;
 };
 
+export type SuggestedNextQuestion = {
+  id: string;
+  label: string;
+  prompt: string;
+};
+
 type Variant = "chat" | "share";
 
 type ActionToast = { messageId: string; text: string } | null;
@@ -35,6 +41,8 @@ type ChatMessagesListProps = {
   onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   onDoOcr?: () => void | Promise<void>;
+  onSuggestionClick?: (prompt: string) => void | Promise<void>;
+  suggestions?: SuggestedNextQuestion[];
   isSending: boolean;
   activePdfName?: string | null;
   variant?: Variant;
@@ -44,6 +52,7 @@ type ChatMessagesListProps = {
   isBlocked?: boolean;
   blockedMessage?: string;
   blockedCta?: BlockedCta;
+  productTier?: "essential" | "strategic" | "governance" | string | null;
 };
 
 const dateOnlyFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -396,6 +405,8 @@ export function ChatMessagesList({
   onShareConversation,
   onRegenerateLast,
   onDoOcr,
+  onSuggestionClick,
+  suggestions = [],
   isSending,
   variant = "chat",
   scrollContainerRef,
@@ -404,6 +415,7 @@ export function ChatMessagesList({
   isBlocked = false,
   blockedMessage = "",
   blockedCta = null,
+  productTier = null,
 }: ChatMessagesListProps) {
   const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
 
@@ -497,6 +509,13 @@ export function ChatMessagesList({
     !isSending &&
     String(lastAssistant.content ?? "").toLowerCase().includes("faça ocr");
 
+  const showStrategicSuggestions =
+    variant === "chat" &&
+    productTier === "strategic" &&
+    Array.isArray(suggestions) &&
+    suggestions.length > 0 &&
+    typeof onSuggestionClick === "function";
+
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
@@ -506,11 +525,16 @@ export function ChatMessagesList({
           const isGeneratingThis = isLastAssistant && isSending;
           const regenerateBlocked = isGeneratingThis || isBlocked;
           const ocrBlocked = isGeneratingThis || isBlocked;
+          const suggestionBlocked = isGeneratingThis || isBlocked || isSending;
 
           let tableIndex = 0;
 
           const userBubble =
-            variant === "share" ? "bg-[#0d4161] text-white" : "bg-[#5d5d5d] text-white";
+            variant === "share"
+              ? "bg-[#0d4161] text-white"
+              : productTier === "strategic"
+                ? "bg-[#838383] text-white"
+                : "bg-[#5d5d5d] text-white";
 
           const assistantBubble =
             variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
@@ -798,6 +822,49 @@ export function ChatMessagesList({
                       </div>
                     </div>
                   )}
+
+                  {showStrategicSuggestions &&
+                    lastAssistant &&
+                    msg.id === lastAssistant.id && (
+                      <div
+                        className={
+                          productTier === "strategic"
+                            ? "mt-4 flex w-full flex-col items-center justify-center bg-[#2f4f67] px-2 py-2 text-center"
+                            : "mt-3 w-full rounded-2xl border border-white/10 bg-black/15 px-4 py-3"
+                        }
+                      >
+                        <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-200/80">
+                          Sugestões de próxima pergunta
+                        </div>
+
+                        <div
+                          className={
+                            productTier === "strategic"
+                              ? "flex w-full flex-wrap items-center justify-center gap-2"
+                              : "flex flex-wrap gap-2"
+                          }
+                        >
+                          {suggestions.map((suggestion) => (
+                            <button
+                              key={suggestion.id}
+                              type="button"
+                              disabled={suggestionBlocked}
+                              onClick={() => {
+                                if (suggestionBlocked) return;
+                                void onSuggestionClick?.(suggestion.prompt);
+                              }}
+                              title={isBlocked ? blockedMessage : suggestion.label}
+                              className={
+                                "rounded-full border border-white/15 bg-white/5 px-3 py-2 text-center text-[12px] leading-snug text-slate-100 transition hover:bg-white/10 " +
+                                (suggestionBlocked ? "cursor-not-allowed opacity-50" : "")
+                              }
+                            >
+                              {suggestion.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                 </div>
               )}
             </div>

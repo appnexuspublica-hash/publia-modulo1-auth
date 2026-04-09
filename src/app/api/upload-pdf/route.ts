@@ -1,25 +1,19 @@
-//src/app/api/upload-pdf/route.ts
+// src/app/api/upload-pdf/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
-  getAccessSummary,
+  buildAccessContext,
   evaluateAccessWithAdmin,
+  getAccessSummary,
+  getPdfUploadsPerMonthForTier,
 } from "@/lib/access-control";
+import type { AccessStatus, PdfPeriod, ProductTier } from "@/types/access";
 
 const PDF_UPLOAD_MAX_MB = 30;
 const TRIAL_PDF_LIMIT = 10;
-const SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
 
-const TRIAL_PDFS_PER_CONVERSATION = 1;
-const PAID_PDFS_PER_CONVERSATION = 3;
-
-type PdfPeriod = "account" | "month" | "admin" | null;
-
-type AccessStatus =
-  | "trial_active"
-  | "trial_expired"
-  | "subscription_active"
-  | "subscription_expired";
+const ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION = 1;
+const ESSENTIAL_PAID_PDFS_PER_CONVERSATION = 3;
 
 type PdfUploadPlanValidation = {
   allowed: boolean;
@@ -30,6 +24,12 @@ type PdfUploadPlanValidation = {
   blockedMessage: string | null;
   accessStatus: AccessStatus;
   isAdmin: boolean;
+  productTier: ProductTier;
+  capabilities: {
+    maxPdfsPerConversation: number;
+    maxPdfUploadsPerAccount: number | null;
+    maxPdfUploadsPerMonth: number | null;
+  };
 };
 
 type UploadPdfRequestBody = {
@@ -112,12 +112,23 @@ async function validatePdfUploadByPlan(
         "Não foi possível validar o acesso da sua conta no momento.",
       accessStatus: "trial_expired",
       isAdmin: false,
+      productTier: "essential",
+      capabilities: {
+        maxPdfsPerConversation: ESSENTIAL_PAID_PDFS_PER_CONVERSATION,
+        maxPdfUploadsPerAccount: TRIAL_PDF_LIMIT,
+        maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("essential"),
+      },
     };
   }
 
   const decision = await evaluateAccessWithAdmin(supabase, access);
   const accessStatus = decision.effectiveStatus as AccessStatus;
   const isAdmin = decision.reason === "admin_override";
+  const accessContext = buildAccessContext({
+    summary: access,
+    effectiveStatus: accessStatus,
+    isAdmin,
+  });
 
   if (isAdmin) {
     const used = await countUserPdfsAllTime(supabase, userId);
@@ -131,6 +142,8 @@ async function validatePdfUploadByPlan(
       blockedMessage: null,
       accessStatus,
       isAdmin: true,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
     };
   }
 
@@ -146,12 +159,15 @@ async function validatePdfUploadByPlan(
         "Seu plano atual não permite enviar novos PDFs.",
       accessStatus,
       isAdmin: false,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
     };
   }
 
   if (accessStatus === "trial_active") {
     const used = await countUserPdfsAllTime(supabase, userId);
-    const limit = TRIAL_PDF_LIMIT;
+    const limit =
+      accessContext.capabilities.maxPdfUploadsPerAccount ?? TRIAL_PDF_LIMIT;
     const remaining = Math.max(limit - used, 0);
 
     return {
@@ -166,25 +182,31 @@ async function validatePdfUploadByPlan(
           : null,
       accessStatus,
       isAdmin: false,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
     };
   }
 
   const used = await countUserPdfsThisMonth(supabase, userId);
-  const limit = SUBSCRIPTION_PDF_LIMIT_MONTH;
-  const remaining = Math.max(limit - used, 0);
+  const limit =
+    accessContext.capabilities.maxPdfUploadsPerMonth ??
+    getPdfUploadsPerMonthForTier(accessContext.productTier);
+  const remaining = limit === null ? null : Math.max(limit - used, 0);
 
   return {
-    allowed: used < limit,
+    allowed: limit === null ? true : used < limit,
     limit,
     used,
     remaining,
     period: "month",
     blockedMessage:
-      used >= limit
+      limit !== null && used >= limit
         ? `Você atingiu o limite de ${limit} PDFs neste mês no seu plano atual.`
         : null,
     accessStatus: "subscription_active",
     isAdmin: false,
+    productTier: accessContext.productTier,
+    capabilities: accessContext.capabilities,
   };
 }
 
@@ -209,18 +231,29 @@ async function getConversationPdfCount(
 function getConversationPdfLimit(params: {
   accessStatus: AccessStatus;
   isAdmin: boolean;
+  productTier: ProductTier;
+  capabilities: {
+    maxPdfsPerConversation: number;
+  };
 }) {
-  const { accessStatus, isAdmin } = params;
+  const { accessStatus, isAdmin, productTier, capabilities } = params;
 
   if (isAdmin) {
-    return PAID_PDFS_PER_CONVERSATION;
+    return capabilities.maxPdfsPerConversation;
   }
 
-  if (accessStatus === "trial_active") {
-    return TRIAL_PDFS_PER_CONVERSATION;
+  if (productTier === "essential" && accessStatus === "trial_active") {
+    return ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION;
   }
 
-  return PAID_PDFS_PER_CONVERSATION;
+  if (
+    productTier === "essential" &&
+    accessStatus === "subscription_active"
+  ) {
+    return ESSENTIAL_PAID_PDFS_PER_CONVERSATION;
+  }
+
+  return capabilities.maxPdfsPerConversation;
 }
 
 async function setConversationActivePdf(params: {
@@ -284,6 +317,7 @@ async function registerPdfUploadEvent(params: {
   pdfRemaining: number | null;
   pdfPeriod: PdfPeriod;
   conversationId: string | null;
+  productTier: ProductTier;
 }) {
   const {
     supabase,
@@ -297,6 +331,7 @@ async function registerPdfUploadEvent(params: {
     pdfRemaining,
     pdfPeriod,
     conversationId,
+    productTier,
   } = params;
 
   const payload = {
@@ -310,6 +345,7 @@ async function registerPdfUploadEvent(params: {
       storage_path: storagePath,
       file_size_bytes: fileSizeBytes,
       access_status: accessStatus,
+      product_tier: productTier,
       pdf_limit: pdfLimit,
       pdf_used: pdfUsed,
       pdf_remaining: pdfRemaining,
@@ -399,6 +435,7 @@ export async function POST(request: NextRequest) {
           accessStatus: planValidation.accessStatus,
           access_status: planValidation.accessStatus,
           isAdmin: planValidation.isAdmin,
+          productTier: planValidation.productTier,
           pdfUsage: {
             limit: planValidation.limit,
             used: planValidation.used,
@@ -413,6 +450,8 @@ export async function POST(request: NextRequest) {
     const conversationPdfLimit = getConversationPdfLimit({
       accessStatus: planValidation.accessStatus,
       isAdmin: planValidation.isAdmin,
+      productTier: planValidation.productTier,
+      capabilities: planValidation.capabilities,
     });
 
     const conversationPdfCount = await getConversationPdfCount(
@@ -421,16 +460,20 @@ export async function POST(request: NextRequest) {
     );
 
     if (conversationPdfCount >= conversationPdfLimit) {
+      const isEssentialTrial =
+        planValidation.productTier === "essential" &&
+        planValidation.accessStatus === "trial_active" &&
+        !planValidation.isAdmin;
+
       return NextResponse.json(
         {
-          error:
-            planValidation.accessStatus === "trial_active" &&
-            !planValidation.isAdmin
-              ? `No trial, cada conversa pode ter até ${TRIAL_PDFS_PER_CONVERSATION} PDF.`
-              : `Esta conversa já atingiu o limite de ${conversationPdfLimit} PDFs vinculados.`,
+          error: isEssentialTrial
+            ? `No trial do Publ.IA Essencial, cada conversa pode ter até ${ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION} PDF.`
+            : `Esta conversa já atingiu o limite de ${conversationPdfLimit} PDFs vinculados.`,
           accessStatus: planValidation.accessStatus,
           access_status: planValidation.accessStatus,
           isAdmin: planValidation.isAdmin,
+          productTier: planValidation.productTier,
           conversationPdfUsage: {
             limit: conversationPdfLimit,
             used: conversationPdfCount,
@@ -526,6 +569,7 @@ export async function POST(request: NextRequest) {
           : Math.max(planValidation.remaining - 1, 0),
       pdfPeriod: planValidation.period,
       conversationId,
+      productTier: planValidation.productTier,
     });
 
     return NextResponse.json(
@@ -537,6 +581,7 @@ export async function POST(request: NextRequest) {
           (insertedPdf as { file_size?: number }).file_size ?? fileSizeBytes
         ),
         isAdmin: planValidation.isAdmin,
+        productTier: planValidation.productTier,
         pdfUsage: {
           limit: planValidation.limit,
           used: planValidation.used + 1,

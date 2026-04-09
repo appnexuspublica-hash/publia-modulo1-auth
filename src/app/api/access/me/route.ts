@@ -2,19 +2,15 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
-  getAccessSummary,
+  buildAccessContext,
   evaluateAccessWithAdmin,
+  getAccessSummary,
+  getPdfUploadsPerMonthForTier,
+  getTrialMessageLimitForTier,
+  normalizeSubscriptionPlan,
+  resolveProductTier,
 } from "@/lib/access-control";
-
-type PdfPeriod = "account" | "month" | "admin" | null;
-
-type AccessStatus =
-  | "trial_active"
-  | "trial_expired"
-  | "subscription_active"
-  | "subscription_expired";
-
-type SubscriptionPlan = "monthly" | "annual" | null;
+import type { AccessStatus, PdfPeriod } from "@/types/access";
 
 type PdfUsageSummary = {
   limit: number | null;
@@ -24,7 +20,6 @@ type PdfUsageSummary = {
 };
 
 const TRIAL_PDF_LIMIT = 10;
-const SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
 
 function getMonthRangeUtc() {
   const now = new Date();
@@ -79,12 +74,19 @@ async function countUserPdfsThisMonth(
   return count ?? 0;
 }
 
-async function buildPdfUsage(
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
-  userId: string,
-  accessStatus: AccessStatus,
-  isAdmin: boolean
-): Promise<PdfUsageSummary> {
+async function buildPdfUsage(params: {
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  userId: string;
+  accessStatus: AccessStatus;
+  isAdmin: boolean;
+  capabilities: {
+    maxPdfUploadsPerAccount: number | null;
+    maxPdfUploadsPerMonth: number | null;
+  };
+  productTier: "essential" | "strategic" | "governance";
+}): Promise<PdfUsageSummary> {
+  const { supabase, userId, accessStatus, isAdmin, capabilities, productTier } = params;
+
   if (isAdmin) {
     const used = await countUserPdfsAllTime(supabase, userId);
 
@@ -98,7 +100,7 @@ async function buildPdfUsage(
 
   if (accessStatus === "trial_active") {
     const used = await countUserPdfsAllTime(supabase, userId);
-    const limit = TRIAL_PDF_LIMIT;
+    const limit = capabilities.maxPdfUploadsPerAccount ?? TRIAL_PDF_LIMIT;
 
     return {
       limit,
@@ -110,12 +112,13 @@ async function buildPdfUsage(
 
   if (accessStatus === "subscription_active") {
     const used = await countUserPdfsThisMonth(supabase, userId);
-    const limit = SUBSCRIPTION_PDF_LIMIT_MONTH;
+    const limit =
+      capabilities.maxPdfUploadsPerMonth ?? getPdfUploadsPerMonthForTier(productTier);
 
     return {
       limit,
       used,
-      remaining: Math.max(limit - used, 0),
+      remaining: limit === null ? null : Math.max(limit - used, 0),
       period: "month",
     };
   }
@@ -135,14 +138,6 @@ function buildBlockedMessage(accessStatus: AccessStatus): string | null {
 
   if (accessStatus === "subscription_expired") {
     return "Sua assinatura expirou. Renove para voltar a usar os recursos da IA.";
-  }
-
-  return null;
-}
-
-function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
-  if (value === "monthly" || value === "annual") {
-    return value;
   }
 
   return null;
@@ -177,16 +172,31 @@ export async function GET() {
     const accessStatus = decision.effectiveStatus as AccessStatus;
     const isAdmin = decision.reason === "admin_override";
 
-    const pdfUsage = await buildPdfUsage(
-      supabase,
-      user.id,
-      accessStatus,
-      isAdmin
-    );
+    const accessContext = buildAccessContext({
+      summary: access,
+      effectiveStatus: accessStatus,
+      isAdmin,
+    });
 
-    const subscriptionPlan = normalizeSubscriptionPlan(
-      "subscription_plan" in access ? access.subscription_plan : null
-    );
+    const productTier = resolveProductTier(access);
+
+    const pdfUsage = await buildPdfUsage({
+      supabase,
+      userId: user.id,
+      accessStatus,
+      isAdmin,
+      capabilities: accessContext.capabilities,
+      productTier,
+    });
+
+    const subscriptionPlan = normalizeSubscriptionPlan(access.subscription_plan);
+
+    const trialMessageLimit = isAdmin
+      ? null
+      : Math.max(
+          typeof access.trial_message_limit === "number" ? access.trial_message_limit : 0,
+          getTrialMessageLimitForTier(productTier)
+        );
 
     return NextResponse.json({
       accessStatus,
@@ -198,24 +208,23 @@ export async function GET() {
         ? null
         : decision.message ?? buildBlockedMessage(accessStatus),
       trialEndsAt:
-        "trial_ends_at" in access && typeof access.trial_ends_at === "string"
-          ? access.trial_ends_at
-          : null,
+        typeof access.trial_ends_at === "string" ? access.trial_ends_at : null,
       subscriptionEndsAt:
-        "subscription_ends_at" in access &&
         typeof access.subscription_ends_at === "string"
           ? access.subscription_ends_at
           : null,
       subscriptionPlan,
       messagesUsed:
         typeof access.messages_used === "number" ? access.messages_used : 0,
-      trialMessageLimit: isAdmin
-        ? null
-        : typeof access.trial_message_limit === "number"
-          ? access.trial_message_limit
-          : null,
+      trialMessageLimit,
       pdfUsage,
       isAdmin,
+
+      productTier: accessContext.productTier,
+      billingCycle: accessContext.billingCycle,
+      scopeType: accessContext.scopeType,
+      capabilities: accessContext.capabilities,
+      brand: accessContext.brand,
     });
   } catch (error) {
     console.error("Erro em /api/access/me:", error);

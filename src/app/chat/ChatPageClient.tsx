@@ -1,4 +1,4 @@
-// src/app/chat/chatPageClient.tsx
+//src/app/chat/ChatPageClient.tsx
 "use client";
 
 import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
@@ -22,8 +22,12 @@ import { getBlockedAccessCta } from "@/lib/access-cta";
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
-import { ChatInput } from "./components/ChatInput";
-import { ChatMessage, ChatMessagesList } from "./components/ChatMessagesList";
+import { ChatInput, type ResponseMode } from "./components/ChatInput";
+import {
+  ChatMessage,
+  ChatMessagesList,
+  type SuggestedNextQuestion,
+} from "./components/ChatMessagesList";
 
 type ChatPageClientProps = {
   userId: string;
@@ -48,7 +52,7 @@ function isUuid(v: string) {
   );
 }
 
-function markdownToPlainText(markdown: string): string {
+function markdownToPlainText(markdown: string) {
   let text = markdown;
 
   text = text.replace(/```[\s\S]*?```/g, "");
@@ -72,10 +76,44 @@ function truncatePdfName(name: string, max = 9) {
   return `${clean.slice(0, max)}...`;
 }
 
+function normalizeConversationTitle(title: string | null | undefined) {
+  const clean = String(title ?? "").trim();
+  return clean.length > 0 ? clean : "Nova conversa";
+}
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const MAX_PDF_SIZE_MB = 30;
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
+
+const STRATEGIC_RESPONSE_MODES: ResponseMode[] = [
+  "objective",
+  "summary",
+  "step_by_step",
+  "checklist",
+  "document_draft",
+  "manager_guidance",
+];
+
+function isStrategicResponseMode(value: unknown): value is ResponseMode {
+  return STRATEGIC_RESPONSE_MODES.includes(value as ResponseMode);
+}
+
+function normalizeServerResponseModes(value: unknown): ResponseMode[] {
+  if (!Array.isArray(value)) return [];
+
+  const normalized = value
+    .map((item) => String(item ?? "").trim())
+    .filter(isStrategicResponseMode);
+
+  return Array.from(new Set(normalized));
+}
+
+function normalizeServerEffectiveResponseMode(
+  value: unknown
+): ResponseMode | null {
+  return isStrategicResponseMode(value) ? value : null;
+}
 
 type Conversation = {
   id: string;
@@ -85,6 +123,7 @@ type Conversation = {
   share_id?: string | null;
   active_pdf_file_id?: string | null;
   pdf_enabled?: boolean;
+  is_favorite?: boolean;
 };
 
 type PdfExtractStatus =
@@ -116,8 +155,19 @@ type AttachedPdf = {
 
 type QuickActionKind = "resumo" | "pontos" | "irregularidade";
 
+type ServerChatMeta = {
+  userMessage?: {
+    id?: string;
+    content?: string;
+    created_at?: string;
+  };
+  productTier?: "essential" | "strategic" | "governance" | string;
+  allowedResponseModes?: string[];
+  effectiveResponseMode?: string | null;
+};
+
 type SSEParsed =
-  | { event: "meta"; data: any }
+  | { event: "meta"; data: ServerChatMeta }
   | { event: "delta"; data: { text?: string } }
   | { event: "done"; data: any }
   | {
@@ -127,6 +177,9 @@ type SSEParsed =
         accessBlocked?: boolean;
         accessStatus?: string;
         reason?: string;
+        responseModeBlocked?: boolean;
+        productTier?: "essential" | "strategic" | "governance" | string;
+        allowedResponseModes?: string[];
       };
     }
   | { event: string; data: any };
@@ -275,6 +328,182 @@ function getPdfHint(att: AttachedPdf | null) {
   }
 }
 
+function buildStrategicSuggestions(
+  responseMode: ResponseMode,
+  hasAttachedPdfs: boolean
+): SuggestedNextQuestion[] {
+  const pdfContext = hasAttachedPdfs
+    ? "com base nos PDFs selecionados"
+    : "com base na resposta acima";
+
+  const suggestionsByMode: Record<ResponseMode, SuggestedNextQuestion[]> = {
+    objective: [
+      {
+        id: "summary",
+        label: "Gerar resumo executivo",
+        prompt: `Gere um resumo executivo objetivo ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Liste os principais pontos de atenção, riscos, cuidados e alertas ${pdfContext}.`,
+      },
+      {
+        id: "checklist",
+        label: "Transformar em checklist",
+        prompt: `Transforme isso em um checklist prático ${pdfContext}.`,
+      },
+      {
+        id: "manager_guidance",
+        label: "Orientar o gestor",
+        prompt: `Explique isso em linguagem de orientação ao gestor ${pdfContext}.`,
+      },
+      {
+        id: "document_draft",
+        label: "Criar minuta",
+        prompt: `Transforme isso em uma minuta de documento ${pdfContext}.`,
+      },
+    ],
+    summary: [
+      {
+        id: "executive",
+        label: "Resumo ainda mais executivo",
+        prompt: `Reescreva em formato de resumo executivo, mais direto e estratégico ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Liste os principais pontos de atenção, riscos, cuidados e alertas ${pdfContext}.`,
+      },
+      {
+        id: "checklist",
+        label: "Gerar checklist",
+        prompt: `Crie um checklist objetivo a partir desse resumo ${pdfContext}.`,
+      },
+      {
+        id: "risks",
+        label: "Apontar riscos e cuidados",
+        prompt: `Liste os principais riscos, cuidados e pontos de atenção ${pdfContext}.`,
+      },
+      {
+        id: "draft",
+        label: "Virar minuta",
+        prompt: `Transforme este conteúdo em minuta de documento ${pdfContext}.`,
+      },
+    ],
+    step_by_step: [
+      {
+        id: "checklist",
+        label: "Converter em checklist",
+        prompt: `Converta o passo a passo em checklist operacional ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Aponte os principais pontos de atenção, riscos e cuidados dentro desse passo a passo ${pdfContext}.`,
+      },
+      {
+        id: "manager_guidance",
+        label: "Versão para o gestor",
+        prompt: `Apresente esse passo a passo como orientação ao gestor ${pdfContext}.`,
+      },
+      {
+        id: "timeline",
+        label: "Organizar por etapas",
+        prompt: `Organize isso em etapas com ordem lógica de execução ${pdfContext}.`,
+      },
+      {
+        id: "draft",
+        label: "Criar minuta",
+        prompt: `Com base nesse passo a passo, crie uma minuta de documento ${pdfContext}.`,
+      },
+    ],
+    checklist: [
+      {
+        id: "details",
+        label: "Explicar cada item",
+        prompt: `Explique cada item do checklist de forma objetiva ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Liste os principais pontos de atenção, riscos, pendências e cuidados do checklist ${pdfContext}.`,
+      },
+      {
+        id: "manager_guidance",
+        label: "Checklist para gestor",
+        prompt: `Adapte esse checklist para orientação ao gestor ${pdfContext}.`,
+      },
+      {
+        id: "priorities",
+        label: "Destacar prioridades",
+        prompt: `Destaque prioridades, riscos e pendências do checklist ${pdfContext}.`,
+      },
+      {
+        id: "draft",
+        label: "Virar minuta",
+        prompt: `Transforme o checklist em minuta de documento ${pdfContext}.`,
+      },
+    ],
+    document_draft: [
+      {
+        id: "improve_draft",
+        label: "Refinar a minuta",
+        prompt: `Refine a minuta com linguagem mais formal e técnica ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Liste os principais pontos de atenção, riscos, fragilidades e cuidados da minuta ${pdfContext}.`,
+      },
+      {
+        id: "summary",
+        label: "Resumir a minuta",
+        prompt: `Faça um resumo executivo da minuta ${pdfContext}.`,
+      },
+      {
+        id: "checklist",
+        label: "Checklist da minuta",
+        prompt: `Crie um checklist com base na minuta ${pdfContext}.`,
+      },
+      {
+        id: "manager_guidance",
+        label: "Explicar ao gestor",
+        prompt: `Explique ao gestor o conteúdo e a finalidade desta minuta ${pdfContext}.`,
+      },
+    ],
+    manager_guidance: [
+      {
+        id: "executive_summary",
+        label: "Resumo executivo",
+        prompt: `Gere um resumo executivo para tomada de decisão ${pdfContext}.`,
+      },
+      {
+        id: "attention_points",
+        label: "Pontos de atenção",
+        prompt: `Liste os principais pontos de atenção, riscos, cuidados e alertas para o gestor ${pdfContext}.`,
+      },
+      {
+        id: "checklist",
+        label: "Checklist de execução",
+        prompt: `Crie um checklist de execução para o gestor ${pdfContext}.`,
+      },
+      {
+        id: "draft",
+        label: "Minuta correspondente",
+        prompt: `Crie uma minuta de documento correspondente ${pdfContext}.`,
+      },
+      {
+        id: "risks",
+        label: "Riscos e decisões",
+        prompt: `Liste riscos, pontos críticos e decisões recomendadas ${pdfContext}.`,
+      },
+    ],
+  };
+
+  return suggestionsByMode[responseMode] ?? suggestionsByMode.objective;
+}
+
 export default function ChatPageClient({
   userId,
   userLabel,
@@ -323,6 +552,7 @@ export default function ChatPageClient({
 
   const [access, setAccess] = useState<FrontendAccessSummary | null>(null);
   const [accessLoading, setAccessLoading] = useState(true);
+  const [responseMode, setResponseMode] = useState<ResponseMode>("objective");
 
   function clearToastTimer() {
     if (toastTimerRef.current) {
@@ -415,9 +645,67 @@ export default function ChatPageClient({
     );
   }, [attachedPdfs, activePdfId]);
 
+  const brand = useMemo(
+    () =>
+      access?.brand ?? {
+        productName: "Publ.IA Essencial",
+        productLabel: "Publ.IA ESSENCIAL",
+        versionLabel: "1.7",
+        vendorLabel: "Nexus Pública",
+        accentVariant: "essential" as const,
+      },
+    [access]
+  );
+
+  const isStrategic = access?.productTier === "strategic";
+
+  const strategicResponseModes = useMemo(() => {
+    const raw = Array.isArray(access?.capabilities?.responseModes)
+      ? access?.capabilities?.responseModes
+      : [];
+
+    const normalized = raw
+      .map((item) => String(item ?? "").trim())
+      .filter(isStrategicResponseMode);
+
+    const unique = Array.from(new Set(normalized));
+
+    if (unique.length > 0) {
+      return unique;
+    }
+
+    if (isStrategic) {
+      return STRATEGIC_RESPONSE_MODES;
+    }
+
+    return [] as ResponseMode[];
+  }, [access?.capabilities?.responseModes, isStrategic]);
+
+  const showResponseModes = isStrategic && strategicResponseModes.length > 0;
+
+  const strategicSuggestions = useMemo(() => {
+    if (!isStrategic) return [] as SuggestedNextQuestion[];
+
+    const hasContextualPdfs =
+      attachedPdfs.length > 0 && selectedPdfIds.length > 0;
+
+    return buildStrategicSuggestions(responseMode, hasContextualPdfs);
+  }, [isStrategic, responseMode, attachedPdfs.length, selectedPdfIds.length]);
+
   useEffect(() => {
     loadAccess();
   }, [loadAccess]);
+
+  useEffect(() => {
+    if (!showResponseModes) {
+      setResponseMode("objective");
+      return;
+    }
+
+    if (!strategicResponseModes.includes(responseMode)) {
+      setResponseMode(strategicResponseModes[0]);
+    }
+  }, [showResponseModes, strategicResponseModes, responseMode]);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -615,8 +903,25 @@ export default function ChatPageClient({
         const validIds = validPdfs.map((pdf) => pdf.id);
         const validSet = new Set(validIds);
         const filtered = prev.filter((id) => validSet.has(id));
-        if (filtered.length > 0) return filtered;
-        return validIds;
+
+        if (filtered.length === 0) {
+          return validIds;
+        }
+
+        const prevHadAllValidBeforeNewOnes =
+          filtered.length === Math.min(prev.length, validIds.length);
+
+        if (prevHadAllValidBeforeNewOnes) {
+          const merged = [...filtered];
+          for (const id of validIds) {
+            if (!merged.includes(id)) {
+              merged.push(id);
+            }
+          }
+          return merged;
+        }
+
+        return filtered;
       });
 
       const activePdfResolved =
@@ -648,7 +953,10 @@ export default function ChatPageClient({
         .eq("user_id", userId);
 
       if (deactivateError) {
-        console.error("Erro ao desativar PDFs anteriores da conversa:", deactivateError.message);
+        console.error(
+          "Erro ao desativar PDFs anteriores da conversa:",
+          deactivateError.message
+        );
 
         if (!options?.silent) {
           showToast("Não foi possível definir o PDF ativo.", {
@@ -667,7 +975,10 @@ export default function ChatPageClient({
         .eq("pdf_file_id", pdfFileId);
 
       if (activateError) {
-        console.error("Erro ao ativar o PDF atual da conversa:", activateError.message);
+        console.error(
+          "Erro ao ativar o PDF atual da conversa:",
+          activateError.message
+        );
 
         if (!options?.silent) {
           showToast("Não foi possível definir o PDF ativo.", {
@@ -756,7 +1067,7 @@ export default function ChatPageClient({
       try {
         const { data, error } = await supabase
           .from("conversations")
-          .select("id, title, created_at, is_shared, share_id")
+          .select("id, title, created_at, is_shared, share_id, is_favorite")
           .eq("user_id", userId)
           .is("deleted_at", null)
           .order("created_at", { ascending: false });
@@ -863,7 +1174,7 @@ export default function ChatPageClient({
       const { data, error } = await supabase
         .from("conversations")
         .insert({ user_id: userId, title: "Nova conversa" })
-        .select("id, title, created_at, is_shared, share_id")
+        .select("id, title, created_at, is_shared, share_id, is_favorite")
         .single();
 
       if (error) {
@@ -990,6 +1301,82 @@ export default function ChatPageClient({
     });
   }
 
+  async function handleToggleFavorite(id: string, nextValue: boolean) {
+    const previous = conversations;
+
+    setConversations((prev) =>
+      prev.map((conv) =>
+        conv.id === id ? { ...conv, is_favorite: nextValue } : conv
+      )
+    );
+
+    const { error } = await supabase
+      .from("conversations")
+      .update({ is_favorite: nextValue })
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Erro ao atualizar favorito da conversa:", error.message);
+      setConversations(previous);
+      showToast("Não foi possível atualizar o favorito da conversa.", {
+        type: "error",
+        persistent: true,
+      });
+      return;
+    }
+
+    showToast(
+      nextValue ? "Conversa fixada no topo." : "Conversa removida dos favoritos.",
+      {
+        type: "success",
+        persistent: false,
+        durationMs: 2200,
+      }
+    );
+  }
+
+  async function handleRenameConversation(id: string, nextTitle: string) {
+    const cleanTitle = nextTitle.trim();
+    if (!cleanTitle) {
+      showToast("Digite um título válido para a conversa.", {
+        type: "warning",
+        persistent: true,
+      });
+      return;
+    }
+
+    const previous = conversations;
+
+    setConversations((prev) =>
+      prev.map((conv) =>
+        conv.id === id ? { ...conv, title: cleanTitle } : conv
+      )
+    );
+
+    const { error } = await supabase
+      .from("conversations")
+      .update({ title: cleanTitle })
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Erro ao renomear conversa:", error.message);
+      setConversations(previous);
+      showToast("Não foi possível renomear a conversa.", {
+        type: "error",
+        persistent: true,
+      });
+      return;
+    }
+
+    showToast("Título da conversa atualizado.", {
+      type: "success",
+      persistent: false,
+      durationMs: 2200,
+    });
+  }
+
   async function ensureConversationId(): Promise<string | null> {
     if (activeConversationIdRef.current) return activeConversationIdRef.current;
     const created = await createConversation(false);
@@ -1055,11 +1442,8 @@ export default function ChatPageClient({
 
     try {
       const existingConv = conversations.find((c) => c.id === conversationId);
-      const isDefaultTitle =
-        !existingConv ||
-        !existingConv.title ||
-        existingConv.title.trim().length === 0 ||
-        existingConv.title.trim().toLowerCase() === "nova conversa";
+      const currentTitle = normalizeConversationTitle(existingConv?.title);
+      const isDefaultTitle = currentTitle.toLowerCase() === "nova conversa";
 
       if (isDefaultTitle) {
         const base = trimmed.replace(/\s+/g, " ");
@@ -1092,16 +1476,27 @@ export default function ChatPageClient({
       const ac = new AbortController();
       abortRef.current = ac;
 
+      const effectiveClientResponseMode =
+        showResponseModes && strategicResponseModes.includes(responseMode)
+          ? responseMode
+          : null;
+
+      const body: Record<string, unknown> = {
+        conversationId,
+        message: trimmed,
+        pdfMode: pdfSelection.pdfMode,
+        selectedPdfIds: pdfSelection.selectedPdfIds,
+      };
+
+      if (effectiveClientResponseMode) {
+        body.responseMode = effectiveClientResponseMode;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ac.signal,
-        body: JSON.stringify({
-          conversationId,
-          message: trimmed,
-          pdfMode: pdfSelection.pdfMode,
-          selectedPdfIds: pdfSelection.selectedPdfIds,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
@@ -1170,6 +1565,56 @@ export default function ChatPageClient({
                 )
               );
             }
+
+            const serverProductTier = String(
+              parsed.data?.productTier ?? ""
+            ).trim();
+
+            const serverAllowedModes = normalizeServerResponseModes(
+              parsed.data?.allowedResponseModes
+            );
+
+            const serverEffectiveMode = normalizeServerEffectiveResponseMode(
+              parsed.data?.effectiveResponseMode
+            );
+
+            if (
+              serverProductTier === "essential" ||
+              serverProductTier === "strategic" ||
+              serverProductTier === "governance"
+            ) {
+              setAccess((prev) => {
+                if (!prev) return prev;
+
+                const nextCapabilities =
+                  serverProductTier === "strategic"
+                    ? {
+                        ...prev.capabilities,
+                        responseModes:
+                          serverAllowedModes.length > 0
+                            ? serverAllowedModes
+                            : prev.capabilities.responseModes,
+                      }
+                    : {
+                        ...prev.capabilities,
+                        responseModes: [],
+                      };
+
+                return {
+                  ...prev,
+                  productTier: serverProductTier,
+                  capabilities: nextCapabilities,
+                };
+              });
+            }
+
+            if (serverProductTier !== "strategic") {
+              setResponseMode("objective");
+            } else if (serverEffectiveMode) {
+              setResponseMode(serverEffectiveMode);
+            } else if (serverAllowedModes.length > 0) {
+              setResponseMode(serverAllowedModes[0]);
+            }
           }
 
           if (parsed.event === "delta") {
@@ -1188,6 +1633,8 @@ export default function ChatPageClient({
           if (parsed.event === "done") {
             const assistantMessage = parsed.data?.assistantMessage;
             if (assistantMessage?.id) {
+              streamingAssistantIdRef.current = assistantMessage.id;
+
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === tempAssistantId
@@ -1204,124 +1651,201 @@ export default function ChatPageClient({
           }
 
           if (parsed.event === "error") {
-            const msg = parsed.data?.error || "Erro ao gerar a resposta.";
-            console.error("[SSE error]", msg);
+            const errorMessage =
+              String(parsed.data?.error ?? "").trim() ||
+              "Erro ao enviar mensagem para a IA.";
+
+            const accessBlocked = parsed.data?.accessBlocked === true;
+            const apiAccessStatus =
+              typeof parsed.data?.accessStatus === "string"
+                ? parsed.data.accessStatus
+                : null;
+
+            const responseModeBlocked = parsed.data?.responseModeBlocked === true;
+            const apiProductTier =
+              typeof parsed.data?.productTier === "string"
+                ? parsed.data.productTier
+                : null;
+            const apiAllowedModes = normalizeServerResponseModes(
+              parsed.data?.allowedResponseModes
+            );
 
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === tempAssistantId ? { ...m, content: `Erro: ${msg}` } : m
+                m.id === tempAssistantId
+                  ? { ...m, content: `Erro: ${errorMessage}` }
+                  : m
               )
             );
 
-            showToast(msg, {
-              type: "error",
-              persistent: true,
-            });
+            if (
+              apiProductTier === "essential" ||
+              apiProductTier === "strategic" ||
+              apiProductTier === "governance"
+            ) {
+              setAccess((prev) => {
+                if (!prev) return prev;
+
+                const nextCapabilities =
+                  apiProductTier === "strategic"
+                    ? {
+                        ...prev.capabilities,
+                        responseModes:
+                          apiAllowedModes.length > 0
+                            ? apiAllowedModes
+                            : prev.capabilities.responseModes,
+                      }
+                    : {
+                        ...prev.capabilities,
+                        responseModes: [],
+                      };
+
+                return {
+                  ...prev,
+                  productTier: apiProductTier,
+                  capabilities: nextCapabilities,
+                };
+              });
+            }
+
+            if (responseModeBlocked) {
+              if (apiProductTier !== "strategic") {
+                setResponseMode("objective");
+              } else if (apiAllowedModes.length > 0) {
+                setResponseMode(apiAllowedModes[0]);
+              }
+
+              showToast(errorMessage, {
+                type: "warning",
+                persistent: true,
+              });
+
+              abortRef.current?.abort();
+              abortRef.current = null;
+              setIsSending(false);
+              return;
+            }
+
+            if (accessBlocked && apiAccessStatus) {
+              const cta = getBlockedAccessCta(apiAccessStatus as any);
+              showToast(errorMessage, {
+                type: "warning",
+                persistent: true,
+                cta,
+              });
+              loadAccess().catch(() => {});
+            } else {
+              showToast(errorMessage, {
+                type: "error",
+                persistent: true,
+              });
+            }
+
+            abortRef.current?.abort();
+            abortRef.current = null;
+            setIsSending(false);
+            return;
           }
         }
       }
     } catch (error: any) {
-      if (error?.name !== "AbortError") {
-        console.error("Erro inesperado ao enviar mensagem para IA:", error);
+      if (error?.name === "AbortError") {
+        if (!stoppedByUserRef.current) {
+          showToast("A resposta foi interrompida.", {
+            type: "warning",
+            persistent: false,
+            durationMs: 2500,
+          });
+        }
+      } else {
+        console.error("Erro inesperado ao enviar mensagem:", error);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempAssistantId
+              ? { ...m, content: "Erro ao enviar mensagem para a IA." }
+              : m
+          )
+        );
         showToast("Erro ao enviar mensagem para a IA.", {
           type: "error",
           persistent: true,
         });
-        setMessages((prev) =>
-          prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId)
-        );
       }
     } finally {
       abortRef.current = null;
       setIsSending(false);
-      streamingAssistantIdRef.current = null;
       stoppedByUserRef.current = false;
+      streamingAssistantIdRef.current = null;
       loadAccess().catch(() => {});
     }
   }
 
-  async function handleRegenerateLast(lastUserMessage: string) {
-    if (isBlocked) {
-      showToast(blockedMessage, {
+  async function handleRegenerateLast() {
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUserMessage) {
+      showToast("Não há mensagem do usuário para regenerar.", {
         type: "warning",
         persistent: true,
-        cta: blockedCta,
       });
       return;
     }
 
-    await handleSend(lastUserMessage);
+    if (isSending) {
+      showToast("Aguarde a resposta atual terminar antes de regenerar.", {
+        type: "warning",
+        persistent: true,
+      });
+      return;
+    }
+
+    await handleSend(lastUserMessage.content);
   }
 
-  async function handlePdfQuickAction(kind: QuickActionKind) {
-    if (isBlocked) {
-      showToast(blockedMessage, {
-        type: "warning",
-        persistent: true,
-        cta: blockedCta,
-      });
-      return;
-    }
+  async function handleSuggestionClick(prompt: string) {
+    if (!isStrategic) return;
 
-    if (!attachedPdf) {
-      showToast("Anexe um PDF antes de usar as ações rápidas.", {
+    if (isSending) {
+      showToast("Aguarde a resposta atual terminar antes de enviar outra pergunta.", {
         type: "warning",
         persistent: true,
       });
       return;
-    }
-
-    let prompt = "";
-
-    switch (kind) {
-      case "resumo":
-        prompt = `
-Com base no PDF ativo anexado ( ${attachedPdf.fileName} ). Faça um resumo objetivo e didático, em linguagem simples, destacando:
-- Contexto geral do documento;
-- Principais pontos normativos ou orientações;
-- Impactos práticos para a administração pública municipal.
-
-Organize a resposta em tópicos e parágrafos curtos.
-`.trim();
-        break;
-
-      case "pontos":
-        prompt = `
-Considerando apenas o conteúdo do PDF ativo anexado ( ${attachedPdf.fileName} ). Liste os principais PONTOS DE ATENÇÃO, focando especialmente em:
-- Obrigações principais;
-- Prazos relevantes;
-- Riscos para a administração pública municipal em caso de descumprimento.
-
-Explique de forma clara, em linguagem acessível, e organize em tópicos.
-`.trim();
-        break;
-
-      case "irregularidade":
-        prompt = `
-Com base no conteúdo do PDF ativo anexado ( ${attachedPdf.fileName} ). Identifique possíveis IRREGULARIDADES, inconsistências ou pontos de atenção jurídica,
-tanto formais quanto materiais, que possam gerar risco para a administração pública municipal.
-Aponte:
-- Dispositivos que possam gerar dúvidas ou conflitos com a legislação vigente;
-- Riscos de responsabilização do gestor;
-- Recomendações de cautela.
-
-Organize a resposta em tópicos, com explicações objetivas.
-`.trim();
-        break;
     }
 
     await handleSend(prompt);
   }
 
-  async function handleCopyAnswer(messageId: string) {
-    try {
-      await copyMessageToClipboard(messageId);
-      showActionToast(messageId, "Resposta copiada.");
+  async function handleQuickPdfAction(kind: QuickActionKind) {
+    if (!activeConversationId || !activePdfId) {
+      showToast("Selecione um PDF ativo antes de usar uma ação rápida.", {
+        type: "warning",
+        persistent: true,
+      });
       return;
-    } catch (err) {
-      console.warn("[copy] Falhou HTML copy, tentando fallback texto...", err);
     }
 
+    if (isSending) {
+      showToast("Aguarde a resposta atual terminar antes de usar uma ação rápida.", {
+        type: "warning",
+        persistent: true,
+      });
+      return;
+    }
+
+    const prompts: Record<QuickActionKind, string> = {
+      resumo:
+        "Faça um resumo executivo objetivo do PDF ativo, destacando os pontos principais em tópicos.",
+      pontos:
+        "Liste os principais pontos de atenção, riscos ou cuidados do PDF ativo em tópicos.",
+      irregularidade:
+        "Analise o PDF ativo e aponte possíveis inconsistências, irregularidades ou pontos que exigem validação.",
+    };
+
+    await handleSend(prompts[kind]);
+    setShowPdfQuickActions(false);
+  }
+
+  async function handleCopyAnswer(messageId: string) {
     try {
       const msg = messages.find(
         (m) => m.id === messageId && m.role === "assistant"
@@ -1577,6 +2101,9 @@ Organize a resposta em tópicos, com explicações objetivas.
       });
 
       setActivePdfId(data.id);
+      setSelectedPdfIds((prev) =>
+        prev.includes(data.id) ? prev : [...prev, data.id]
+      );
       await loadConversationPdfs(conversationId);
 
       fetch("/api/pdf/index", {
@@ -1610,92 +2137,104 @@ Organize a resposta em tópicos, com explicações objetivas.
         await removeUploadedPdfFromStorage(uploadedStoragePath);
       }
 
-      showToast("Não foi possível enviar o PDF.", {
+      showToast("Erro inesperado ao enviar PDF.", {
         type: "error",
         persistent: true,
       });
     } finally {
-      e.target.value = "";
       setIsUploadingPdf(false);
+      e.target.value = "";
     }
   }
 
   async function handleRemovePdf(pdfId: string) {
-    if (isBlocked) {
-      showToast(blockedMessage, {
-        type: "warning",
-        persistent: true,
-        cta: blockedCta,
-      });
-      return;
-    }
+    if (!activeConversationId) return;
+
+    const confirmRemove = window.confirm(
+      "Tem certeza que deseja remover este PDF da conversa?"
+    );
+    if (!confirmRemove) return;
 
     try {
-      const conversationId = activeConversationIdRef.current;
-      if (!conversationId) {
-        setAttachedPdfs([]);
-        setActivePdfId(null);
-        setSelectedPdfIds([]);
-        setShowPdfQuickActions(false);
-        setShowPdfHint(false);
-        return;
-      }
-
       const res = await fetch("/api/pdf/detach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId, pdfFileId: pdfId }),
+        body: JSON.stringify({ conversationId: activeConversationId, pdfFileId: pdfId }),
       });
 
+      const data = await res.json().catch(() => null);
+
       if (!res.ok) {
-        console.error("Falha ao desanexar PDF:", await res.text());
-        showToast("Não foi possível desanexar o PDF.", {
-          type: "error",
-          persistent: true,
-        });
+        showToast(
+          String(data?.error ?? "Não foi possível remover o PDF da conversa."),
+          {
+            type: "error",
+            persistent: true,
+          }
+        );
         return;
       }
 
-      const data = (await res.json().catch(() => null)) as
-        | {
-            activePdfFileId?: string | null;
-          }
-        | null;
+      setAttachedPdfs((prev) => prev.filter((item) => item.id !== pdfId));
 
-      const remaining = attachedPdfs.filter((pdf) => pdf.id !== pdfId);
-      setAttachedPdfs(remaining);
+      if (activePdfId === pdfId) {
+        const nextActive = attachedPdfs.find((item) => item.id !== pdfId)?.id ?? null;
+        setActivePdfId(nextActive);
+      }
+
       setSelectedPdfIds((prev) => prev.filter((id) => id !== pdfId));
-      setShowPdfQuickActions(false);
+      setShowPdfHint(false);
 
-      const nextActivePdfId =
-        typeof data?.activePdfFileId === "string" && data.activePdfFileId.trim()
-          ? data.activePdfFileId
-          : remaining[remaining.length - 1]?.id ?? null;
+      await loadConversationPdfs(activeConversationId);
 
-      setActivePdfId(nextActivePdfId);
-
-      const nextActivePdf =
-        remaining.find((pdf) => pdf.id === nextActivePdfId) ??
-        remaining[remaining.length - 1] ??
-        null;
-
-      const uiStatus = classifyPdfUiStatus(nextActivePdf);
-      setShowPdfHint(
-        uiStatus === "no_text" ||
-          uiStatus === "technical_error" ||
-          uiStatus === "large"
-      );
-
-      await loadConversationPdfs(conversationId);
-
-      showToast("PDF desanexado.", {
+      showToast("PDF removido da conversa.", {
         type: "success",
         persistent: false,
         durationMs: 2500,
       });
-    } catch (e) {
-      console.error("Erro ao desanexar PDF:", e);
-      showToast("Erro ao desanexar o PDF.", {
+    } catch (error) {
+      console.error("Erro inesperado ao remover PDF:", error);
+      showToast("Erro inesperado ao remover PDF.", {
+        type: "error",
+        persistent: true,
+      });
+    }
+  }
+
+  async function handleReprocessPdf() {
+    if (!activeConversationId || !activePdfId) return;
+
+    try {
+      const res = await fetch("/api/pdf/reprocess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdfFileId: activePdfId }),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        showToast(
+          String(data?.error ?? "Não foi possível reprocessar o PDF."),
+          {
+            type: "error",
+            persistent: true,
+          }
+        );
+        return;
+      }
+
+      showToast("Reprocessamento iniciado.", {
+        type: "success",
+        persistent: false,
+        durationMs: 2500,
+      });
+
+      pollPdfUntilStable(activePdfId, activeConversationId).catch(() => {});
+      setShowPdfQuickActions(false);
+    } catch (error) {
+      console.error("Erro inesperado ao reprocessar PDF:", error);
+      showToast("Erro inesperado ao reprocessar PDF.", {
         type: "error",
         persistent: true,
       });
@@ -1703,56 +2242,17 @@ Organize a resposta em tópicos, com explicações objetivas.
   }
 
   async function handleDoOcr() {
-    if (isBlocked) {
-      showToast(blockedMessage, {
-        type: "warning",
-        persistent: true,
-        cta: blockedCta,
+    try {
+      window.open(OCR_URL, "_blank", "noopener,noreferrer");
+      showToast("Abrindo ferramenta de OCR em nova aba.", {
+        type: "success",
+        persistent: false,
+        durationMs: 2500,
       });
-      return;
-    }
-
-    const conversationId = activeConversationIdRef.current;
-    const currentAttachedPdf = attachedPdf;
-
-    if (conversationId && currentAttachedPdf?.id) {
-      try {
-        const res = await fetch("/api/pdf/detach", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            conversationId,
-            pdfFileId: currentAttachedPdf.id,
-          }),
-        });
-
-        if (!res.ok) {
-          console.error("Falha ao desanexar PDF:", await res.text());
-          showToast("Não consegui desanexar o PDF agora. Tente novamente.", {
-            type: "error",
-            persistent: true,
-          });
-          return;
-        }
-
-        await loadConversationPdfs(conversationId);
-      } catch (e) {
-        console.error("Erro ao desanexar PDF:", e);
-        showToast("Não consegui desanexar o PDF agora. Tente novamente.", {
-          type: "error",
-          persistent: true,
-        });
-        return;
-      }
-    }
-
-    setShowPdfQuickActions(false);
-    setShowPdfHint(false);
-
-    const w = window.open(OCR_URL, "_blank", "noopener,noreferrer");
-    if (!w) {
-      showToast("Pop-up bloqueado. Permita pop-ups ou abra: smallpdf.com/pt/pdf-ocr", {
-        type: "warning",
+    } catch (error) {
+      console.error("Erro ao abrir OCR:", error);
+      showToast("Não foi possível abrir a ferramenta de OCR.", {
+        type: "error",
         persistent: true,
       });
     }
@@ -1782,8 +2282,7 @@ Organize a resposta em tópicos, com explicações objetivas.
     switch (toast.type) {
       case "success":
         return {
-          container:
-            "border-emerald-300/30 bg-emerald-500/10 text-emerald-100",
+          container: "border-emerald-300/30 bg-emerald-500/10 text-emerald-100",
           button: "text-emerald-100/80 hover:text-emerald-50",
         };
       case "warning":
@@ -1800,15 +2299,229 @@ Organize a resposta em tópicos, com explicações objetivas.
     }
   }, [toast]);
 
-  const renderMain = () => {
+  const renderPdfRow = (options: {
+    buttonClassName: string;
+    buttonDisabledClassName: string;
+    quickActionsClassName: string;
+    quickActionsDisabledClassName: string;
+    itemActiveClassName: string;
+    itemInactiveClassName: string;
+    hintActionClassName: string;
+    hintDismissClassName: string;
+    quickMenuClassName: string;
+    quickMenuItemClassName: string;
+    showReprocessInMenu?: boolean;
+    maxLabel?: number;
+  }) => {
     const hint = getPdfHint(attachedPdf);
-
     const showHint =
       !!attachedPdf &&
       !!hint &&
       showPdfHint &&
       (hint.kind === "ocr" || hint.kind === "info");
 
+    return (
+      <>
+        {showHint && hint && (
+          <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+            <div className="leading-snug">{hint.text}</div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {hint.kind === "ocr" && (
+                <button
+                  type="button"
+                  onClick={handleDoOcr}
+                  className={options.hintActionClassName}
+                >
+                  FAZER OCR
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={handleDismissPdfHint}
+                className={options.hintDismissClassName}
+              >
+                CONTINUAR
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="mb-2 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handlePdfButtonClick}
+            disabled={isBlocked || accessLoading || isUploadingPdf}
+            className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
+              isBlocked || accessLoading || isUploadingPdf
+                ? options.buttonDisabledClassName
+                : options.buttonClassName
+            }`}
+          >
+            ANEXAR PDF
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={handlePdfChange}
+          />
+
+          <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
+            <div className="flex w-max items-center gap-2 pr-1">
+              {attachedPdfs.map((pdf) => {
+                const isActivePdf = pdf.id === attachedPdf?.id;
+                const isSelectedPdf = selectedPdfIds.includes(pdf.id);
+                const itemBadge = getPdfBadge(pdf);
+
+                return (
+                  <div
+                    key={pdf.id}
+                    className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-3 text-[10px] ${
+                      isActivePdf
+                        ? options.itemActiveClassName
+                        : options.itemInactiveClassName
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const conversationId = activeConversationIdRef.current;
+                        if (!conversationId) return;
+
+                        const ok = await setPdfAsActive(conversationId, pdf.id);
+                        if (!ok) return;
+
+                        setActivePdfId(pdf.id);
+
+                        const uiStatus = classifyPdfUiStatus(pdf);
+                        setShowPdfHint(
+                          uiStatus === "no_text" ||
+                            uiStatus === "technical_error" ||
+                            uiStatus === "large"
+                        );
+
+                        await loadConversationPdfs(conversationId);
+                      }}
+                      className="max-w-[96px] truncate font-medium"
+                      title={pdf.fileName}
+                    >
+                      {truncatePdfName(pdf.fileName, options.maxLabel ?? 9)}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleSelectedPdf(pdf.id)}
+                      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
+                        isSelectedPdf
+                          ? "bg-emerald-600 text-white"
+                          : "border border-slate-300/60 bg-transparent text-transparent hover:border-slate-200"
+                      }`}
+                      title={
+                        isSelectedPdf
+                          ? "Remover da seleção do chat"
+                          : "Selecionar para o chat"
+                      }
+                    >
+                      {isSelectedPdf ? "✓" : "○"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemovePdf(pdf.id)}
+                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white hover:bg-red-600"
+                      title="Excluir PDF"
+                    >
+                      ×
+                    </button>
+
+                    {itemBadge && (
+                      <span className="rounded-full bg-black/20 px-2 py-[2px] text-[9px]">
+                        {itemBadge}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {attachedPdfs.length > 0 && (
+            <div ref={quickActionsRef} className="relative shrink-0">
+              <button
+                type="button"
+                disabled={!attachedPdf || isBlocked || accessLoading}
+                onClick={() =>
+                  attachedPdf && setShowPdfQuickActions((prev) => !prev)
+                }
+                className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
+                  attachedPdf && !isBlocked && !accessLoading
+                    ? options.quickActionsClassName
+                    : options.quickActionsDisabledClassName
+                }`}
+              >
+                AÇÕES RÁPIDAS...
+              </button>
+
+              {showPdfQuickActions && attachedPdf && (
+                <div className={options.quickMenuClassName}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handleQuickPdfAction("resumo");
+                    }}
+                    className={options.quickMenuItemClassName}
+                  >
+                    Resumir PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handleQuickPdfAction("pontos");
+                    }}
+                    className={options.quickMenuItemClassName}
+                  >
+                    Pontos de Atenção (Obrigações, prazos e riscos)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPdfQuickActions(false);
+                      handleQuickPdfAction("irregularidade");
+                    }}
+                    className={options.quickMenuItemClassName}
+                  >
+                    Identificar irregularidades
+                  </button>
+
+                  {options.showReprocessInMenu && (
+                    <button
+                      type="button"
+                      onClick={handleReprocessPdf}
+                      className={options.quickMenuItemClassName}
+                    >
+                      Reprocessar PDF
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {isUploadingPdf && (
+          <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>
+        )}
+      </>
+    );
+  };
+
+  const renderMain = () => {
     return (
       <div className="flex flex-1 flex-col overflow-hidden">
         <div className="flex-1 overflow-y-auto px-8 py-6">
@@ -1819,6 +2532,8 @@ Organize a resposta em tópicos, com explicações objetivas.
               onShareConversation={handleShareConversation}
               onRegenerateLast={handleRegenerateLast}
               onDoOcr={handleDoOcr}
+              onSuggestionClick={handleSuggestionClick}
+              suggestions={strategicSuggestions}
               isSending={isSending}
               variant="chat"
               activeConversationId={activeConversationId}
@@ -1826,6 +2541,7 @@ Organize a resposta em tópicos, com explicações objetivas.
               isBlocked={isBlocked}
               blockedMessage={blockedMessage}
               blockedCta={blockedCta}
+              productTier={access?.productTier ?? null}
             />
           ) : loadingMessages && activeConversationId ? (
             <div className="flex h-full items-center justify-center text-sm text-white">
@@ -1893,197 +2609,74 @@ Organize a resposta em tópicos, com explicações objetivas.
               </div>
             )}
 
-            {showHint && hint && (
-              <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
-                <div className="leading-snug">{hint.text}</div>
+            {isStrategic
+              ? renderPdfRow({
+                  buttonClassName:
+                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                  buttonDisabledClassName:
+                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                  quickActionsClassName:
+                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                  quickActionsDisabledClassName:
+                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                  itemActiveClassName:
+                    "border border-white/40 bg-[#244861] text-slate-100",
+                  itemInactiveClassName:
+                    "border border-transparent bg-[#274760] text-slate-100",
+                  hintActionClassName:
+                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                  hintDismissClassName:
+                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                  quickMenuClassName:
+                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg",
+                  quickMenuItemClassName:
+                    "block w-full px-4 py-2 text-left hover:bg-[#223f57]",
+                  showReprocessInMenu: true,
+                  maxLabel: 9,
+                })
+              : renderPdfRow({
+                  buttonClassName:
+                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                  buttonDisabledClassName:
+                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                  quickActionsClassName:
+                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                  quickActionsDisabledClassName:
+                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                  itemActiveClassName:
+                    "border border-white/40 bg-[#244861] text-slate-100",
+                  itemInactiveClassName:
+                    "border border-transparent bg-[#274760] text-slate-100",
+                  hintActionClassName:
+                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                  hintDismissClassName:
+                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                  quickMenuClassName:
+                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg",
+                  quickMenuItemClassName:
+                    "block w-full px-4 py-2 text-left hover:bg-[#223f57]",
+                  maxLabel: 9,
+                })}
 
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {hint.kind === "ocr" && (
-                    <button
-                      type="button"
-                      onClick={handleDoOcr}
-                      className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
-                    >
-                      FAZER OCR
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={handleDismissPdfHint}
-                    className="rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]"
-                  >
-                    CONTINUAR
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="mb-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handlePdfButtonClick}
-                disabled={isBlocked || accessLoading || isUploadingPdf}
-                className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
-                  isBlocked || accessLoading || isUploadingPdf
-                    ? "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
-                    : "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                }`}
-              >
-                ANEXAR PDF
-              </button>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/pdf"
-                className="hidden"
-                onChange={handlePdfChange}
-              />
-
-              <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
-                <div className="flex w-max items-center gap-2 pr-1">
-                  {attachedPdfs.map((pdf) => {
-                    const isActivePdf = pdf.id === attachedPdf?.id;
-                    const isSelectedPdf = selectedPdfIds.includes(pdf.id);
-                    const itemBadge = getPdfBadge(pdf);
-
-                    return (
-                      <div
-                        key={pdf.id}
-                        className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-3 text-[10px] ${
-                          isActivePdf
-                            ? "border-white/40 bg-[#244861] text-slate-100"
-                            : "border-transparent bg-[#274760] text-slate-100"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const conversationId = activeConversationIdRef.current;
-                            if (!conversationId) return;
-
-                            const ok = await setPdfAsActive(conversationId, pdf.id);
-                            if (!ok) return;
-
-                            setActivePdfId(pdf.id);
-
-                            const uiStatus = classifyPdfUiStatus(pdf);
-                            setShowPdfHint(
-                              uiStatus === "no_text" ||
-                                uiStatus === "technical_error" ||
-                                uiStatus === "large"
-                            );
-
-                            await loadConversationPdfs(conversationId);
-                          }}
-                          className="max-w-[96px] truncate font-medium"
-                          title={pdf.fileName}
-                        >
-                          {truncatePdfName(pdf.fileName, 9)}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => toggleSelectedPdf(pdf.id)}
-                          className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
-                            isSelectedPdf
-                              ? "bg-emerald-600 text-white"
-                              : "border border-slate-300/60 bg-transparent text-transparent hover:border-slate-200"
-                          }`}
-                          title={
-                            isSelectedPdf
-                              ? "Remover da seleção do chat"
-                              : "Selecionar para o chat"
-                          }
-                        >
-                          {isSelectedPdf ? "✓" : "○"}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleRemovePdf(pdf.id)}
-                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white hover:bg-red-600"
-                          title="Excluir PDF"
-                        >
-                          ×
-                        </button>
-
-                        {itemBadge && (
-                          <span className="rounded-full bg-black/20 px-2 py-[2px] text-[9px]">
-                            {itemBadge}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {attachedPdfs.length > 0 && (
-                <div ref={quickActionsRef} className="relative shrink-0">
-                  <button
-                    type="button"
-                    disabled={!attachedPdf || isBlocked || accessLoading}
-                    onClick={() =>
-                      attachedPdf && setShowPdfQuickActions((prev) => !prev)
-                    }
-                    className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
-                      attachedPdf && !isBlocked && !accessLoading
-                        ? "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]"
-                        : "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60"
-                    }`}
-                  >
-                    AÇÕES RÁPIDAS COM O PDF ▾
-                  </button>
-
-                  {showPdfQuickActions && attachedPdf && (
-                    <div className="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("resumo");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Resumir PDF
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("pontos");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Pontos de Atenção (Obrigações, prazos e riscos)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPdfQuickActions(false);
-                          handlePdfQuickAction("irregularidade");
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-[#223f57]"
-                      >
-                        Identificar irregularidades
-                      </button>
-                    </div>
-                  )}
+            {!attachedPdfs.length &&
+              typeof access?.capabilities?.maxPdfsPerConversation === "number" && (
+                <div className="mb-2 flex justify-end">
+                  <span className="text-[11px] text-slate-300">
+                    Limite por conversa: {access.capabilities.maxPdfsPerConversation} PDF
+                    {access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"}
+                  </span>
                 </div>
               )}
-            </div>
-
-            {isUploadingPdf && (
-              <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>
-            )}
 
             <ChatInput
               onSend={handleSend}
               isSending={isSending}
               onStop={handleStop}
               disabled={isBlocked || accessLoading}
+              responseMode={responseMode}
+              onResponseModeChange={setResponseMode}
+              showResponseModes={showResponseModes}
+              availableResponseModes={strategicResponseModes}
             />
           </div>
         </div>
@@ -2106,8 +2699,12 @@ Organize a resposta em tópicos, com explicações objetivas.
               />
             </a>
             <div>
-              <div className="text-sm font-semibold leading-none">Publ.IA 1.7 ESSENCIAL</div>
-              <div className="text-[11px] text-slate-500 leading-none">Nexus Pública</div>
+              <div className="text-sm font-semibold leading-none">
+                {brand.productLabel} {brand.versionLabel}
+              </div>
+              <div className="text-[11px] text-slate-500 leading-none">
+                {brand.vendorLabel}
+              </div>
             </div>
           </div>
 
@@ -2143,6 +2740,12 @@ Organize a resposta em tópicos, com explicações objetivas.
               onNewConversation={() => handleNewConversation()}
               onSelectConversation={(id) => handleSelectConversation(id)}
               onDeleteConversation={(id) => handleDeleteConversation(id)}
+              onToggleFavorite={(id, nextValue) =>
+                handleToggleFavorite(id, nextValue)
+              }
+              onRenameConversation={(id, nextTitle) =>
+                handleRenameConversation(id, nextTitle)
+              }
               userLabel={userLabel}
               isBlocked={isBlocked}
               blockedMessage={blockedMessage}
@@ -2170,6 +2773,12 @@ Organize a resposta em tópicos, com explicações objetivas.
           onNewConversation={() => handleNewConversation()}
           onSelectConversation={(id) => handleSelectConversation(id)}
           onDeleteConversation={(id) => handleDeleteConversation(id)}
+          onToggleFavorite={(id, nextValue) =>
+            handleToggleFavorite(id, nextValue)
+          }
+          onRenameConversation={(id, nextTitle) =>
+            handleRenameConversation(id, nextTitle)
+          }
           userLabel={userLabel}
           isBlocked={isBlocked}
           blockedMessage={blockedMessage}
