@@ -11,6 +11,8 @@ import {
 } from "@/lib/access/access-helpers";
 import type { BillingCycle, SubscriptionPlan } from "@/types/access";
 
+export const dynamic = "force-dynamic";
+
 type CurrentUserAccessResolved = Awaited<
   ReturnType<typeof getCurrentUserAccess>
 >["resolved"];

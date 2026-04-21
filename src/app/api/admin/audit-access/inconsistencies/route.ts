@@ -4,6 +4,8 @@ import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { resolveUserAccess } from "@/lib/access/resolveUserAccess";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const supabase = createSupabaseServerClient();
