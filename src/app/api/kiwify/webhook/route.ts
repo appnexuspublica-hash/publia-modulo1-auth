@@ -1,23 +1,28 @@
 // src/app/api/kiwify/webhook/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getCurrentUserAccessByUserId } from "@/lib/access/getCurrentUserAccess";
+import type { ProductTier } from "@/lib/access/resolveUserAccess";
 
 type SubscriptionPlan = "monthly" | "annual";
 
-type AccessStatus =
-  | "trial_active"
-  | "trial_expired"
-  | "subscription_active"
-  | "subscription_expired";
+type SnapshotAccessStatus = "trial_active" | "active" | "expired" | "blocked";
 
 type JsonRecord = Record<string, unknown>;
 
 type ExistingUserAccess = {
   user_id: string;
-  access_status: AccessStatus;
-  subscription_plan: SubscriptionPlan | null;
+  access_status: string | null;
+  product_tier: string | null;
+  subscription_plan: string | null;
   subscription_started_at: string | null;
   subscription_ends_at: string | null;
+};
+
+type ActiveBaseGrant = {
+  id: string;
+  product_tier: ProductTier;
+  grant_kind: string;
 };
 
 type LogProcessingStatus = "received" | "ignored" | "processed" | "error";
@@ -223,6 +228,66 @@ function getOrderId(payload: unknown): string | null {
   return value || null;
 }
 
+function getProductDescriptor(payload: unknown): string {
+  const root = getOrderRoot(payload);
+
+  const parts = [
+    getFirstAvailable(root, [
+      ["Product", "name"],
+      ["product", "name"],
+      ["produto", "nome"],
+      ["product_name"],
+      ["offer_name"],
+      ["plan", "name"],
+      ["Subscription", "plan", "name"],
+      ["subscription", "plan", "name"],
+    ]),
+    getFirstAvailable(root, [
+      ["Product", "title"],
+      ["product", "title"],
+      ["produto", "titulo"],
+      ["title"],
+    ]),
+    getFirstAvailable(root, [
+      ["Product", "code"],
+      ["product", "code"],
+      ["produto", "codigo"],
+      ["offer_code"],
+      ["plan_code"],
+    ]),
+  ];
+
+  return parts
+    .map((value) => String(value ?? "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function mapProductTier(
+  payload: unknown,
+  existingAccess: ExistingUserAccess | null
+): ProductTier {
+  const descriptor = getProductDescriptor(payload);
+
+  if (
+    descriptor.includes("estratégico") ||
+    descriptor.includes("estrategico") ||
+    descriptor.includes("strategic")
+  ) {
+    return "strategic";
+  }
+
+  if (descriptor.includes("essencial") || descriptor.includes("essential")) {
+    return "essential";
+  }
+
+  if (existingAccess?.product_tier === "strategic") {
+    return "strategic";
+  }
+
+  return "essential";
+}
+
 function mapPlan(payload: unknown): SubscriptionPlan | null {
   const frequency = getSubscriptionFrequency(payload);
 
@@ -406,11 +471,270 @@ function getActivationAction(
     return "subscription_renewed";
   }
 
-  if (existingAccess?.access_status === "subscription_active") {
+  if (existingAccess?.access_status === "active") {
     return "subscription_renewed";
   }
 
   return "subscription_activated";
+}
+
+async function findActiveBaseGrantForFallback(
+  supabase: ReturnType<typeof createSupabaseAdminClient>,
+  userId: string
+): Promise<ActiveBaseGrant | null> {
+  const currentAccess = await getCurrentUserAccessByUserId(supabase, userId);
+
+  const fallbackGrant =
+    currentAccess.grants.find(
+      (grant) =>
+        grant.product_tier === "essential" &&
+        grant.status === "active" &&
+        (grant.grant_kind === "subscription" || grant.grant_kind === "trial")
+    ) ?? null;
+
+  if (!fallbackGrant) {
+    return null;
+  }
+
+  return {
+    id: fallbackGrant.id,
+    product_tier: "essential",
+    grant_kind: fallbackGrant.grant_kind,
+  };
+}
+
+async function upsertSubscriptionGrant(params: {
+  supabase: ReturnType<typeof createSupabaseAdminClient>;
+  userId: string;
+  productTier: ProductTier;
+  subscriptionPlan: SubscriptionPlan;
+  startedAt: string;
+  endsAt: string;
+  payload: unknown;
+  sourceLabel: string;
+  sourceTokenId?: string | null;
+}): Promise<void> {
+  const {
+    supabase,
+    userId,
+    productTier,
+    subscriptionPlan,
+    startedAt,
+    endsAt,
+    payload,
+    sourceLabel,
+  } = params;
+
+  const fallbackBaseGrant =
+    productTier === "strategic"
+      ? await findActiveBaseGrantForFallback(supabase, userId)
+      : null;
+
+  const { data: existingGrant, error: existingGrantError } = await supabase
+    .from("user_access_grants")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("product_tier", productTier)
+    .eq("grant_kind", "subscription")
+    .eq("status", "active")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingGrantError) {
+    throw new Error(
+      `Erro ao buscar grant de assinatura existente: ${existingGrantError.message}`
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (existingGrant?.id) {
+    const { error: updateError } = await supabase
+      .from("user_access_grants")
+      .update({
+        status: "active",
+        source: sourceLabel,
+        subscription_plan: subscriptionPlan,
+        started_at: startedAt,
+        ends_at: endsAt,
+        activated_at: startedAt,
+        canceled_at: null,
+        consumed_at: null,
+        fallback_product_tier:
+          productTier === "strategic" && fallbackBaseGrant?.product_tier === "essential"
+            ? "essential"
+            : null,
+        fallback_reference:
+          productTier === "strategic" && fallbackBaseGrant?.product_tier === "essential"
+            ? "fallback_to_existing_essential_access"
+            : null,
+        origin_grant_id: fallbackBaseGrant?.id ?? null,
+        metadata: {
+          provider: "kiwify",
+          last_payload: payload,
+          updated_from_webhook: true,
+        },
+        updated_at: nowIso,
+      })
+      .eq("id", existingGrant.id);
+
+    if (updateError) {
+      throw new Error(
+        `Erro ao atualizar grant de assinatura: ${updateError.message}`
+      );
+    }
+
+    return;
+  }
+
+  const { error: insertError } = await supabase.from("user_access_grants").insert({
+    user_id: userId,
+    product_tier: productTier,
+    grant_kind: "subscription",
+    status: "active",
+    source: sourceLabel,
+    source_token_id: null,
+    subscription_plan: subscriptionPlan,
+    started_at: startedAt,
+    ends_at: endsAt,
+    activated_at: startedAt,
+    consumed_at: null,
+    canceled_at: null,
+    origin_grant_id: fallbackBaseGrant?.id ?? null,
+    fallback_product_tier:
+      productTier === "strategic" && fallbackBaseGrant?.product_tier === "essential"
+        ? "essential"
+        : null,
+    fallback_reference:
+      productTier === "strategic" && fallbackBaseGrant?.product_tier === "essential"
+        ? "fallback_to_existing_essential_access"
+        : null,
+    metadata: {
+      provider: "kiwify",
+      created_from_webhook: true,
+      payload,
+    },
+    created_at: nowIso,
+    updated_at: nowIso,
+  });
+
+  if (insertError) {
+    throw new Error(`Erro ao criar grant de assinatura: ${insertError.message}`);
+  }
+}
+
+async function expireSubscriptionGrants(params: {
+  supabase: ReturnType<typeof createSupabaseAdminClient>;
+  userId: string;
+  productTier: ProductTier;
+  payload: unknown;
+  reason: string;
+}): Promise<void> {
+  const { supabase, userId, productTier, payload, reason } = params;
+  const nowIso = new Date().toISOString();
+
+  const { error } = await supabase
+    .from("user_access_grants")
+    .update({
+      status: "expired",
+      canceled_at: nowIso,
+      metadata: {
+        provider: "kiwify",
+        expired_from_webhook: true,
+        reason,
+        payload,
+      },
+      updated_at: nowIso,
+    })
+    .eq("user_id", userId)
+    .eq("product_tier", productTier)
+    .eq("grant_kind", "subscription")
+    .eq("status", "active");
+
+  if (error) {
+    throw new Error(`Erro ao expirar grants de assinatura: ${error.message}`);
+  }
+}
+
+async function syncUserAccessSnapshot(params: {
+  supabase: ReturnType<typeof createSupabaseAdminClient>;
+  userId: string;
+  fallbackProductTier?: ProductTier;
+}): Promise<void> {
+  const { supabase, userId, fallbackProductTier = "essential" } = params;
+  const nowIso = new Date().toISOString();
+
+  const currentAccess = await getCurrentUserAccessByUserId(supabase, userId);
+  const { resolved } = currentAccess;
+
+  const defaultProductTier =
+    resolved.effectiveProductTier ?? fallbackProductTier ?? "essential";
+
+  if (resolved.effectiveAccessStatus === "trial_active" && resolved.activeGrant) {
+    const { error } = await supabase.from("user_access").upsert(
+      {
+        user_id: userId,
+        access_status: "trial_active" as SnapshotAccessStatus,
+        product_tier: resolved.effectiveProductTier ?? defaultProductTier,
+        trial_started_at: resolved.activeGrant.startedAt,
+        trial_ends_at: resolved.activeGrant.endsAt,
+        subscription_plan: null,
+        subscription_started_at: null,
+        subscription_ends_at: null,
+        updated_at: nowIso,
+      },
+      { onConflict: "user_id" }
+    );
+
+    if (error) {
+      throw new Error(`Erro ao sincronizar snapshot trial: ${error.message}`);
+    }
+
+    return;
+  }
+
+  if (resolved.effectiveAccessStatus === "active" && resolved.activeGrant) {
+    const { error } = await supabase.from("user_access").upsert(
+      {
+        user_id: userId,
+        access_status: "active" as SnapshotAccessStatus,
+        product_tier: resolved.effectiveProductTier ?? defaultProductTier,
+        trial_started_at: null,
+        trial_ends_at: null,
+        subscription_plan: resolved.activeGrant.subscriptionPlan,
+        subscription_started_at: resolved.activeGrant.startedAt,
+        subscription_ends_at: resolved.activeGrant.endsAt,
+        updated_at: nowIso,
+      },
+      { onConflict: "user_id" }
+    );
+
+    if (error) {
+      throw new Error(`Erro ao sincronizar snapshot active: ${error.message}`);
+    }
+
+    return;
+  }
+
+  const { error } = await supabase.from("user_access").upsert(
+    {
+      user_id: userId,
+      access_status: "blocked" as SnapshotAccessStatus,
+      product_tier: defaultProductTier,
+      trial_started_at: null,
+      trial_ends_at: null,
+      subscription_plan: null,
+      subscription_started_at: null,
+      subscription_ends_at: null,
+      updated_at: nowIso,
+    },
+    { onConflict: "user_id" }
+  );
+
+  if (error) {
+    throw new Error(`Erro ao sincronizar snapshot blocked: ${error.message}`);
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -597,7 +921,7 @@ export async function POST(request: NextRequest) {
     const { data: existingAccess, error: existingAccessError } = await supabase
       .from("user_access")
       .select(
-        "user_id, access_status, subscription_plan, subscription_started_at, subscription_ends_at"
+        "user_id, access_status, product_tier, subscription_plan, subscription_started_at, subscription_ends_at"
       )
       .eq("user_id", profile.user_id)
       .maybeSingle<ExistingUserAccess>();
@@ -622,25 +946,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (isNegativeEvent(payload)) {
-      const { error: expireError } = await supabase.from("user_access").upsert(
-        {
-          user_id: profile.user_id,
-          access_status: "subscription_expired" as AccessStatus,
-          subscription_plan: existingAccess?.subscription_plan ?? mapPlan(payload),
-          subscription_started_at:
-            existingAccess?.subscription_started_at ?? getSubscriptionStart(payload),
-          subscription_ends_at:
-            existingAccess?.subscription_ends_at ??
-            getSubscriptionNextPayment(payload),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      );
+    const productTier = mapProductTier(payload, existingAccess ?? null);
 
-      if (expireError) {
+    if (isNegativeEvent(payload)) {
+      try {
+        await expireSubscriptionGrants({
+          supabase,
+          userId: profile.user_id,
+          productTier,
+          payload,
+          reason: "negative_event_from_kiwify",
+        });
+
+        await syncUserAccessSnapshot({
+          supabase,
+          userId: profile.user_id,
+          fallbackProductTier: existingAccess?.product_tier === "strategic" ? "strategic" : "essential",
+        });
+      } catch (expireError) {
         console.error(
-          "[kiwify/webhook] erro ao marcar assinatura expirada:",
+          "[kiwify/webhook] erro ao expirar grants/snapshot:",
           expireError
         );
 
@@ -666,8 +991,11 @@ export async function POST(request: NextRequest) {
           action: "subscription_expired",
           userId: profile.user_id,
           cpfCnpj,
+          productTier,
           eventType,
           orderStatus,
+          subscriptionId,
+          orderId,
         },
         200,
         {
@@ -696,7 +1024,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const plan = mapPlan(payload) ?? existingAccess?.subscription_plan ?? null;
+    const plan = mapPlan(payload) ?? (existingAccess?.subscription_plan as SubscriptionPlan | null) ?? null;
 
     if (!plan) {
       return finish(
@@ -720,19 +1048,24 @@ export async function POST(request: NextRequest) {
     const { startedAt, endsAt } = resolveDates(payload, plan, existingAccess ?? null);
     const action = getActivationAction(payload, existingAccess ?? null);
 
-    const { error: activateError } = await supabase.from("user_access").upsert(
-      {
-        user_id: profile.user_id,
-        access_status: "subscription_active" as AccessStatus,
-        subscription_plan: plan,
-        subscription_started_at: startedAt,
-        subscription_ends_at: endsAt,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" }
-    );
+    try {
+      await upsertSubscriptionGrant({
+        supabase,
+        userId: profile.user_id,
+        productTier,
+        subscriptionPlan: plan,
+        startedAt,
+        endsAt,
+        payload,
+        sourceLabel: "kiwify_webhook",
+      });
 
-    if (activateError) {
+      await syncUserAccessSnapshot({
+        supabase,
+        userId: profile.user_id,
+        fallbackProductTier: productTier,
+      });
+    } catch (activateError) {
       console.error(
         "[kiwify/webhook] erro ao ativar/renovar assinatura:",
         activateError
@@ -760,6 +1093,7 @@ export async function POST(request: NextRequest) {
         action,
         userId: profile.user_id,
         cpfCnpj,
+        productTier,
         plan,
         startedAt,
         endsAt,

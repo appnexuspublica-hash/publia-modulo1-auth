@@ -9,6 +9,7 @@ import {
   ChangeEvent,
   useCallback,
   useMemo,
+  type CSSProperties,
 } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import Image from "next/image";
@@ -19,6 +20,8 @@ import {
   type FrontendAccessSummary,
 } from "@/lib/access-client";
 import { getBlockedAccessCta } from "@/lib/access-cta";
+import { getAlertStyles, type AlertTone } from "./utils/alertStyles";
+import { getChatTheme } from "@/app/chat/theme";
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
@@ -34,7 +37,7 @@ type ChatPageClientProps = {
   userLabel: string;
 };
 
-type ToastType = "success" | "warning" | "error";
+type ToastType = AlertTone;
 
 type ToastState = {
   text: string;
@@ -45,6 +48,13 @@ type ToastState = {
     label: string;
   } | null;
 } | null;
+
+type SidebarFeedbackState =
+  | {
+      text: string;
+      type: "success" | "warning" | "error";
+    }
+  | null;
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -81,10 +91,36 @@ function normalizeConversationTitle(title: string | null | undefined) {
   return clean.length > 0 ? clean : "Nova conversa";
 }
 
+function getLegacyStatusLabel(access: FrontendAccessSummary | null) {
+  const status = String(access?.access_status ?? "").trim();
+
+  switch (status) {
+    case "trial_active":
+      return access?.productTier === "strategic"
+        ? "Trial Estratégico"
+        : access?.productTier === "governance"
+          ? "Governança"
+          : "Trial Essencial";
+    case "subscription_active":
+      return access?.productTier === "strategic"
+        ? "Estratégico"
+        : access?.productTier === "governance"
+          ? "Governança"
+          : "Essencial";
+    case "subscription_expired":
+      return "Assinatura expirada";
+    case "trial_expired":
+      return "Trial expirado";
+    default:
+      return null;
+  }
+}
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const MAX_PDF_SIZE_MB = 30;
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
+const SIDEBAR_FEEDBACK_DURATION_MS = 5000;
 
 const STRATEGIC_RESPONSE_MODES: ResponseMode[] = [
   "objective",
@@ -93,6 +129,7 @@ const STRATEGIC_RESPONSE_MODES: ResponseMode[] = [
   "checklist",
   "document_draft",
   "manager_guidance",
+  "attention_points",
 ];
 
 function isStrategicResponseMode(value: unknown): value is ResponseMode {
@@ -499,6 +536,33 @@ function buildStrategicSuggestions(
         prompt: `Liste riscos, pontos críticos e decisões recomendadas ${pdfContext}.`,
       },
     ],
+    attention_points: [
+      {
+        id: "summary",
+        label: "Resumir riscos",
+        prompt: `Faça um resumo executivo dos principais pontos de atenção ${pdfContext}.`,
+      },
+      {
+        id: "checklist",
+        label: "Checklist preventivo",
+        prompt: `Transforme os pontos de atenção em um checklist preventivo ${pdfContext}.`,
+      },
+      {
+        id: "manager_guidance",
+        label: "Orientar o gestor",
+        prompt: `Explique ao gestor os riscos, cuidados e decisões recomendadas ${pdfContext}.`,
+      },
+      {
+        id: "document_draft",
+        label: "Criar minuta",
+        prompt: `Crie uma minuta de documento com base nos pontos de atenção identificados ${pdfContext}.`,
+      },
+      {
+        id: "step_by_step",
+        label: "Plano de ação",
+        prompt: `Monte um passo a passo para tratar os pontos de atenção identificados ${pdfContext}.`,
+      },
+    ],
   };
 
   return suggestionsByMode[responseMode] ?? suggestionsByMode.objective;
@@ -517,11 +581,20 @@ export default function ChatPageClient({
     null
   );
   const activeConversationIdRef = useRef<string | null>(null);
+  const chatInputTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [draftMessage, setDraftMessage] = useState("");
+
+  const handleFillInputSuggestion = useCallback((prompt: string) => {
+    setDraftMessage(prompt);
+    requestAnimationFrame(() => {
+      chatInputTextareaRef.current?.focus();
+    });
+  }, []);
 
   const [attachedPdfs, setAttachedPdfs] = useState<AttachedPdf[]>([]);
   const [activePdfId, setActivePdfId] = useState<string | null>(null);
@@ -547,17 +620,30 @@ export default function ChatPageClient({
   const [actionToast, setActionToast] = useState<{
     messageId: string;
     text: string;
+    tone?: ToastType;
   } | null>(null);
   const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [access, setAccess] = useState<FrontendAccessSummary | null>(null);
   const [accessLoading, setAccessLoading] = useState(true);
   const [responseMode, setResponseMode] = useState<ResponseMode>("objective");
+  const [isStartingStrategicTrial, setIsStartingStrategicTrial] = useState(false);
+  const [sidebarFeedback, setSidebarFeedback] = useState<SidebarFeedbackState>(null);
+  const sidebarFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
 
   function clearToastTimer() {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
       toastTimerRef.current = null;
+    }
+  }
+
+  function clearSidebarFeedbackTimer() {
+    if (sidebarFeedbackTimerRef.current) {
+      clearTimeout(sidebarFeedbackTimerRef.current);
+      sidebarFeedbackTimerRef.current = null;
     }
   }
 
@@ -600,10 +686,27 @@ export default function ChatPageClient({
     }
   }
 
-  function showActionToast(messageId: string, text: string) {
+  function showActionToast(
+    messageId: string,
+    text: string,
+    tone: ToastType = "success"
+  ) {
     if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current);
-    setActionToast({ messageId, text });
+    setActionToast({ messageId, text, tone });
     actionToastTimerRef.current = setTimeout(() => setActionToast(null), 2500);
+  }
+
+  function showSidebarFeedbackMessage(
+    feedback: NonNullable<SidebarFeedbackState>,
+    durationMs: number = SIDEBAR_FEEDBACK_DURATION_MS
+  ) {
+    clearSidebarFeedbackTimer();
+    setSidebarFeedback(feedback);
+
+    sidebarFeedbackTimerRef.current = setTimeout(() => {
+      setSidebarFeedback(null);
+      sidebarFeedbackTimerRef.current = null;
+    }, durationMs);
   }
 
   const loadAccess = useCallback(async () => {
@@ -631,7 +734,15 @@ export default function ChatPageClient({
 
   const blockedCta = useMemo(() => {
     if (accessLoading) return null;
-    return getBlockedAccessCta(access?.access_status);
+
+    return getBlockedAccessCta(
+      access?.accessStatus ?? access?.access_status,
+      "general_block",
+      {
+        productTier: access?.productTier ?? null,
+        subscriptionPlan: access?.subscriptionPlan ?? null,
+      }
+    );
   }, [access, accessLoading]);
 
   const attachedPdf = useMemo(() => {
@@ -657,7 +768,88 @@ export default function ChatPageClient({
     [access]
   );
 
-  const isStrategic = access?.productTier === "strategic";
+  const statusLabel = useMemo(() => {
+    const resolvedLabel =
+      typeof access?.resolvedAccess?.label === "string"
+        ? access.resolvedAccess.label.trim()
+        : "";
+
+    if (resolvedLabel) {
+      return resolvedLabel;
+    }
+
+    return getLegacyStatusLabel(access);
+  }, [access]);
+
+  const resolvedProductTier = access?.resolvedAccess?.effectiveProductTier ?? null;
+  const isStrategic =
+    resolvedProductTier === "strategic" || access?.productTier === "strategic";
+  const theme = useMemo(() => getChatTheme(isStrategic), [isStrategic]);
+
+  const strategicButtonClassName =
+    "border text-white transition duration-150 hover:brightness-110";
+  const strategicDisabledButtonClassName =
+    "cursor-not-allowed border text-slate-300 opacity-60";
+  const strategicChipClassName =
+    "border text-white transition duration-150 hover:brightness-110";
+  const strategicHintButtonClassName =
+    "rounded-full border px-3 py-2 text-[11px] font-semibold text-white transition duration-150 hover:brightness-110";
+  const strategicMenuItemClassName =
+    "block w-full px-4 py-2 text-left transition hover:bg-white/10";
+
+  const strategicButtonStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.bg,
+      borderColor: theme.colors.borderStrong,
+      color: theme.colors.text,
+    }),
+    [theme]
+  );
+
+  const strategicDisabledButtonStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.bg,
+      borderColor: theme.colors.border,
+      color: theme.colors.textSoft,
+    }),
+    [theme]
+  );
+
+  const strategicItemActiveStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.bg,
+      borderColor: theme.colors.borderStrong,
+      color: theme.colors.text,
+    }),
+    [theme]
+  );
+
+  const strategicItemInactiveStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.bg,
+      borderColor: theme.colors.border,
+      color: theme.colors.text,
+    }),
+    [theme]
+  );
+
+  const strategicHintContainerStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.hover,
+      borderColor: theme.colors.borderStrong,
+      color: theme.colors.text,
+    }),
+    [theme]
+  );
+
+  const strategicMenuStyle = useMemo<CSSProperties>(
+    () => ({
+      backgroundColor: theme.colors.bg,
+      borderColor: theme.colors.borderStrong,
+      color: theme.colors.text,
+    }),
+    [theme]
+  );
 
   const strategicResponseModes = useMemo(() => {
     const raw = Array.isArray(access?.capabilities?.responseModes)
@@ -738,6 +930,7 @@ export default function ChatPageClient({
     return () => {
       abortRef.current?.abort();
       clearToastTimer();
+      clearSidebarFeedbackTimer();
       if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current);
     };
   }, []);
@@ -1101,6 +1294,7 @@ export default function ChatPageClient({
       setShowPdfQuickActions(false);
       setActionToast(null);
       setShowPdfHint(false);
+      setDraftMessage("");
       return;
     }
 
@@ -1202,6 +1396,7 @@ export default function ChatPageClient({
         setShowPdfQuickActions(false);
         setActionToast(null);
         setShowPdfHint(false);
+        setDraftMessage("");
       }
 
       return newConv.id;
@@ -1231,6 +1426,7 @@ export default function ChatPageClient({
     streamingAssistantIdRef.current = null;
 
     setActionToast(null);
+    setDraftMessage("");
     await createConversation(true);
     setIsMobileSidebarOpen(false);
   }
@@ -1256,6 +1452,7 @@ export default function ChatPageClient({
     setShowPdfHint(false);
 
     setActionToast(null);
+    setDraftMessage("");
   }
 
   async function handleDeleteConversation(id: string) {
@@ -1395,6 +1592,53 @@ export default function ChatPageClient({
       pdfMode: "selected" as const,
       selectedPdfIds,
     };
+  }
+
+  async function handleStartStrategicTrial() {
+    if (isStartingStrategicTrial) return;
+
+    try {
+      setIsStartingStrategicTrial(true);
+      clearSidebarFeedbackTimer();
+      setSidebarFeedback(null);
+
+      const res = await fetch("/api/access/start-strategic-trial", {
+        method: "POST",
+      });
+
+      const data = await res.json().catch(() => null);
+      const errorMessage =
+        String(data?.error ?? "").trim() ||
+        "Não foi possível iniciar o trial Estratégico.";
+
+      if (!res.ok) {
+        showSidebarFeedbackMessage({
+          text: errorMessage,
+          type: "warning",
+        });
+        return;
+      }
+
+      await loadAccess();
+
+      const successMessage = "Trial Estratégico ativado com sucesso por 7 dias.";
+
+      showSidebarFeedbackMessage({
+        text: successMessage,
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Erro inesperado ao iniciar trial Estratégico:", error);
+
+      const errorMessage = "Erro inesperado ao iniciar o trial Estratégico.";
+
+      showSidebarFeedbackMessage({
+        text: errorMessage,
+        type: "error",
+      });
+    } finally {
+      setIsStartingStrategicTrial(false);
+    }
   }
 
   async function handleSend(messageText: string) {
@@ -1801,18 +2045,26 @@ export default function ChatPageClient({
     await handleSend(lastUserMessage.content);
   }
 
-  async function handleSuggestionClick(prompt: string) {
+  function handleSuggestionClick(prompt: string) {
     if (!isStrategic) return;
+    if (!prompt.trim()) return;
 
-    if (isSending) {
-      showToast("Aguarde a resposta atual terminar antes de enviar outra pergunta.", {
-        type: "warning",
-        persistent: true,
-      });
-      return;
-    }
+    setDraftMessage(prompt);
 
-    await handleSend(prompt);
+    requestAnimationFrame(() => {
+      const textarea = chatInputTextareaRef.current;
+      if (!textarea) return;
+
+      textarea.focus();
+
+      const end = prompt.length;
+      textarea.setSelectionRange(end, end);
+
+      textarea.style.height = "0px";
+      const maxHeight = 120;
+      const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+      textarea.style.height = `${newHeight}px`;
+    });
   }
 
   async function handleQuickPdfAction(kind: QuickActionKind) {
@@ -1855,7 +2107,7 @@ export default function ChatPageClient({
       const plainText = markdownToPlainText(msg.content);
       await navigator.clipboard.writeText(plainText);
 
-      showActionToast(messageId, "Resposta copiada.");
+      showActionToast(messageId, "Resposta copiada.", "success");
     } catch (err) {
       console.error("Erro ao copiar resposta:", err);
       showToast("Não foi possível copiar a resposta.", {
@@ -1916,7 +2168,7 @@ export default function ChatPageClient({
       )}`;
       await navigator.clipboard.writeText(url);
 
-      showActionToast(messageId, "Link público copiado.");
+      showActionToast(messageId, "Link público copiado.", "success");
     } catch (err) {
       console.error("Erro inesperado ao compartilhar:", err);
       showToast("Erro inesperado ao gerar link público.", {
@@ -2073,10 +2325,18 @@ export default function ChatPageClient({
             )
           : null;
 
+        if (isCommercialBlock) {
+          showSidebarFeedbackMessage({
+            text: apiMessage,
+            type: "warning",
+          });
+          return;
+        }
+
         showToast(apiMessage, {
-          type: isCommercialBlock ? "warning" : "error",
+          type: "error",
           persistent: true,
-          cta: isCommercialBlock ? toastCta : null,
+          cta: toastCta,
         });
         return;
       }
@@ -2276,28 +2536,17 @@ export default function ChatPageClient({
       return {
         container: "",
         button: "",
+        cta: "",
       };
     }
 
-    switch (toast.type) {
-      case "success":
-        return {
-          container: "border-emerald-300/30 bg-emerald-500/10 text-emerald-100",
-          button: "text-emerald-100/80 hover:text-emerald-50",
-        };
-      case "warning":
-        return {
-          container: "border-amber-300/30 bg-amber-500/10 text-amber-100",
-          button: "text-amber-100/80 hover:text-amber-50",
-        };
-      case "error":
-      default:
-        return {
-          container: "border-red-300/30 bg-red-500/10 text-red-100",
-          button: "text-red-100/80 hover:text-red-50",
-        };
-    }
-  }, [toast]);
+    return getAlertStyles(toast.type, isStrategic);
+  }, [toast, isStrategic]);
+
+  const blockedCardStyles = useMemo(
+    () => getAlertStyles("warning", isStrategic),
+    [isStrategic]
+  );
 
   const renderPdfRow = (options: {
     buttonClassName: string;
@@ -2306,10 +2555,24 @@ export default function ChatPageClient({
     quickActionsDisabledClassName: string;
     itemActiveClassName: string;
     itemInactiveClassName: string;
+    hintContainerClassName: string;
     hintActionClassName: string;
     hintDismissClassName: string;
     quickMenuClassName: string;
     quickMenuItemClassName: string;
+    uploadTextClassName: string;
+    buttonStyle?: CSSProperties;
+    buttonDisabledStyle?: CSSProperties;
+    quickActionsStyle?: CSSProperties;
+    quickActionsDisabledStyle?: CSSProperties;
+    itemActiveStyle?: CSSProperties;
+    itemInactiveStyle?: CSSProperties;
+    hintContainerStyle?: CSSProperties;
+    hintActionStyle?: CSSProperties;
+    hintDismissStyle?: CSSProperties;
+    quickMenuStyle?: CSSProperties;
+    quickMenuItemStyle?: CSSProperties;
+    uploadTextStyle?: CSSProperties;
     showReprocessInMenu?: boolean;
     maxLabel?: number;
   }) => {
@@ -2323,7 +2586,10 @@ export default function ChatPageClient({
     return (
       <>
         {showHint && hint && (
-          <div className="mb-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+          <div
+            className={options.hintContainerClassName}
+            style={options.hintContainerStyle}
+          >
             <div className="leading-snug">{hint.text}</div>
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2332,6 +2598,7 @@ export default function ChatPageClient({
                   type="button"
                   onClick={handleDoOcr}
                   className={options.hintActionClassName}
+                  style={options.hintActionStyle}
                 >
                   FAZER OCR
                 </button>
@@ -2341,6 +2608,7 @@ export default function ChatPageClient({
                 type="button"
                 onClick={handleDismissPdfHint}
                 className={options.hintDismissClassName}
+                style={options.hintDismissStyle}
               >
                 CONTINUAR
               </button>
@@ -2358,6 +2626,11 @@ export default function ChatPageClient({
                 ? options.buttonDisabledClassName
                 : options.buttonClassName
             }`}
+            style={
+              isBlocked || accessLoading || isUploadingPdf
+                ? options.buttonDisabledStyle
+                : options.buttonStyle
+            }
           >
             ANEXAR PDF
           </button>
@@ -2385,6 +2658,7 @@ export default function ChatPageClient({
                         ? options.itemActiveClassName
                         : options.itemInactiveClassName
                     }`}
+                    style={isActivePdf ? options.itemActiveStyle : options.itemInactiveStyle}
                   >
                     <button
                       type="button"
@@ -2418,7 +2692,7 @@ export default function ChatPageClient({
                       className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
                         isSelectedPdf
                           ? "bg-emerald-600 text-white"
-                          : "border border-slate-300/60 bg-transparent text-transparent hover:border-slate-200"
+                          : "border border-slate-400 bg-transparent text-transparent hover:border-slate-500"
                       }`}
                       title={
                         isSelectedPdf
@@ -2462,12 +2736,20 @@ export default function ChatPageClient({
                     ? options.quickActionsClassName
                     : options.quickActionsDisabledClassName
                 }`}
+                style={
+                  attachedPdf && !isBlocked && !accessLoading
+                    ? options.quickActionsStyle
+                    : options.quickActionsDisabledStyle
+                }
               >
                 AÇÕES RÁPIDAS...
               </button>
 
               {showPdfQuickActions && attachedPdf && (
-                <div className={options.quickMenuClassName}>
+                <div
+                  className={options.quickMenuClassName}
+                  style={options.quickMenuStyle}
+                >
                   <button
                     type="button"
                     onClick={() => {
@@ -2475,6 +2757,7 @@ export default function ChatPageClient({
                       handleQuickPdfAction("resumo");
                     }}
                     className={options.quickMenuItemClassName}
+                    style={options.quickMenuItemStyle}
                   >
                     Resumir PDF
                   </button>
@@ -2485,6 +2768,7 @@ export default function ChatPageClient({
                       handleQuickPdfAction("pontos");
                     }}
                     className={options.quickMenuItemClassName}
+                    style={options.quickMenuItemStyle}
                   >
                     Pontos de Atenção (Obrigações, prazos e riscos)
                   </button>
@@ -2495,6 +2779,7 @@ export default function ChatPageClient({
                       handleQuickPdfAction("irregularidade");
                     }}
                     className={options.quickMenuItemClassName}
+                    style={options.quickMenuItemStyle}
                   >
                     Identificar irregularidades
                   </button>
@@ -2504,6 +2789,7 @@ export default function ChatPageClient({
                       type="button"
                       onClick={handleReprocessPdf}
                       className={options.quickMenuItemClassName}
+                      style={options.quickMenuItemStyle}
                     >
                       Reprocessar PDF
                     </button>
@@ -2515,7 +2801,12 @@ export default function ChatPageClient({
         </div>
 
         {isUploadingPdf && (
-          <div className="mb-2 text-[11px] text-slate-100">Enviando PDF...</div>
+          <div
+            className={options.uploadTextClassName}
+            style={options.uploadTextStyle}
+          >
+            Enviando PDF...
+          </div>
         )}
       </>
     );
@@ -2542,17 +2833,27 @@ export default function ChatPageClient({
               blockedMessage={blockedMessage}
               blockedCta={blockedCta}
               productTier={access?.productTier ?? null}
+              onFillInputSuggestion={handleFillInputSuggestion}
             />
           ) : loadingMessages && activeConversationId ? (
-            <div className="flex h-full items-center justify-center text-sm text-white">
+            <div
+              className="flex h-full items-center justify-center text-sm"
+              style={{ color: isStrategic ? theme.colors.text : "#334155" }}
+            >
               Carregando conversa...
             </div>
           ) : (
-            <ChatEmptyState />
+            <ChatEmptyState isStrategic={isStrategic} />
           )}
         </div>
 
-        <div className="border-t border-slate-700 bg-[#2f4f67] px-6 py-3">
+        <div
+          className="border-t px-6 py-3"
+          style={{
+            borderColor: isStrategic ? theme.colors.border : "#cbd5e1",
+            backgroundColor: theme.colors.bg,
+          }}
+        >
           <div className="mx-auto w-full max-w-3xl">
             {toast && (
               <div
@@ -2568,7 +2869,7 @@ export default function ChatPageClient({
                           href={toast.cta.href}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                          className={toastStyles.cta}
                         >
                           {toast.cta.label}
                         </a>
@@ -2590,9 +2891,14 @@ export default function ChatPageClient({
             )}
 
             {isBlocked && (
-              <div className="mb-3 rounded-xl border border-amber-300/30 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-100">
-                <div className="font-semibold">Acesso bloqueado para novas ações</div>
-                <div className="mt-1">{blockedMessage}</div>
+              <div className={blockedCardStyles.container}>
+                <div className="text-sm font-semibold">
+                  Acesso bloqueado para novas ações
+                </div>
+
+                <div className="mt-1 text-sm leading-relaxed">
+                  {blockedMessage}
+                </div>
 
                 {blockedCta && (
                   <div className="mt-3">
@@ -2600,7 +2906,8 @@ export default function ChatPageClient({
                       href={blockedCta.href}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                      className={blockedCardStyles.cta}
+                      style={{ fontSize: "12px" }}
                     >
                       {blockedCta.label}
                     </a>
@@ -2611,57 +2918,73 @@ export default function ChatPageClient({
 
             {isStrategic
               ? renderPdfRow({
-                  buttonClassName:
-                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
-                  buttonDisabledClassName:
-                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
-                  quickActionsClassName:
-                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
-                  quickActionsDisabledClassName:
-                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
-                  itemActiveClassName:
-                    "border border-white/40 bg-[#244861] text-slate-100",
-                  itemInactiveClassName:
-                    "border border-transparent bg-[#274760] text-slate-100",
-                  hintActionClassName:
-                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
-                  hintDismissClassName:
-                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                  buttonClassName: strategicButtonClassName,
+                  buttonDisabledClassName: strategicDisabledButtonClassName,
+                  quickActionsClassName: strategicButtonClassName,
+                  quickActionsDisabledClassName: strategicDisabledButtonClassName,
+                  itemActiveClassName: strategicChipClassName,
+                  itemInactiveClassName: strategicChipClassName,
+                  hintContainerClassName:
+                    "mb-2 rounded-xl border px-3 py-2 text-[12px]",
+                  hintActionClassName: strategicHintButtonClassName,
+                  hintDismissClassName: strategicHintButtonClassName,
                   quickMenuClassName:
-                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg",
-                  quickMenuItemClassName:
-                    "block w-full px-4 py-2 text-left hover:bg-[#223f57]",
+                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border py-2 text-xs text-white shadow-lg",
+                  quickMenuItemClassName: strategicMenuItemClassName,
+                  uploadTextClassName: "mb-2 text-[11px] text-white",
+                  buttonStyle: strategicButtonStyle,
+                  buttonDisabledStyle: strategicDisabledButtonStyle,
+                  quickActionsStyle: strategicButtonStyle,
+                  quickActionsDisabledStyle: strategicDisabledButtonStyle,
+                  itemActiveStyle: strategicItemActiveStyle,
+                  itemInactiveStyle: strategicItemInactiveStyle,
+                  hintContainerStyle: strategicHintContainerStyle,
+                  hintActionStyle: strategicButtonStyle,
+                  hintDismissStyle: strategicButtonStyle,
+                  quickMenuStyle: strategicMenuStyle,
+                  quickMenuItemStyle: undefined,
+                  uploadTextStyle: {
+                    color: theme.colors.text,
+                  },
                   showReprocessInMenu: true,
                   maxLabel: 9,
                 })
               : renderPdfRow({
                   buttonClassName:
-                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                    "border border-slate-400 bg-[#dcdcdc] text-slate-700 hover:bg-[#d6d6d6]",
                   buttonDisabledClassName:
-                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                    "cursor-not-allowed border border-slate-300 bg-[#dcdcdc] text-slate-400 opacity-70",
                   quickActionsClassName:
-                    "bg-[#1b3a56] text-slate-100 hover:bg-[#223f57]",
+                    "border border-slate-400 bg-[#dcdcdc] text-slate-700 hover:bg-[#d6d6d6]",
                   quickActionsDisabledClassName:
-                    "cursor-not-allowed bg-[#1b3a56] text-slate-400 opacity-60",
+                    "cursor-not-allowed border border-slate-300 bg-[#dcdcdc] text-slate-400 opacity-70",
                   itemActiveClassName:
-                    "border border-white/40 bg-[#244861] text-slate-100",
+                    "border border-slate-400 bg-[#dcdcdc] text-slate-800",
                   itemInactiveClassName:
-                    "border border-transparent bg-[#274760] text-slate-100",
+                    "border border-slate-400 bg-[#dcdcdc] text-slate-700",
+                  hintContainerClassName:
+                    "mb-2 rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-[12px] text-amber-950",
                   hintActionClassName:
-                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                    "rounded-full border border-amber-300 bg-amber-200 px-3 py-2 text-[11px] font-semibold text-amber-950 hover:bg-amber-300",
                   hintDismissClassName:
-                    "rounded-full bg-[#1b3a56] px-3 py-2 text-[11px] font-semibold text-slate-100 hover:bg-[#223f57]",
+                    "rounded-full border border-slate-400 bg-[#dcdcdc] px-3 py-2 text-[11px] font-semibold text-slate-700 hover:bg-[#d6d6d6]",
                   quickMenuClassName:
-                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-600 bg-[#1f3b4f] py-2 text-xs text-slate-100 shadow-lg",
+                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-300 bg-[#dcdcdc] py-2 text-xs text-slate-800 shadow-lg",
                   quickMenuItemClassName:
-                    "block w-full px-4 py-2 text-left hover:bg-[#223f57]",
+                    "block w-full px-4 py-2 text-left hover:bg-[#d6d6d6]",
+                  uploadTextClassName: "mb-2 text-[11px] text-slate-700",
                   maxLabel: 9,
                 })}
 
             {!attachedPdfs.length &&
               typeof access?.capabilities?.maxPdfsPerConversation === "number" && (
                 <div className="mb-2 flex justify-end">
-                  <span className="text-[11px] text-slate-300">
+                  <span
+                    className="text-[11px]"
+                    style={{
+                      color: isStrategic ? theme.colors.textMuted : "#475569",
+                    }}
+                  >
                     Limite por conversa: {access.capabilities.maxPdfsPerConversation} PDF
                     {access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"}
                   </span>
@@ -2677,6 +3000,10 @@ export default function ChatPageClient({
               onResponseModeChange={setResponseMode}
               showResponseModes={showResponseModes}
               availableResponseModes={strategicResponseModes}
+              isStrategic={isStrategic}
+              inputValue={draftMessage}
+              onInputValueChange={setDraftMessage}
+              externalTextareaRef={chatInputTextareaRef}
             />
           </div>
         </div>
@@ -2685,9 +3012,15 @@ export default function ChatPageClient({
   };
 
   return (
-    <div className="h-screen bg-[#2f4f67]">
+    <div className="h-screen" style={{ backgroundColor: theme.colors.bg }}>
       <div className="flex h-full flex-col md:hidden">
-        <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-[#f5f5f5] px-4 py-3 text-slate-900 shadow-sm">
+        <header
+          className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 py-3 shadow-sm"
+          style={{
+            backgroundColor: isStrategic ? theme.colors.bgSecondary : "#f5f5f5",
+            color: isStrategic ? theme.colors.text : "#0f172a",
+          }}
+        >
           <div className="flex items-center gap-2">
             <a href="https://nexuspublica.com.br/" target="_blank" rel="noreferrer noopener">
               <Image
@@ -2702,27 +3035,54 @@ export default function ChatPageClient({
               <div className="text-sm font-semibold leading-none">
                 {brand.productLabel} {brand.versionLabel}
               </div>
-              <div className="text-[11px] text-slate-500 leading-none">
+              <div
+                className="text-[11px] leading-none"
+                style={{ color: isStrategic ? theme.colors.textSoft : "#64748b" }}
+              >
                 {brand.vendorLabel}
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-4">
-            <span className="text-[11px] text-slate-600">
-              Usuário: <span className="font-semibold break-all">{userLabel}</span>
+            <span
+              className="text-[11px]"
+              style={{ color: isStrategic ? theme.colors.textMuted : "#475569" }}
+            >
+              Usuário: <span className="font-semibold break-all">{userLabel}</span>{" "}
+              {statusLabel && (
+                <span
+                  className="font-semibold"
+                  style={{ color: isStrategic ? theme.colors.text : "#334155" }}
+                >
+                  [{statusLabel}]
+                </span>
+              )}
             </span>
 
             <button
               type="button"
               aria-label="Abrir menu"
               onClick={() => setIsMobileSidebarOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-300 bg-white shadow-sm"
+              className="flex h-9 w-9 items-center justify-center rounded-full border shadow-sm"
+              style={{
+                borderColor: isStrategic ? theme.colors.borderStrong : "#cbd5e1",
+                backgroundColor: isStrategic ? theme.colors.bg : "#ffffff",
+              }}
             >
               <span className="flex flex-col gap-[3px]">
-                <span className="block h-[2px] w-4 rounded bg-slate-700" />
-                <span className="block h-[2px] w-4 rounded bg-slate-700" />
-                <span className="block h-[2px] w-4 rounded bg-slate-700" />
+                <span
+                  className="block h-[2px] w-4 rounded"
+                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                />
+                <span
+                  className="block h-[2px] w-4 rounded"
+                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                />
+                <span
+                  className="block h-[2px] w-4 rounded"
+                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                />
               </span>
             </button>
           </div>
@@ -2730,9 +3090,12 @@ export default function ChatPageClient({
 
         <div className="relative flex flex-1 pt-[64px]">
           <div
-            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto bg-[#f5f5f5] shadow-lg transform transition-transform duration-200 ${
+            className={`fixed inset-y-0 left-0 z-40 w-72 max-w-full overflow-y-auto shadow-lg transform transition-transform duration-200 ${
               isMobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
             }`}
+            style={{
+              backgroundColor: isStrategic ? theme.colors.bg : "#f5f5f5",
+            }}
           >
             <ChatSidebar
               conversations={conversations}
@@ -2746,12 +3109,17 @@ export default function ChatPageClient({
               onRenameConversation={(id, nextTitle) =>
                 handleRenameConversation(id, nextTitle)
               }
+              onOpenUpgradeAccess={() => {
+                void handleStartStrategicTrial();
+              }}
               userLabel={userLabel}
               isBlocked={isBlocked}
               blockedMessage={blockedMessage}
               blockedCta={blockedCta}
               access={access}
               accessLoading={accessLoading}
+              upgradeLoading={isStartingStrategicTrial}
+              sidebarFeedback={sidebarFeedback}
             />
           </div>
 
@@ -2762,7 +3130,9 @@ export default function ChatPageClient({
             />
           )}
 
-          <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
+          <main className="flex flex-1 flex-col" style={{ backgroundColor: theme.colors.bg }}>
+            {renderMain()}
+          </main>
         </div>
       </div>
 
@@ -2779,15 +3149,22 @@ export default function ChatPageClient({
           onRenameConversation={(id, nextTitle) =>
             handleRenameConversation(id, nextTitle)
           }
+          onOpenUpgradeAccess={() => {
+            void handleStartStrategicTrial();
+          }}
           userLabel={userLabel}
           isBlocked={isBlocked}
           blockedMessage={blockedMessage}
           blockedCta={blockedCta}
           access={access}
           accessLoading={accessLoading}
+          upgradeLoading={isStartingStrategicTrial}
+          sidebarFeedback={sidebarFeedback}
         />
 
-        <main className="flex flex-1 flex-col bg-[#2f4f67]">{renderMain()}</main>
+        <main className="flex flex-1 flex-col" style={{ backgroundColor: theme.colors.bg }}>
+          {renderMain()}
+        </main>
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 //src/app/chat/components/ChatMessagesList.tsx
 "use client";
+
 import {
   useEffect,
   useRef,
@@ -8,10 +9,13 @@ import {
   createContext,
   useContext,
   useCallback,
+  useMemo,
 } from "react";
-import type { RefObject } from "react";
+import type { RefObject, CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { getAlertStyles, type AlertTone } from "../utils/alertStyles";
+import { getChatTheme } from "@/app/chat/theme";
 
 export type ChatMessage = {
   id: string;
@@ -28,7 +32,11 @@ export type SuggestedNextQuestion = {
 
 type Variant = "chat" | "share";
 
-type ActionToast = { messageId: string; text: string } | null;
+type ActionToast = {
+  messageId: string;
+  text: string;
+  tone?: AlertTone;
+} | null;
 
 type BlockedCta = {
   href: string;
@@ -38,10 +46,14 @@ type BlockedCta = {
 type ChatMessagesListProps = {
   messages: ChatMessage[];
   onCopyAnswer?: (messageId: string) => void | Promise<void>;
-  onShareConversation?: (conversationId: string, messageId: string) => void | Promise<void>;
+  onShareConversation?: (
+    conversationId: string,
+    messageId: string
+  ) => void | Promise<void>;
   onRegenerateLast?: (lastUserMessage: string) => void | Promise<void>;
   onDoOcr?: () => void | Promise<void>;
   onSuggestionClick?: (prompt: string) => void | Promise<void>;
+  onFillInputSuggestion?: (prompt: string) => void;
   suggestions?: SuggestedNextQuestion[];
   isSending: boolean;
   activePdfName?: string | null;
@@ -126,7 +138,9 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("auth:session-expired"));
       }
-      throw new Error("Sessão expirada. Faça login novamente e tente baixar de novo.");
+      throw new Error(
+        "Sessão expirada. Faça login novamente e tente baixar de novo."
+      );
     }
 
     throw new Error(msg || "Falha ao gerar Excel.");
@@ -137,7 +151,9 @@ async function downloadXlsxFromRows(rows: string[][], filename: string) {
 
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.toLowerCase().endsWith(".xlsx") ? filename : `${filename}.xlsx`;
+  a.download = filename.toLowerCase().endsWith(".xlsx")
+    ? filename
+    : `${filename}.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -160,17 +176,20 @@ type MdTheme = {
 };
 
 const THEME_CHAT: MdTheme = {
-  tableOuterBorder: "w-full border border-white/10",
+  tableOuterBorder: "w-full border border-slate-300",
   tableClassWide: "min-w-max w-full border-collapse text-[13px]",
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
-  theadBg: "bg-white/5",
-  thWide: "whitespace-nowrap border border-white/15 px-3 py-2 text-left font-semibold",
+  theadBg: "bg-slate-200/60",
+  thWide:
+    "whitespace-nowrap border border-slate-300 px-3 py-2 text-left font-semibold text-slate-800",
   thNormal:
-    "whitespace-normal break-words border border-white/15 px-3 py-2 text-left font-semibold",
-  tdWide: "whitespace-nowrap border border-white/10 px-3 py-2 align-top",
-  tdNormal: "whitespace-normal break-words border border-white/10 px-3 py-2 align-top",
-  btn: "rounded-full border border-white/60 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
-  pre: "my-3 overflow-x-auto rounded-xl bg-black/20 p-3",
+    "whitespace-normal break-words border border-slate-300 px-3 py-2 text-left font-semibold text-slate-800",
+  tdWide:
+    "whitespace-nowrap border border-slate-300 px-3 py-2 align-top text-slate-800",
+  tdNormal:
+    "whitespace-normal break-words border border-slate-300 px-3 py-2 align-top text-slate-800",
+  btn: "rounded-full border border-slate-400 px-3 py-1 text-[11px] font-medium text-slate-700 transition hover:bg-slate-200",
+  pre: "my-3 overflow-x-auto rounded-xl bg-slate-200/70 p-3 text-slate-800",
   link: "text-inherit underline underline-offset-2 hover:opacity-80",
 };
 
@@ -179,13 +198,33 @@ const THEME_SHARE: MdTheme = {
   tableClassWide: "min-w-max w-full border-collapse text-[13px]",
   tableClassNormal: "w-full table-auto border-collapse text-[13px]",
   theadBg: "bg-slate-200/10",
-  thWide: "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
+  thWide:
+    "whitespace-nowrap border border-slate-200/25 px-3 py-2 text-left font-semibold",
   thNormal:
     "whitespace-normal break-words border border-slate-200/25 px-3 py-2 text-left font-semibold",
   tdWide: "whitespace-nowrap border border-slate-200/15 px-3 py-2 align-top",
-  tdNormal: "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
+  tdNormal:
+    "whitespace-normal break-words border border-slate-200/15 px-3 py-2 align-top",
   btn: "rounded-full border border-slate-200/50 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
   pre: "my-3 overflow-x-auto rounded-xl bg-black/25 p-3",
+  link: "text-inherit underline underline-offset-2 hover:opacity-80",
+};
+
+const THEME_CHAT_STRATEGIC: MdTheme = {
+  tableOuterBorder: "w-full border border-white/20",
+  tableClassWide: "min-w-max w-full border-collapse text-[13px] text-white",
+  tableClassNormal: "w-full table-auto border-collapse text-[13px] text-white",
+  theadBg: "bg-white/10",
+  thWide:
+    "whitespace-nowrap border border-white/20 px-3 py-2 text-left font-semibold text-white",
+  thNormal:
+    "whitespace-normal break-words border border-white/20 px-3 py-2 text-left font-semibold text-white",
+  tdWide:
+    "whitespace-nowrap border border-white/15 px-3 py-2 align-top text-white",
+  tdNormal:
+    "whitespace-normal break-words border border-white/15 px-3 py-2 align-top text-white",
+  btn: "rounded-full border border-white/40 px-3 py-1 text-[11px] font-medium text-white transition hover:bg-white/10",
+  pre: "my-3 overflow-x-auto rounded-xl bg-black/20 p-3 text-white",
   link: "text-inherit underline underline-offset-2 hover:opacity-80",
 };
 
@@ -202,7 +241,9 @@ function useTableLayout() {
 function tableElementToMatrix(tableEl: HTMLTableElement): string[][] {
   const trs = Array.from(tableEl.querySelectorAll("tr"));
   return trs.map((tr) =>
-    Array.from(tr.querySelectorAll("th,td")).map((cell) => (cell.textContent ?? "").trim())
+    Array.from(tr.querySelectorAll("th,td")).map((cell) =>
+      (cell.textContent ?? "").trim()
+    )
   );
 }
 
@@ -274,6 +315,86 @@ function normalizeBareLinksInText(input: string) {
   return processed.join("");
 }
 
+function getInlineAlertStyles(
+  variant: Variant,
+  productTier: ChatMessagesListProps["productTier"],
+  tone: AlertTone = "success"
+) {
+  const isStrategicUi = variant === "share" || productTier === "strategic";
+
+  return getAlertStyles(tone, isStrategicUi);
+}
+
+function extractInputSuggestion(markdown: string): {
+  contentWithoutSuggestion: string;
+  suggestionText: string | null;
+} {
+  const normalized = String(markdown ?? "").trim();
+  if (!normalized) {
+    return {
+      contentWithoutSuggestion: "",
+      suggestionText: null,
+    };
+  }
+
+  const introPattern =
+    /(?:^|\n)((?:se\s+(?:voc[eê]\s+)?(?:quiser|desejar)|caso\s+queira|se\s+preferir|posso\s+tamb[eé]m|posso[^\n]*se\s+(?:voc[eê]\s+)?quiser)[^\n]*)/i;
+
+  const introMatch = normalized.match(introPattern);
+
+  if (!introMatch || introMatch.index === undefined) {
+    return {
+      contentWithoutSuggestion: normalized,
+      suggestionText: null,
+    };
+  }
+
+  const introText = introMatch[1]?.trim();
+  if (!introText) {
+    return {
+      contentWithoutSuggestion: normalized,
+      suggestionText: null,
+    };
+  }
+
+  const start = introMatch.index + (introMatch[0].startsWith("\n") ? 1 : 0);
+  const afterIntroStart = start + introMatch[0].trimStart().length;
+  const rest = normalized.slice(afterIntroStart);
+
+  const listMatch = rest.match(
+    /^(\s*\n(?:\s*[-*•]\s+[^\n]+|\s*\d+[.)]\s+[^\n]+))+/
+  );
+
+  const suggestionBlock = (
+    introText + (listMatch ? listMatch[0] : "")
+  ).trim();
+
+  const end = afterIntroStart + (listMatch ? listMatch[0].length : 0);
+
+  let contentWithoutSuggestion = normalized.slice(0, start) + normalized.slice(end);
+
+  contentWithoutSuggestion = contentWithoutSuggestion
+    .replace(/(^|\n)\s*([-*_])\2{2,}\s*(?=\n|$)/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n\s+\n/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+
+  return {
+    contentWithoutSuggestion,
+    suggestionText: suggestionBlock,
+  };
+}
+
+function addSeparatorBeforeBaseLegal(markdown: string, enabled: boolean) {
+  if (!enabled) return markdown;
+
+  return markdown.replace(
+    /(^|\n)(?:\*\*\s*)?Base legal:(?:\s*\*\*)?\s*/i,
+    (match, prefix) => `${prefix}---\n\nBase legal:\n`
+  );
+}
+
 function TableWithDownloads({
   index,
   children,
@@ -324,7 +445,7 @@ function TableWithDownloads({
         </div>
 
         {enableDownloads && (
-          <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-100/90">
+          <div className="mt-2 flex flex-wrap items-center justify-start gap-2 text-[11px] text-slate-700">
             <button
               type="button"
               onClick={async () => {
@@ -355,7 +476,8 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   while (p) {
     const style = window.getComputedStyle(p);
     const overflowY = style.overflowY;
-    const isCandidate = overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+    const isCandidate =
+      overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
     if (isCandidate) return p;
     p = p.parentElement;
   }
@@ -406,6 +528,7 @@ export function ChatMessagesList({
   onRegenerateLast,
   onDoOcr,
   onSuggestionClick,
+  onFillInputSuggestion,
   suggestions = [],
   isSending,
   variant = "chat",
@@ -417,7 +540,10 @@ export function ChatMessagesList({
   blockedCta = null,
   productTier = null,
 }: ChatMessagesListProps) {
-  const theme = variant === "share" ? THEME_SHARE : THEME_CHAT;
+  const normalizedProductTier =
+    typeof productTier === "string" ? productTier.trim().toLowerCase() : "";
+  const isStrategic = normalizedProductTier.includes("strategic");
+  const theme = variant === "share" ? THEME_SHARE : isStrategic ? THEME_CHAT_STRATEGIC : THEME_CHAT;
 
   const enableTableDownloads = variant === "chat";
 
@@ -430,13 +556,16 @@ export function ChatMessagesList({
   const isAtBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
 
+  const chatTheme = useMemo(() => getChatTheme(isStrategic), [isStrategic]);
+
   const lastAssistant = [...messages].slice().reverse().find((m) => m.role === "assistant");
   const lastUser = [...messages].slice().reverse().find((m) => m.role === "user");
 
   const userMessages = messages.filter((m) => m.role === "user");
   const lastTwoUsers = userMessages.slice(-2);
   const isRegeneratedForSameQuestion =
-    lastTwoUsers.length === 2 && lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
+    lastTwoUsers.length === 2 &&
+    lastTwoUsers[0].content.trim() === lastTwoUsers[1].content.trim();
 
   const BOTTOM_THRESHOLD_PX = 120;
 
@@ -516,6 +645,9 @@ export function ChatMessagesList({
     suggestions.length > 0 &&
     typeof onSuggestionClick === "function";
 
+  const strategicActionButtonClass =
+    "rounded-full border px-3 py-1 text-[11px] font-medium transition duration-150 hover:brightness-110";
+
   return (
     <MarkdownThemeContext.Provider value={theme}>
       <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-4">
@@ -526,28 +658,78 @@ export function ChatMessagesList({
           const regenerateBlocked = isGeneratingThis || isBlocked;
           const ocrBlocked = isGeneratingThis || isBlocked;
           const suggestionBlocked = isGeneratingThis || isBlocked || isSending;
+          const inlineSuggestionBlocked = isGeneratingThis || isBlocked || isSending;
 
           let tableIndex = 0;
 
           const userBubble =
             variant === "share"
               ? "bg-[#0d4161] text-white"
-              : productTier === "strategic"
-                ? "bg-[#838383] text-white"
-                : "bg-[#5d5d5d] text-white";
+              : isStrategic
+                ? ""
+                : "bg-[#8e8e8e] text-white";
 
           const assistantBubble =
-            variant === "share" ? "bg-[#274d69] text-slate-50" : "bg-[#2b4e67] text-slate-50";
+            variant === "share"
+              ? "bg-[#274d69] text-slate-50"
+              : isStrategic
+                ? ""
+                : "bg-[#e5e5e5] text-slate-800";
+
+          const assistantMetaTextClass =
+            variant === "share"
+              ? "text-slate-100/90"
+              : isStrategic
+                ? ""
+                : "text-slate-700";
+
+          const actionToastStyles = getInlineAlertStyles(
+            variant,
+            productTier,
+            actionToast?.tone ?? "success"
+          );
+
+          const actionButtonClass =
+            isStrategic && variant === "chat" ? strategicActionButtonClass : theme.btn;
 
           const { main, footer } = splitMarkdownFooter(msg.content);
-          const mainWithLinks = normalizeBareLinksInText(main);
+
+          const {
+            contentWithoutSuggestion,
+            suggestionText,
+          } = isStrategic && msg.role === "assistant"
+            ? extractInputSuggestion(main)
+            : { contentWithoutSuggestion: main, suggestionText: null };
+
+          const mainPrepared = addSeparatorBeforeBaseLegal(contentWithoutSuggestion, isStrategic);
+          const mainWithLinks = normalizeBareLinksInText(mainPrepared);
           const footerWithLinks = normalizeBareLinksInText(footer);
 
           const markdownComponentsMain: any = {
             a: ({ node, ...props }: any) => (
-              <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
+              <a
+                {...props}
+                target="_blank"
+                rel="noreferrer noopener"
+                className={theme.link}
+              />
             ),
-            hr: () => <div className="my-4 h-px w-full bg-white/20" />,
+            hr: () => (
+              <div
+                className={
+                  variant === "share"
+                    ? "my-4 h-px w-full bg-white/20"
+                    : isStrategic
+                      ? "my-4 h-px w-full"
+                      : "my-4 h-px w-full bg-slate-400/50"
+                }
+                style={
+                  variant === "chat" && isStrategic
+                    ? { backgroundColor: chatTheme.colors.borderStrong }
+                    : undefined
+                }
+              />
+            ),
 
             h1: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
@@ -584,7 +766,9 @@ export function ChatMessagesList({
                 </TableWithDownloads>
               );
             },
-            thead: ({ node, ...props }: any) => <thead {...props} className={theme.theadBg} />,
+            thead: ({ node, ...props }: any) => (
+              <thead {...props} className={theme.theadBg} />
+            ),
             th: (props: any) => <ThCell {...props} />,
             td: (props: any) => <TdCell {...props} />,
 
@@ -627,7 +811,12 @@ export function ChatMessagesList({
 
           const markdownComponentsFooter: any = {
             a: ({ node, ...props }: any) => (
-              <a {...props} target="_blank" rel="noreferrer noopener" className={theme.link} />
+              <a
+                {...props}
+                target="_blank"
+                rel="noreferrer noopener"
+                className={theme.link}
+              />
             ),
 
             table: () => null,
@@ -637,17 +826,29 @@ export function ChatMessagesList({
             h1: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <p className="publia-footnote__heading">{(props as any).children}</p>;
+              return (
+                <p className="publia-footnote__heading">
+                  {(props as any).children}
+                </p>
+              );
             },
             h2: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <p className="publia-footnote__heading">{(props as any).children}</p>;
+              return (
+                <p className="publia-footnote__heading">
+                  {(props as any).children}
+                </p>
+              );
             },
             h3: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
               if (isCsvHeading(txt)) return null;
-              return <p className="publia-footnote__heading">{(props as any).children}</p>;
+              return (
+                <p className="publia-footnote__heading">
+                  {(props as any).children}
+                </p>
+              );
             },
             p: ({ node, ...props }: any) => {
               const txt = extractText((props as any).children);
@@ -675,35 +876,125 @@ export function ChatMessagesList({
               {isUser ? (
                 <div className="flex flex-col items-start">
                   {getUserDateTimeLabel(msg.created_at) && (
-                    <div className="mb-2 text-[11px] font-semibold text-slate-200/90">
+                    <div
+                      className={`mb-2 text-[11px] font-semibold ${
+                        isStrategic ? "" : "text-slate-700"
+                      }`}
+                      style={
+                        isStrategic
+                          ? { color: chatTheme.colors.text }
+                          : undefined
+                      }
+                    >
                       {getUserDateTimeLabel(msg.created_at)}
                     </div>
                   )}
 
-                  <div className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}>
-                    <p className="whitespace-pre-line text-[14px] leading-relaxed">{msg.content}</p>
+                  <div
+                    className={"inline-block max-w-[80%] rounded-xl px-5 py-2 " + userBubble}
+                    style={
+                      variant === "chat" && isStrategic
+                        ? {
+                            backgroundColor: chatTheme.colors.bubbleUser,
+                            color: chatTheme.colors.text,
+                          }
+                        : undefined
+                    }
+                  >
+                    <p className="whitespace-pre-line text-[14px] leading-relaxed">
+                      {msg.content}
+                    </p>
                   </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-start">
-                  <div className={"w-full rounded-3xl px-6 py-4 shadow-md " + assistantBubble}>
+                  <div
+                    className={"w-full rounded-3xl px-6 py-4 " + assistantBubble}
+                    style={
+                      variant === "chat" && isStrategic
+                        ? {
+                            backgroundColor: chatTheme.colors.bg,
+                            color: chatTheme.colors.text,
+                          }
+                        : undefined
+                    }
+                  >
                     {onRegenerateLast &&
                       lastAssistant &&
                       msg.id === lastAssistant.id &&
                       isRegeneratedForSameQuestion && (
-                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200/80">
+                        <div
+                          className={
+                            "mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] " +
+                            assistantMetaTextClass
+                          }
+                          style={
+                            variant === "chat" && isStrategic
+                              ? { color: chatTheme.colors.textMuted }
+                              : undefined
+                          }
+                        >
                           Resposta regenerada
                         </div>
                       )}
 
                     <div className="markdown text-[14px] leading-relaxed" data-copy-id={msg.id}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsMain}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={markdownComponentsMain}
+                      >
                         {mainWithLinks}
                       </ReactMarkdown>
                     </div>
 
+                    {isStrategic &&
+                      suggestionText &&
+                      typeof onFillInputSuggestion === "function" && (
+                        <div className="mt-4">
+                          <button
+                            type="button"
+                            disabled={inlineSuggestionBlocked}
+                            onClick={() => {
+                              if (inlineSuggestionBlocked) return;
+                              onFillInputSuggestion(suggestionText);
+                            }}
+                            className={
+                              "w-full rounded-2xl border px-4 py-3 text-left text-[14px] leading-relaxed transition " +
+                              (inlineSuggestionBlocked
+                                ? "cursor-not-allowed opacity-50"
+                                : "")
+                            }
+                            style={{
+                              borderColor: chatTheme.colors.borderStrong,
+                              backgroundColor: chatTheme.colors.hover,
+                              color: chatTheme.colors.text,
+                            }}
+                            onMouseEnter={(e) => {
+                              if (inlineSuggestionBlocked) return;
+                              e.currentTarget.style.backgroundColor =
+                                chatTheme.colors.buttonGhostHover;
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor =
+                                chatTheme.colors.hover;
+                            }}
+                            title={isBlocked ? blockedMessage : "Preencher no input"}
+                          >
+                            {suggestionText}
+                          </button>
+                        </div>
+                      )}
+
                     {footer.trim().length > 0 && (
-                      <div className="publia-footnote mt-4 text-slate-100/90" data-footnote>
+                      <div
+                        className={"publia-footnote mt-4 " + assistantMetaTextClass}
+                        data-footnote
+                        style={
+                          variant === "chat" && isStrategic
+                            ? { color: chatTheme.colors.textMuted }
+                            : undefined
+                        }
+                      >
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm]}
                           components={markdownComponentsFooter}
@@ -714,8 +1005,30 @@ export function ChatMessagesList({
                     )}
 
                     {isGeneratingThis && (
-                      <div className="mt-3 flex items-center gap-2 text-xs text-slate-100">
-                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100" />
+                      <div
+                        className={
+                          "mt-3 flex items-center gap-2 text-xs " + assistantMetaTextClass
+                        }
+                        style={
+                          variant === "chat" && isStrategic
+                            ? { color: chatTheme.colors.textMuted }
+                            : undefined
+                        }
+                      >
+                        <span
+                          className={
+                            variant === "share"
+                              ? "inline-block h-2 w-2 animate-pulse rounded-full bg-slate-100"
+                              : isStrategic
+                                ? "inline-block h-2 w-2 animate-pulse rounded-full"
+                                : "inline-block h-2 w-2 animate-pulse rounded-full bg-slate-700"
+                          }
+                          style={
+                            variant === "chat" && isStrategic
+                              ? { backgroundColor: chatTheme.colors.text }
+                              : undefined
+                          }
+                        />
                         <span>Gerando resposta...</span>
                       </div>
                     )}
@@ -724,7 +1037,7 @@ export function ChatMessagesList({
                   {(onCopyAnswer || onRegenerateLast || canShare || showOcrButton) && (
                     <div className="mt-2 flex w-full flex-col gap-2 text-xs">
                       {actionToast?.messageId === msg.id && (
-                        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100">
+                        <div className={actionToastStyles.container}>
                           {actionToast.text}
                         </div>
                       )}
@@ -734,16 +1047,48 @@ export function ChatMessagesList({
                         lastAssistant &&
                         msg.id === lastAssistant.id &&
                         (onRegenerateLast || showOcrButton) && (
-                          <div className="rounded-xl border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
-                            <div>{blockedMessage}</div>
+                          <div
+                            className={
+                              isStrategic || variant === "share"
+                                ? "w-full rounded-lg border px-3 py-2 text-xs leading-snug"
+                                : "w-full rounded-lg border border-amber-300 bg-amber-100 px-3 py-2 text-xs leading-snug text-amber-950"
+                            }
+                            style={
+                              variant === "chat" && isStrategic
+                                ? {
+                                    borderColor: chatTheme.colors.borderStrong,
+                                    backgroundColor: chatTheme.colors.hover,
+                                    color: chatTheme.colors.text,
+                                  }
+                                : undefined
+                            }
+                          >
+                            <div className="font-medium">
+                              Acesso bloqueado para novas ações
+                            </div>
+
+                            <div className="mt-1">{blockedMessage}</div>
 
                             {blockedCta && (
-                              <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <div className="mt-2">
                                 <a
                                   href={blockedCta.href}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                                  className={
+                                    isStrategic || variant === "share"
+                                      ? "inline-flex items-center justify-center rounded-full border px-3 py-1 text-[11px] font-semibold transition duration-150 hover:brightness-110"
+                                      : "inline-flex items-center justify-center rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 transition hover:bg-slate-100"
+                                  }
+                                  style={
+                                    variant === "chat" && isStrategic
+                                      ? {
+                                          borderColor: chatTheme.colors.borderStrong,
+                                          backgroundColor: chatTheme.colors.buttonGhostHover,
+                                          color: chatTheme.colors.text,
+                                        }
+                                      : undefined
+                                  }
                                 >
                                   {blockedCta.label}
                                 </a>
@@ -759,7 +1104,17 @@ export function ChatMessagesList({
                             disabled={isGeneratingThis}
                             onClick={() => onCopyAnswer(msg.id)}
                             className={
-                              theme.btn + (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                              actionButtonClass +
+                              (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                            }
+                            style={
+                              isStrategic && variant === "chat"
+                                ? {
+                                    borderColor: chatTheme.colors.borderStrong,
+                                    backgroundColor: chatTheme.colors.bg,
+                                    color: chatTheme.colors.text,
+                                  }
+                                : undefined
                             }
                           >
                             Copiar
@@ -770,9 +1125,21 @@ export function ChatMessagesList({
                           <button
                             type="button"
                             disabled={isGeneratingThis}
-                            onClick={() => onShareConversation!(activeConversationId!.trim(), msg.id)}
+                            onClick={() =>
+                              onShareConversation!(activeConversationId!.trim(), msg.id)
+                            }
                             className={
-                              theme.btn + (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                              actionButtonClass +
+                              (isGeneratingThis ? " cursor-not-allowed opacity-50" : "")
+                            }
+                            style={
+                              isStrategic && variant === "chat"
+                                ? {
+                                    borderColor: chatTheme.colors.borderStrong,
+                                    backgroundColor: chatTheme.colors.bg,
+                                    color: chatTheme.colors.text,
+                                  }
+                                : undefined
                             }
                           >
                             Compartilhar
@@ -792,8 +1159,17 @@ export function ChatMessagesList({
                               }}
                               title={isBlocked ? blockedMessage : "Regenerar resposta"}
                               className={
-                                theme.btn +
+                                actionButtonClass +
                                 (regenerateBlocked ? " cursor-not-allowed opacity-50" : "")
+                              }
+                              style={
+                                isStrategic && variant === "chat"
+                                  ? {
+                                      borderColor: chatTheme.colors.borderStrong,
+                                      backgroundColor: chatTheme.colors.bg,
+                                      color: chatTheme.colors.text,
+                                    }
+                                  : undefined
                               }
                             >
                               Regenerar
@@ -813,7 +1189,17 @@ export function ChatMessagesList({
                               }}
                               title={isBlocked ? blockedMessage : "Fazer OCR"}
                               className={
-                                theme.btn + (ocrBlocked ? " cursor-not-allowed opacity-50" : "")
+                                actionButtonClass +
+                                (ocrBlocked ? " cursor-not-allowed opacity-50" : "")
+                              }
+                              style={
+                                isStrategic && variant === "chat"
+                                  ? {
+                                      borderColor: chatTheme.colors.borderStrong,
+                                      backgroundColor: chatTheme.colors.bg,
+                                      color: chatTheme.colors.text,
+                                    }
+                                  : undefined
                               }
                             >
                               Fazer OCR
@@ -828,40 +1214,82 @@ export function ChatMessagesList({
                     msg.id === lastAssistant.id && (
                       <div
                         className={
-                          productTier === "strategic"
-                            ? "mt-4 flex w-full flex-col items-center justify-center bg-[#2f4f67] px-2 py-2 text-center"
-                            : "mt-3 w-full rounded-2xl border border-white/10 bg-black/15 px-4 py-3"
+                          isStrategic
+                            ? "mt-4 flex w-full flex-col items-center justify-center px-2 py-2 text-center"
+                            : "mt-3 w-full rounded-2xl border border-slate-300 bg-[#dcdcdc] px-4 py-3"
+                        }
+                        style={
+                          isStrategic
+                            ? {
+                                backgroundColor: chatTheme.colors.bg,
+                              }
+                            : undefined
                         }
                       >
-                        <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-200/80">
+                        <div
+                          className={
+                            isStrategic
+                              ? "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em]"
+                              : "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700"
+                          }
+                          style={
+                            isStrategic
+                              ? { color: chatTheme.colors.textMuted }
+                              : undefined
+                          }
+                        >
                           Sugestões de próxima pergunta
                         </div>
 
                         <div
                           className={
-                            productTier === "strategic"
+                            isStrategic
                               ? "flex w-full flex-wrap items-center justify-center gap-2"
                               : "flex flex-wrap gap-2"
                           }
                         >
-                          {suggestions.map((suggestion) => (
-                            <button
-                              key={suggestion.id}
-                              type="button"
-                              disabled={suggestionBlocked}
-                              onClick={() => {
-                                if (suggestionBlocked) return;
-                                void onSuggestionClick?.(suggestion.prompt);
-                              }}
-                              title={isBlocked ? blockedMessage : suggestion.label}
-                              className={
-                                "rounded-full border border-white/15 bg-white/5 px-3 py-2 text-center text-[12px] leading-snug text-slate-100 transition hover:bg-white/10 " +
-                                (suggestionBlocked ? "cursor-not-allowed opacity-50" : "")
-                              }
-                            >
-                              {suggestion.label}
-                            </button>
-                          ))}
+                          {suggestions.map((suggestion) => {
+                            return (
+                              <button
+                                key={suggestion.id}
+                                type="button"
+                                disabled={suggestionBlocked}
+                                onClick={() => {
+                                  if (suggestionBlocked) return;
+                                  void onSuggestionClick?.(suggestion.prompt);
+                                }}
+                                title={isBlocked ? blockedMessage : suggestion.label}
+                                className={
+                                  isStrategic
+                                    ? "rounded-full border px-3 py-2 text-center text-[12px] leading-snug transition " +
+                                      (suggestionBlocked ? "cursor-not-allowed opacity-50" : "")
+                                    : "rounded-full border border-slate-300 bg-slate-100 px-3 py-2 text-center text-[12px] leading-snug text-slate-800 transition hover:bg-slate-200 " +
+                                      (suggestionBlocked ? "cursor-not-allowed opacity-50" : "")
+                                }
+                                style={
+                                  isStrategic
+                                    ? {
+                                        borderColor: chatTheme.colors.border,
+                                        backgroundColor: chatTheme.colors.hover,
+                                        color: chatTheme.colors.text,
+                                      }
+                                    : undefined
+                                }
+                                onMouseEnter={(e) => {
+                                  if (!isStrategic || suggestionBlocked) return;
+                                  e.currentTarget.style.backgroundColor =
+                                    chatTheme.colors.buttonGhostHover;
+                                }}
+                                onMouseLeave={(e) => {
+                                  if (!isStrategic) return;
+                                  e.currentTarget.style.backgroundColor =
+                                    chatTheme.colors.hover;
+                                }}
+                              >
+                                {suggestion.label}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -881,6 +1309,18 @@ export function ChatMessagesList({
           >
             Ir para o final ({unread})
           </button>
+        )}
+
+        {isStrategic && (
+          <style jsx>{`
+            .publia-strategic-suggestion-btn {
+              background-color: var(--suggestion-bg);
+            }
+
+            .publia-strategic-suggestion-btn:hover {
+              background-color: var(--suggestion-hover-bg);
+            }
+          `}</style>
         )}
       </div>
     </MarkdownThemeContext.Provider>

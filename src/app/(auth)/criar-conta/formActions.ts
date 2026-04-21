@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { headers } from "next/headers";
 import { isValidCpfCnpj, onlyDigits } from "@/lib/validators";
+import { applySignupTokenAccess } from "@/lib/access/applySignupTokenAccess";
 
 export type SignUpState = {
   ok: boolean;
@@ -84,18 +85,6 @@ export async function criarConta(
   }
 
   await cleanupBestEffort();
-
-  async function unconsumeSignupToken(token: string, usedAtIso: string) {
-    try {
-      await supa
-        .from("signup_tokens")
-        .update({ used_at: null })
-        .eq("token", token)
-        .eq("used_at", usedAtIso);
-    } catch {
-      // best-effort
-    }
-  }
 
   try {
     const raw = Object.fromEntries(formData.entries());
@@ -187,25 +176,6 @@ export async function criarConta(
       return { ok: false, error: "Já existe um cadastro com este e-mail." };
     }
 
-    const usedAtIso = new Date().toISOString();
-
-    const { data: tokenRow, error: tokenErr } = await supa
-      .from("signup_tokens")
-      .update({ used_at: usedAtIso })
-      .eq("token", token)
-      .is("used_at", null)
-      .gt("expires_at", usedAtIso)
-      .select("id")
-      .maybeSingle();
-
-    if (tokenErr || !tokenRow) {
-      return {
-        ok: false,
-        error: "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
-        code: "signup_token_invalid",
-      };
-    }
-
     const { data: created, error: authErr } = await supa.auth.admin.createUser({
       email: emailNorm,
       password: senha,
@@ -214,7 +184,6 @@ export async function criarConta(
 
     if (authErr || !created?.user) {
       console.error("[signup] erro ao criar user", authErr);
-      await unconsumeSignupToken(token, usedAtIso);
 
       if (authErr?.code === "email_exists") {
         return {
@@ -246,8 +215,81 @@ export async function criarConta(
     if (profileErr) {
       console.error("[signup] erro ao criar profile", profileErr);
       await supa.auth.admin.deleteUser(userId).catch(() => {});
-      await unconsumeSignupToken(token, usedAtIso);
       return { ok: false, error: "Falha ao salvar perfil. Tente novamente." };
+    }
+
+    const accessResult = await applySignupTokenAccess({
+      supabase: supa,
+      userId,
+      token,
+    });
+
+    if (!accessResult.ok) {
+      console.error("[signup] erro ao aplicar token de acesso", accessResult);
+
+      try {
+        await supa.from("profiles").delete().eq("user_id", userId);
+      } catch {
+        // best-effort rollback
+      }
+
+      try {
+        await supa.auth.admin.deleteUser(userId);
+      } catch {
+        // best-effort rollback
+      }
+
+      if (
+        accessResult.reason === "TOKEN_NOT_FOUND" ||
+        accessResult.reason === "TOKEN_ALREADY_USED" ||
+        accessResult.reason === "TOKEN_EXPIRED" ||
+        accessResult.reason === "TOKEN_INVALID_PRODUCT_TIER" ||
+        accessResult.reason === "TOKEN_INVALID_GRANT_KIND"
+      ) {
+        return {
+          ok: false,
+          error: "Link de cadastro inválido ou expirado. Volte e clique em “Criar conta” novamente.",
+          code: "signup_token_invalid",
+        };
+      }
+
+      if (accessResult.reason === "ESSENTIAL_TRIAL_ALREADY_CONSUMED") {
+        return {
+          ok: false,
+          error: "Este usuário já consumiu o trial do Publ.IA Essencial.",
+          code: "essential_trial_already_consumed",
+        };
+      }
+
+      if (accessResult.reason === "STRATEGIC_TRIAL_ALREADY_CONSUMED") {
+        return {
+          ok: false,
+          error: "Este usuário já consumiu o trial do Publ.IA Estratégico.",
+          code: "strategic_trial_already_consumed",
+        };
+      }
+
+      if (accessResult.reason === "USER_ALREADY_HAS_ACTIVE_ESSENTIAL") {
+        return {
+          ok: false,
+          error: "Este usuário já possui acesso Essencial ativo.",
+          code: "essential_already_active",
+        };
+      }
+
+      if (accessResult.reason === "USER_ALREADY_HAS_ACTIVE_STRATEGIC") {
+        return {
+          ok: false,
+          error: "Este usuário já possui acesso Estratégico ativo.",
+          code: "strategic_already_active",
+        };
+      }
+
+      return {
+        ok: false,
+        error: "Não foi possível concluir a liberação de acesso. Tente novamente.",
+        code: "signup_access_apply_failed",
+      };
     }
 
     return {

@@ -165,6 +165,30 @@ async function validatePdfUploadByPlan(
   }
 
   if (accessStatus === "trial_active") {
+    if (accessContext.productTier === "strategic") {
+      const used = await countUserPdfsThisMonth(supabase, userId);
+      const limit =
+        accessContext.capabilities.maxPdfUploadsPerMonth ??
+        getPdfUploadsPerMonthForTier("strategic");
+      const remaining = limit === null ? null : Math.max(limit - used, 0);
+
+      return {
+        allowed: limit === null ? true : used < limit,
+        limit,
+        used,
+        remaining,
+        period: "month",
+        blockedMessage:
+          limit !== null && used >= limit
+            ? `Você atingiu o limite de ${limit} PDFs neste mês no trial Estratégico.`
+            : null,
+        accessStatus,
+        isAdmin: false,
+        productTier: accessContext.productTier,
+        capabilities: accessContext.capabilities,
+      };
+    }
+
     const used = await countUserPdfsAllTime(supabase, userId);
     const limit =
       accessContext.capabilities.maxPdfUploadsPerAccount ?? TRIAL_PDF_LIMIT;

@@ -7,6 +7,7 @@ type ProductTier = "essential" | "strategic";
 type GrantKind = "trial" | "subscription" | "upgrade";
 
 type CreateSignupTokenBody = {
+  plan?: ProductTier;
   product_tier?: ProductTier;
   grant_kind?: GrantKind;
   trial_days?: number | null;
@@ -86,15 +87,24 @@ function getDefaultTrialDays(productTier: ProductTier) {
   return productTier === "strategic" ? 7 : 15;
 }
 
+function resolveDefaultSource(productTier: ProductTier) {
+  return productTier === "strategic"
+    ? "login_strategic_button"
+    : "login_essential_button";
+}
+
 function normalizeBody(input: unknown): CreateSignupTokenBody {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return {};
   }
 
   const body = input as Record<string, unknown>;
+  const plan = isProductTier(body.plan) ? body.plan : undefined;
+  const productTier = isProductTier(body.product_tier) ? body.product_tier : undefined;
 
   return {
-    product_tier: isProductTier(body.product_tier) ? body.product_tier : undefined,
+    plan,
+    product_tier: productTier ?? plan,
     grant_kind: isGrantKind(body.grant_kind) ? body.grant_kind : undefined,
     trial_days:
       typeof body.trial_days === "number" && Number.isFinite(body.trial_days)
@@ -145,7 +155,7 @@ export async function POST(req: Request) {
       body = {};
     }
 
-    const productTier: ProductTier = body.product_tier ?? "essential";
+    const productTier: ProductTier = body.product_tier ?? body.plan ?? "essential";
     const grantKind: GrantKind = body.grant_kind ?? "trial";
 
     const trialDays =
@@ -161,9 +171,7 @@ export async function POST(req: Request) {
         : 10;
 
     const token = crypto.randomBytes(18).toString("base64url");
-    const expiresAt = new Date(
-      Date.now() + expiresInMinutes * 60 * 1000
-    ).toISOString();
+    const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
 
     const insertPayload = {
       token,
@@ -172,7 +180,7 @@ export async function POST(req: Request) {
       grant_kind: grantKind,
       trial_days: trialDays,
       subscription_plan: body.subscription_plan ?? null,
-      source: body.source ?? "api_signup_token",
+      source: body.source ?? resolveDefaultSource(productTier),
       notes: body.notes ?? null,
     };
 
@@ -191,11 +199,12 @@ export async function POST(req: Request) {
       ok: true,
       token,
       expiresAt,
+      plan: productTier,
       product_tier: productTier,
       grant_kind: grantKind,
       trial_days: trialDays,
       subscription_plan: body.subscription_plan ?? null,
-      source: body.source ?? "api_signup_token",
+      source: body.source ?? resolveDefaultSource(productTier),
       notes: body.notes ?? null,
     });
   } catch (error) {

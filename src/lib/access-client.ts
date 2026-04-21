@@ -220,18 +220,55 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
     throw new Error(data?.error || "Erro ao carregar resumo de acesso.");
   }
 
-  const status = normalizeAccessStatus(data.accessStatus);
-  const productTier = normalizeProductTier(data.productTier);
-  const billingCycle = normalizeBillingCycle(data.billingCycle);
+  const resolved = data?.resolvedAccess ?? null;
+  const ui = data?.ui ?? null;
+
+  const derivedStatus =
+    typeof data?.accessStatus === "string"
+      ? data.accessStatus
+      : ui?.status === "trial_active"
+        ? "trial_active"
+        : ui?.status === "subscription_active" || ui?.status === "active"
+          ? "subscription_active"
+          : resolved?.effectiveGrantKind === "subscription"
+            ? "subscription_expired"
+            : "trial_expired";
+
+  const derivedProductTier =
+    typeof data?.productTier === "string"
+      ? data.productTier
+      : ui?.tier ?? resolved?.effectiveProductTier ?? "essential";
+
+  const derivedBillingCycle =
+    typeof data?.billingCycle === "string"
+      ? data.billingCycle
+      : ui?.isTrial === true
+        ? "trial"
+        : ui?.isSubscription === true
+          ? "monthly"
+          : "none";
+
+  const status = normalizeAccessStatus(derivedStatus);
+  const productTier = normalizeProductTier(derivedProductTier);
+  const billingCycle = normalizeBillingCycle(derivedBillingCycle);
   const scopeType = normalizeScopeType(data.scopeType);
 
   return {
     accessStatus: status,
     access_status: normalizeAccessStatus(data.access_status ?? status),
-    blockedMessage: data.blockedMessage ?? null,
-    blocked_message: data.blocked_message ?? null,
-    trialEndsAt: data.trialEndsAt ?? null,
-    subscriptionEndsAt: data.subscriptionEndsAt ?? null,
+    blockedMessage:
+      data.blockedMessage ??
+      (ui?.isActive === false
+        ? "Seu acesso está bloqueado no momento."
+        : null),
+    blocked_message:
+      data.blocked_message ??
+      (ui?.isActive === false
+        ? "Seu acesso está bloqueado no momento."
+        : null),
+    trialEndsAt: data.trialEndsAt ?? resolved?.trialEndsAt ?? null,
+    subscriptionEndsAt:
+      data.subscriptionEndsAt ?? resolved?.subscriptionEndsAt ?? null,
     subscriptionPlan: normalizeSubscriptionPlan(data.subscriptionPlan),
     messagesUsed: typeof data.messagesUsed === "number" ? data.messagesUsed : 0,
     trialMessageLimit:

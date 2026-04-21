@@ -5,6 +5,19 @@ export type AccessStatus =
   | "subscription_active"
   | "subscription_expired";
 
+export type ResolvedAccessStatus =
+  | "trial_active"
+  | "active"
+  | "expired"
+  | "blocked";
+
+export type ResolvedGrantKind =
+  | "trial"
+  | "subscription"
+  | "upgrade"
+  | "fallback"
+  | null;
+
 export type ProductTier = "essential" | "strategic" | "governance";
 
 export type BillingCycle = "monthly" | "annual" | "trial" | "none";
@@ -58,6 +71,22 @@ export interface UserAccessSummary {
   product_tier?: ProductTier | null;
 }
 
+export type ResolvedAccessSummary = {
+  effectiveProductTier: Exclude<ProductTier, "governance"> | null;
+  effectiveAccessStatus: ResolvedAccessStatus;
+  effectiveGrantKind: ResolvedGrantKind;
+  accessSource: "grant" | "snapshot" | "none";
+  canUseEssential: boolean;
+  canUseStrategic: boolean;
+  hasConsumedEssentialTrial: boolean;
+  hasConsumedStrategicTrial: boolean;
+  canStartEssentialTrial: boolean;
+  canStartStrategicTrial: boolean;
+  shouldFallbackToEssential: boolean;
+  fallbackTarget: "essential" | "strategic" | null;
+  label: string;
+};
+
 export type FrontendAccessSummary = {
   accessStatus: AccessStatus;
   access_status: AccessStatus;
@@ -80,4 +109,5 @@ export type FrontendAccessSummary = {
   scopeType: ScopeType;
   capabilities: FeatureCapabilities;
   brand: BrandConfig;
+  resolvedAccess?: ResolvedAccessSummary;
 };

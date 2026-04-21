@@ -31,7 +31,8 @@ export type ChatResponseMode =
   | "step_by_step"
   | "checklist"
   | "document_draft"
-  | "manager_guidance";
+  | "manager_guidance"
+  | "attention_points";
 
 export type ChatResponseModeResolution = {
   productTier: ProductTier;
@@ -63,11 +64,10 @@ const STRATEGIC_CHAT_RESPONSE_MODES = [
   "checklist",
   "document_draft",
   "manager_guidance",
+  "attention_points",
 ] as const;
 
-const GOVERNANCE_CHAT_RESPONSE_MODES = [
-  ...STRATEGIC_CHAT_RESPONSE_MODES,
-] as const;
+const GOVERNANCE_CHAT_RESPONSE_MODES = [...STRATEGIC_CHAT_RESPONSE_MODES] as const;
 
 const CHAT_RESPONSE_MODE_SET = new Set<string>([
   ...STRATEGIC_CHAT_RESPONSE_MODES,
@@ -134,6 +134,36 @@ function getEffectiveTrialMessageLimit(summary: AccessSummary): number {
   }
 
   return Math.max(storedLimit, tierLimit);
+}
+
+function normalizeLegacyAccessStatus(params: {
+  rawStatus: unknown;
+  subscriptionPlan?: unknown;
+  subscriptionEndsAt?: unknown;
+}): AccessStatus {
+  const rawStatus = String(params.rawStatus ?? "").trim();
+  const hasSubscriptionContext = Boolean(
+    normalizeSubscriptionPlan(params.subscriptionPlan) || params.subscriptionEndsAt
+  );
+
+  if (
+    rawStatus === "trial_active" ||
+    rawStatus === "subscription_active" ||
+    rawStatus === "trial_expired" ||
+    rawStatus === "subscription_expired"
+  ) {
+    return rawStatus;
+  }
+
+  if (rawStatus === "active") {
+    return "subscription_active";
+  }
+
+  if (rawStatus === "expired" || rawStatus === "blocked") {
+    return hasSubscriptionContext ? "subscription_expired" : "trial_expired";
+  }
+
+  return hasSubscriptionContext ? "subscription_expired" : "trial_expired";
 }
 
 export function deriveBillingCycle(params: {
@@ -259,7 +289,7 @@ export function buildAccessContext(params: {
 }) {
   const { summary, effectiveStatus, isAdmin = false } = params;
 
-  const productTier = resolveProductTier(summary);
+  const productTier = isAdmin ? "governance" : resolveProductTier(summary);
   const billingCycle = deriveBillingCycle({
     accessStatus: effectiveStatus,
     subscriptionPlan: summary.subscription_plan,
@@ -504,30 +534,7 @@ async function ensureUserAccessRow(client: any, userId: string) {
     return false;
   }
 
-  if (existing) {
-    return true;
-  }
-
-  const now = new Date();
-  const trialEndsAt = new Date(now.getTime() + 15 * 24 * 60 * 60 * 1000);
-
-  const { error: insertErr } = await client.from("user_access").insert({
-    user_id: userId,
-    access_status: "trial_active",
-    trial_started_at: now.toISOString(),
-    trial_ends_at: trialEndsAt.toISOString(),
-    trial_message_limit: ESSENTIAL_TRIAL_MESSAGE_LIMIT,
-  });
-
-  if (insertErr) {
-    console.error(
-      "[access-control] erro ao criar user_access automaticamente",
-      insertErr
-    );
-    return false;
-  }
-
-  return true;
+  return Boolean(existing);
 }
 
 async function getAccessSummaryFromView(
@@ -549,8 +556,15 @@ async function getAccessSummaryFromView(
     return null;
   }
 
+  const normalizedStatus = normalizeLegacyAccessStatus({
+    rawStatus: (data as any).access_status,
+    subscriptionPlan: (data as any).subscription_plan,
+    subscriptionEndsAt: (data as any).subscription_ends_at,
+  });
+
   return {
     ...(data as AccessSummary),
+    access_status: normalizedStatus,
     product_tier: resolveProductTier(data as Partial<AccessSummary>),
   };
 }
@@ -567,7 +581,7 @@ async function getAccessSummaryFromTables(
   const { data: accessRow, error: accessErr } = await client
     .from("user_access")
     .select(
-      "user_id, access_status, trial_started_at, trial_ends_at, trial_message_limit, subscription_plan, subscription_started_at, subscription_ends_at"
+      "user_id, access_status, trial_started_at, trial_ends_at, trial_message_limit, subscription_plan, subscription_started_at, subscription_ends_at, product_tier"
     )
     .eq("user_id", userId)
     .maybeSingle();
@@ -619,13 +633,19 @@ async function getAccessSummaryFromTables(
     totalTokensUsed += Number(row?.total_tokens ?? 0) || 0;
   }
 
+  const normalizedStatus = normalizeLegacyAccessStatus({
+    rawStatus: accessRow.access_status,
+    subscriptionPlan: accessRow.subscription_plan,
+    subscriptionEndsAt: accessRow.subscription_ends_at,
+  });
+
   return {
     user_id: accessRow.user_id,
-    access_status: accessRow.access_status as AccessStatus,
+    access_status: normalizedStatus,
     trial_started_at: accessRow.trial_started_at,
     trial_ends_at: accessRow.trial_ends_at,
     trial_message_limit: Number(
-      accessRow.trial_message_limit ?? ESSENTIAL_TRIAL_MESSAGE_LIMIT
+      accessRow.trial_message_limit ?? getTrialMessageLimitForTier(resolveProductTier(accessRow))
     ),
     subscription_plan: accessRow.subscription_plan ?? null,
     subscription_started_at: accessRow.subscription_started_at ?? null,
@@ -635,7 +655,7 @@ async function getAccessSummaryFromTables(
     input_tokens_used: inputTokensUsed,
     output_tokens_used: outputTokensUsed,
     total_tokens_used: totalTokensUsed,
-    product_tier: "essential",
+    product_tier: resolveProductTier(accessRow),
   };
 }
 
@@ -675,18 +695,5 @@ export async function syncEffectiveAccessStatus(
     };
   }
 
-  const decision = evaluateAccess(summary);
-
-  if (decision.effectiveStatus !== summary.access_status) {
-    const { error } = await client
-      .from("user_access")
-      .update({ access_status: decision.effectiveStatus })
-      .eq("user_id", summary.user_id);
-
-    if (error) {
-      console.error("[access-control] erro ao sincronizar access_status", error);
-    }
-  }
-
-  return decision;
+  return evaluateAccess(summary);
 }
