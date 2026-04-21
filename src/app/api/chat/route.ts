@@ -47,6 +47,18 @@ if (!openaiApiKey) {
 type PdfChatMode = "active" | "all" | "selected";
 
 type InternalResponseMode = ChatResponseMode;
+type PromptScopedResponseMode = Parameters<typeof buildProductScopedPrompt>[0]["responseMode"];
+
+function mapResponseModeToPromptScope(
+  responseMode: InternalResponseMode
+): PromptScopedResponseMode {
+  switch (responseMode) {
+    case "attention_points":
+      return "checklist";
+    default:
+      return responseMode;
+  }
+}
 
 function buildResponseModeInstruction(
   responseMode: InternalResponseMode
@@ -58,6 +70,8 @@ function buildResponseModeInstruction(
       return "MODO DE RESPOSTA: Orientação ao gestor. Estruture a resposta com foco em tomada de decisão, implicações práticas, providências e encaminhamentos recomendados para gestão pública.";
     case "checklist":
       return "MODO DE RESPOSTA: Checklist. Responda em formato de checklist objetivo, com itens acionáveis e verificáveis.";
+    case "attention_points":
+      return "MODO DE RESPOSTA: Pontos de atenção. Destaque riscos, cuidados, alertas, exigências críticas e pontos que merecem validação antes de agir.";
     case "step_by_step":
       return "MODO DE RESPOSTA: Passo a passo. Estruture a resposta em sequência operacional, com ordem lógica de execução.";
     case "document_draft":
@@ -1845,7 +1859,7 @@ export async function POST(req: Request) {
 
   const scopedPrompt = buildProductScopedPrompt({
     productTier: responseModeAccess.productTier,
-    responseMode: effectiveResponseMode,
+    responseMode: mapResponseModeToPromptScope(effectiveResponseMode),
   });
 
   const maxMultiPdfsInContext = getMaxMultiPdfsInContext({
