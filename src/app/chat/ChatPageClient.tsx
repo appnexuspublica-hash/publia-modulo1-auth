@@ -14,7 +14,6 @@ import {
 import { createBrowserClient } from "@supabase/ssr";
 import Image from "next/image";
 import {
-  canUseAiFeatures,
   fetchAccessSummary,
   getBlockedAccessMessage,
   type FrontendAccessSummary,
@@ -89,6 +88,21 @@ function truncatePdfName(name: string, max = 9) {
 function normalizeConversationTitle(title: string | null | undefined) {
   const clean = String(title ?? "").trim();
   return clean.length > 0 ? clean : "Nova conversa";
+}
+
+function hasActiveAccessSummary(access: FrontendAccessSummary | null) {
+  if (!access) return false;
+
+  const uiIsActive = (access as FrontendAccessSummary & { ui?: { isActive?: boolean } | null }).ui?.isActive;
+  if (typeof uiIsActive === "boolean") {
+    return uiIsActive;
+  }
+
+  const status = String(
+    access?.accessStatus ?? access?.access_status ?? ""
+  ).trim();
+
+  return status === "trial_active" || status === "subscription_active";
 }
 
 function getLegacyStatusLabel(access: FrontendAccessSummary | null) {
@@ -724,7 +738,7 @@ export default function ChatPageClient({
 
   const isBlocked = useMemo(() => {
     if (accessLoading) return false;
-    return !canUseAiFeatures(access);
+    return !hasActiveAccessSummary(access);
   }, [access, accessLoading]);
 
   const blockedMessage = useMemo(() => {
