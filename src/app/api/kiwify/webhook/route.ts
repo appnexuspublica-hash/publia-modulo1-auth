@@ -6,7 +6,11 @@ import type { ProductTier } from "@/lib/access/resolveUserAccess";
 
 type SubscriptionPlan = "monthly" | "annual";
 
-type SnapshotAccessStatus = "trial_active" | "active" | "expired" | "blocked";
+type SnapshotAccessStatus =
+  | "trial_active"
+  | "trial_expired"
+  | "subscription_active"
+  | "subscription_expired";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -17,6 +21,8 @@ type ExistingUserAccess = {
   subscription_plan: string | null;
   subscription_started_at: string | null;
   subscription_ends_at: string | null;
+  trial_started_at: string | null;
+  trial_ends_at: string | null;
 };
 
 type ActiveBaseGrant = {
@@ -498,11 +504,52 @@ function getActivationAction(
     return "subscription_renewed";
   }
 
-  if (existingAccess?.access_status === "active") {
+  if (
+    existingAccess?.access_status === "subscription_active" ||
+    existingAccess?.access_status === "active"
+  ) {
     return "subscription_renewed";
   }
 
   return "subscription_activated";
+}
+
+function getSnapshotTrialDates(params: {
+  existingAccess: ExistingUserAccess | null;
+  fallbackStartedAt: string | null;
+  fallbackEndsAt: string | null;
+  nowIso: string;
+}): {
+  trialStartedAt: string;
+  trialEndsAt: string;
+} {
+  const trialStartedAt =
+    params.existingAccess?.trial_started_at ??
+    params.fallbackStartedAt ??
+    params.nowIso;
+
+  const trialEndsAt =
+    params.existingAccess?.trial_ends_at ??
+    params.fallbackEndsAt ??
+    trialStartedAt;
+
+  return {
+    trialStartedAt,
+    trialEndsAt,
+  };
+}
+
+function getExpiredSnapshotStatus(
+  existingAccess: ExistingUserAccess | null
+): SnapshotAccessStatus {
+  const hasSubscriptionHistory =
+    !!existingAccess?.subscription_started_at ||
+    !!existingAccess?.subscription_ends_at ||
+    !!existingAccess?.subscription_plan ||
+    existingAccess?.access_status === "subscription_active" ||
+    existingAccess?.access_status === "subscription_expired";
+
+  return hasSubscriptionHistory ? "subscription_expired" : "trial_expired";
 }
 
 async function findActiveBaseGrantForFallback(
@@ -688,8 +735,14 @@ async function syncUserAccessSnapshot(params: {
   supabase: ReturnType<typeof createSupabaseAdminClient>;
   userId: string;
   fallbackProductTier?: ProductTier;
+  existingAccess: ExistingUserAccess | null;
 }): Promise<void> {
-  const { supabase, userId, fallbackProductTier = "essential" } = params;
+  const {
+    supabase,
+    userId,
+    fallbackProductTier = "essential",
+    existingAccess,
+  } = params;
   const nowIso = new Date().toISOString();
 
   const currentAccess = await getCurrentUserAccessByUserId(supabase, userId);
@@ -707,8 +760,8 @@ async function syncUserAccessSnapshot(params: {
         trial_started_at: resolved.activeGrant.startedAt,
         trial_ends_at: resolved.activeGrant.endsAt,
         subscription_plan: null,
-        subscription_started_at: null,
-        subscription_ends_at: null,
+        subscription_started_at: existingAccess?.subscription_started_at ?? null,
+        subscription_ends_at: existingAccess?.subscription_ends_at ?? null,
         updated_at: nowIso,
       },
       { onConflict: "user_id" }
@@ -722,13 +775,20 @@ async function syncUserAccessSnapshot(params: {
   }
 
   if (resolved.effectiveAccessStatus === "active" && resolved.activeGrant) {
+    const { trialStartedAt, trialEndsAt } = getSnapshotTrialDates({
+      existingAccess,
+      fallbackStartedAt: resolved.activeGrant.startedAt ?? null,
+      fallbackEndsAt: resolved.activeGrant.endsAt ?? null,
+      nowIso,
+    });
+
     const { error } = await supabase.from("user_access").upsert(
       {
         user_id: userId,
-        access_status: "active" as SnapshotAccessStatus,
+        access_status: "subscription_active" as SnapshotAccessStatus,
         product_tier: resolved.effectiveProductTier ?? defaultProductTier,
-        trial_started_at: null,
-        trial_ends_at: null,
+        trial_started_at: trialStartedAt,
+        trial_ends_at: trialEndsAt,
         subscription_plan: resolved.activeGrant.subscriptionPlan,
         subscription_started_at: resolved.activeGrant.startedAt,
         subscription_ends_at: resolved.activeGrant.endsAt,
@@ -744,23 +804,30 @@ async function syncUserAccessSnapshot(params: {
     return;
   }
 
+  const { trialStartedAt, trialEndsAt } = getSnapshotTrialDates({
+    existingAccess,
+    fallbackStartedAt: existingAccess?.subscription_started_at ?? null,
+    fallbackEndsAt: existingAccess?.subscription_ends_at ?? null,
+    nowIso,
+  });
+
   const { error } = await supabase.from("user_access").upsert(
     {
       user_id: userId,
-      access_status: "blocked" as SnapshotAccessStatus,
+      access_status: getExpiredSnapshotStatus(existingAccess),
       product_tier: defaultProductTier,
-      trial_started_at: null,
-      trial_ends_at: null,
-      subscription_plan: null,
-      subscription_started_at: null,
-      subscription_ends_at: null,
+      trial_started_at: trialStartedAt,
+      trial_ends_at: trialEndsAt,
+      subscription_plan: existingAccess?.subscription_plan ?? null,
+      subscription_started_at: existingAccess?.subscription_started_at ?? null,
+      subscription_ends_at: existingAccess?.subscription_ends_at ?? null,
       updated_at: nowIso,
     },
     { onConflict: "user_id" }
   );
 
   if (error) {
-    throw new Error(`Erro ao sincronizar snapshot blocked: ${error.message}`);
+    throw new Error(`Erro ao sincronizar snapshot expired: ${error.message}`);
   }
 }
 
@@ -948,7 +1015,7 @@ export async function POST(request: NextRequest) {
     const { data: existingAccess, error: existingAccessError } = await supabase
       .from("user_access")
       .select(
-        "user_id, access_status, product_tier, subscription_plan, subscription_started_at, subscription_ends_at"
+        "user_id, access_status, product_tier, subscription_plan, subscription_started_at, subscription_ends_at, trial_started_at, trial_ends_at"
       )
       .eq("user_id", profile.user_id)
       .maybeSingle<ExistingUserAccess>();
@@ -1012,6 +1079,7 @@ export async function POST(request: NextRequest) {
           userId: profile.user_id,
           fallbackProductTier:
             existingAccess?.product_tier === "strategic" ? "strategic" : "essential",
+          existingAccess: existingAccess ?? null,
         });
       } catch (expireError) {
         console.error(
@@ -1123,6 +1191,7 @@ export async function POST(request: NextRequest) {
         supabase,
         userId: profile.user_id,
         fallbackProductTier: productTier,
+        existingAccess: existingAccess ?? null,
       });
     } catch (activateError) {
       console.error(
