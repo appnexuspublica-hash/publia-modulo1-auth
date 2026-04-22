@@ -223,16 +223,23 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
   const resolved = data?.resolvedAccess ?? null;
   const ui = data?.ui ?? null;
 
+  const rawUiStatus =
+    typeof ui?.status === "string" ? normalizeAccessStatus(ui.status) : null;
+
   const derivedStatus =
     typeof data?.accessStatus === "string"
       ? data.accessStatus
-      : ui?.status === "trial_active"
-        ? "trial_active"
-        : ui?.status === "subscription_active" || ui?.status === "active"
-          ? "subscription_active"
-          : resolved?.effectiveGrantKind === "subscription"
-            ? "subscription_expired"
-            : "trial_expired";
+      : typeof data?.access_status === "string"
+        ? data.access_status
+        : rawUiStatus
+          ? rawUiStatus
+          : ui?.isActive === true
+            ? resolved?.effectiveGrantKind === "trial"
+              ? "trial_active"
+              : "subscription_active"
+            : resolved?.effectiveGrantKind === "subscription"
+              ? "subscription_expired"
+              : "trial_expired";
 
   const derivedProductTier =
     typeof data?.productTier === "string"
@@ -259,12 +266,56 @@ export async function fetchAccessSummary(): Promise<FrontendAccessSummary> {
     blockedMessage:
       data.blockedMessage ??
       (ui?.isActive === false
-        ? "Seu acesso está bloqueado no momento."
+        ? getBlockedAccessMessage({
+            accessStatus: status,
+            access_status: status,
+            blockedMessage: null,
+            blocked_message: null,
+            trialEndsAt: null,
+            subscriptionEndsAt: null,
+            subscriptionPlan: null,
+            messagesUsed: 0,
+            trialMessageLimit: null,
+            isAdmin: data.isAdmin === true,
+            productTier,
+            billingCycle,
+            scopeType,
+            capabilities: normalizeCapabilities(data.capabilities),
+            brand: normalizeBrand(data.brand, productTier),
+            pdfUsage: {
+              limit: null,
+              used: 0,
+              remaining: null,
+              period: null,
+            },
+          })
         : null),
     blocked_message:
       data.blocked_message ??
       (ui?.isActive === false
-        ? "Seu acesso está bloqueado no momento."
+        ? getBlockedAccessMessage({
+            accessStatus: status,
+            access_status: status,
+            blockedMessage: null,
+            blocked_message: null,
+            trialEndsAt: null,
+            subscriptionEndsAt: null,
+            subscriptionPlan: null,
+            messagesUsed: 0,
+            trialMessageLimit: null,
+            isAdmin: data.isAdmin === true,
+            productTier,
+            billingCycle,
+            scopeType,
+            capabilities: normalizeCapabilities(data.capabilities),
+            brand: normalizeBrand(data.brand, productTier),
+            pdfUsage: {
+              limit: null,
+              used: 0,
+              remaining: null,
+              period: null,
+            },
+          })
         : null),
     trialEndsAt: data.trialEndsAt ?? resolved?.trialEndsAt ?? null,
     subscriptionEndsAt:
