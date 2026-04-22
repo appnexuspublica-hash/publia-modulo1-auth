@@ -1,4 +1,3 @@
-//tsconfig.json
 {
   "compilerOptions": {
     "target": "ES2020",
@@ -14,6 +13,7 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "ignoreDeprecations": "5.0",
+    "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
     },
