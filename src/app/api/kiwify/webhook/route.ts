@@ -206,7 +206,6 @@ function getSubscriptionId(payload: unknown): string | null {
   const raw = getFirstAvailable(root, [
     ["Subscription", "id"],
     ["subscription", "id"],
-    ["subscription_id"],
     ["Subscrição", "id"],
     ["Subscricao", "id"],
   ]);
@@ -235,9 +234,7 @@ function getProductDescriptor(payload: unknown): string {
   const parts = [
     getFirstAvailable(root, [
       ["Product", "name"],
-      ["Product", "product_name"],
       ["product", "name"],
-      ["product", "product_name"],
       ["produto", "nome"],
       ["product_name"],
       ["offer_name"],
@@ -253,9 +250,7 @@ function getProductDescriptor(payload: unknown): string {
     ]),
     getFirstAvailable(root, [
       ["Product", "code"],
-      ["Product", "product_id"],
       ["product", "code"],
-      ["product", "product_id"],
       ["produto", "codigo"],
       ["offer_code"],
       ["plan_code"],
@@ -358,29 +353,6 @@ function isRenewalEvent(payload: unknown): boolean {
   );
 }
 
-function isPendingPaymentEvent(payload: unknown): boolean {
-  const eventType = getEventType(payload);
-  const orderStatus = getOrderStatus(payload);
-
-  if (
-    eventType === "pix_created" ||
-    eventType === "boleto_created" ||
-    eventType === "waiting_payment"
-  ) {
-    return true;
-  }
-
-  if (
-    orderStatus === "waiting_payment" ||
-    orderStatus === "pending" ||
-    orderStatus === "processing"
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 function isNegativeEvent(payload: unknown): boolean {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
@@ -416,6 +388,7 @@ function isNegativeEvent(payload: unknown): boolean {
     subscriptionStatus === "cancelled" ||
     subscriptionStatus === "late" ||
     subscriptionStatus === "expired" ||
+    subscriptionStatus === "inactive" ||
     subscriptionStatus === "unpaid" ||
     subscriptionStatus === "overdue"
   ) {
@@ -975,28 +948,6 @@ export async function POST(request: NextRequest) {
 
     const productTier = mapProductTier(payload, existingAccess ?? null);
 
-    if (isPendingPaymentEvent(payload) && !isApprovalEvent(payload)) {
-      return finish(
-        "ignored",
-        {
-          ok: true,
-          ignored: true,
-          reason: "pending_payment",
-          cpfCnpj,
-          productTier,
-          eventType,
-          orderStatus,
-          subscriptionId,
-          orderId,
-        },
-        200,
-        {
-          reason: "pending_payment",
-          userId: profile.user_id,
-        }
-      );
-    }
-
     if (isNegativeEvent(payload)) {
       try {
         await expireSubscriptionGrants({
@@ -1010,8 +961,7 @@ export async function POST(request: NextRequest) {
         await syncUserAccessSnapshot({
           supabase,
           userId: profile.user_id,
-          fallbackProductTier:
-            existingAccess?.product_tier === "strategic" ? "strategic" : "essential",
+          fallbackProductTier: existingAccess?.product_tier === "strategic" ? "strategic" : "essential",
         });
       } catch (expireError) {
         console.error(
@@ -1063,11 +1013,8 @@ export async function POST(request: NextRequest) {
           ignored: true,
           reason: "event_not_approved",
           cpfCnpj,
-          productTier,
           eventType,
           orderStatus,
-          subscriptionId,
-          orderId,
         },
         200,
         {
@@ -1077,10 +1024,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const plan =
-      mapPlan(payload) ??
-      (existingAccess?.subscription_plan as SubscriptionPlan | null) ??
-      null;
+    const plan = mapPlan(payload) ?? (existingAccess?.subscription_plan as SubscriptionPlan | null) ?? null;
 
     if (!plan) {
       return finish(
@@ -1090,11 +1034,8 @@ export async function POST(request: NextRequest) {
           ignored: true,
           reason: "plan_not_mapped",
           cpfCnpj,
-          productTier,
           eventType,
           orderStatus,
-          subscriptionId,
-          orderId,
         },
         200,
         {
