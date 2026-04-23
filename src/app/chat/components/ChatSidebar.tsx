@@ -49,6 +49,11 @@ type ChatSidebarProps = {
   sidebarFeedback?: SidebarFeedbackState;
 };
 
+
+function hasActiveAccess(status: string | null | undefined): boolean {
+  return status === "trial_active" || status === "subscription_active";
+}
+
 function formatDateShort(dateStr: string): string {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return "";
@@ -89,7 +94,7 @@ function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
     };
   }
 
-  if (status === "subscription_active") {
+  if (hasActiveAccess(status)) {
     return {
       label: "ASSINANTE",
       className: "bg-[#e1e1e1] text-slate-800",
@@ -445,9 +450,9 @@ export function ChatSidebar({
 
     const hasActiveEssentialAccess =
       status === "trial_active" ||
-      status === "subscription_active" ||
+      hasActiveAccess(status) ||
       resolvedEffectiveStatus === "trial_active" ||
-      resolvedEffectiveStatus === "subscription_active" ||
+      hasActiveAccess(resolvedEffectiveStatus) ||
       (resolvedEffectiveStatus === "active" &&
         (resolvedEffectiveGrantKind === "subscription" ||
           resolvedEffectiveGrantKind === "upgrade"));
@@ -787,7 +792,7 @@ export function ChatSidebar({
                 {pdfUsed !== null && (
                   <div
                     className={`rounded-lg px-3 py-2 ${
-                      status === "subscription_active" || subscriptionPlanLabel
+                      hasActiveAccess(status) || subscriptionPlanLabel
                         ? "mb-2"
                         : ""
                     }`}
@@ -813,7 +818,7 @@ export function ChatSidebar({
                   </div>
                 )}
 
-                {(status === "subscription_active" || subscriptionPlanLabel) && (
+                {(hasActiveAccess(status) || subscriptionPlanLabel) && (
                   <div
                     className="mb-2 rounded-lg px-3 py-2"
                     style={{ backgroundColor: "#ffffff" }}
