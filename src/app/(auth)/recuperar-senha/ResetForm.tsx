@@ -1,24 +1,35 @@
-// src/app/(auth)/recuperar-senha/ResetForm.tsx
+//src/app/(auth)/recuperar-senha/ResetForm.tsx
 "use client";
 
 import { useFormState, useFormStatus } from "react-dom";
-import { resetAction } from "./resetActions";
-import Image from "next/image";
 import Link from "next/link";
 
-// Tipo de estado retornado pela action de reset
+import AuthShell from "@/components/auth/AuthShell";
+import AuthInput from "@/components/auth/AuthInput";
+import Alert from "@/components/auth/Alert";
+
+import { resetAction } from "./resetActions";
+
 type ResetState = {
   ok: boolean;
   error?: string;
+  message?: string;
+};
+
+const initialState: ResetState = {
+  ok: false,
+  error: "",
+  message: "",
 };
 
 function SubmitButton() {
   const { pending } = useFormStatus();
+
   return (
     <button
       type="submit"
       disabled={pending}
-      className="w-full rounded bg-blue-600 px-4 py-2 font-medium text-white disabled:opacity-60"
+      className="w-full rounded-xl bg-[#0d4161] px-4 py-2 text-sm font-semibold uppercase text-white hover:opacity-95 disabled:opacity-60"
     >
       {pending ? "Atualizando..." : "Atualizar senha"}
     </button>
@@ -26,84 +37,56 @@ function SubmitButton() {
 }
 
 export default function ResetForm() {
-  const [state, formAction] = useFormState<ResetState, FormData>(resetAction, {
-    ok: false,
-    error: "",
-  });
+  const [state, formAction] = useFormState<ResetState, FormData>(
+    resetAction,
+    initialState
+  );
 
   return (
-    <div className="w-full max-w-md rounded-2xl border bg-gray-50 p-8 shadow-sm">
-      {/* Cabeçalho */}
-      <div className="mb-6 flex flex-col items-center">
-        <Image
-          src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
-          alt="Publ.IA"
-          width={40}
-          height={40}
-          className="mb-2"
+    <AuthShell
+      title="Recuperar senha"
+      subtitle="Informe seu CPF/CNPJ e defina uma nova senha de acesso."
+    >
+      <form action={formAction} className="mt-2 space-y-4">
+        <AuthInput
+          name="cpf_cnpj"
+          label="CPF/CNPJ"
+          placeholder="Digite seu CPF ou CNPJ"
+          required
         />
 
-        <h1 className="text-lg font-semibold text-center">Publ.IA - Nexus Pública</h1>
+        <AuthInput
+          name="senha"
+          label="Nova senha"
+          type="password"
+          placeholder="Digite a nova senha"
+          required
+        />
 
-        <p className="text-sm text-gray-600 text-center">Atualize sua senha de acesso.</p>
-      </div>
-
-      {/* Sucesso */}
-      {state.ok && !state.error && (
-        <div className="mb-4 rounded-md border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700 text-center">
-          Senha atualizada com sucesso! Você já pode fazer login.
-        </div>
-      )}
-
-      {/* Erro */}
-      {state.error && (
-        <div className="mb-4 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {state.error}
-        </div>
-      )}
-
-      {/* Formulário */}
-      <form action={formAction} className="space-y-4">
-        <div>
-          <label className="mb-1 block text-sm">CPF/CNPJ</label>
-          <input
-            name="cpf_cnpj"
-            className="w-full rounded border px-3 py-2 outline-none focus:ring"
-            placeholder="Informe seu CPF ou CNPJ"
-            required
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm">Nova senha</label>
-          <input
-            type="password"
-            name="senha"
-            className="w-full rounded border px-3 py-2 outline-none focus:ring"
-            placeholder="Nova senha"
-            required
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm">Confirmar nova senha</label>
-          <input
-            type="password"
-            name="senha2"
-            className="w-full rounded border px-3 py-2 outline-none focus:ring"
-            placeholder="Repita a nova senha"
-            required
-          />
-        </div>
+        <AuthInput
+          name="confirm"
+          label="Confirmar nova senha"
+          type="password"
+          placeholder="Repita a nova senha"
+          required
+        />
 
         <SubmitButton />
+
+        {state.ok && !state.error && (
+          <Alert type="success">
+            {state.message || "Senha cadastrada com sucesso. Voce ja pode fazer login."}
+          </Alert>
+        )}
+
+        {state.error && <Alert type="error">{state.error}</Alert>}
       </form>
 
-      <div className="mt-4 text-center">
-        <Link href="/login" className="text-sm font-medium text-blue-700 underline">
-          Voltar para login
+      <div className="mt-4 text-center text-sm text-slate-700">
+        <Link href="/login" className="font-semibold text-blue-600 hover:underline">
+          Voltar ao login
         </Link>
       </div>
-    </div>
+    </AuthShell>
   );
 }
