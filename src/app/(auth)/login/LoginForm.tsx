@@ -1,4 +1,4 @@
-//src/app/(auth)/login/LoginForm.tsx
+// src/app/(auth)/login/LoginForm.tsx
 "use client";
 
 import { useState } from "react";
@@ -166,9 +166,16 @@ export default function LoginForm() {
       </form>
 
       <div className="mt-4 text-center">
-        <Link href="/recuperar-senha" className="text-sm font-medium text-blue-700 underline">
-          Esqueceu a senha?
+        <Link
+          href="/recuperar-senha"
+          className="text-sm font-medium text-blue-700 underline underline-offset-2"
+        >
+          Esqueceu a senha? Recuperar por CPF/CNPJ
         </Link>
+
+        <p className="mt-2 text-xs text-gray-500">
+          Você poderá redefinir sua senha informando seu CPF/CNPJ.
+        </p>
       </div>
 
       <div className="my-6 h-px bg-gray-200" />
