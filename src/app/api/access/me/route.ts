@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+import { reconcileUserAccessSnapshot } from "@/lib/access/reconcileUserAccessSnapshot";
 import {
   getResolvedUiState,
   toFrontendAccessStatus,
@@ -156,8 +157,34 @@ export async function GET() {
       },
     });
 
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: "Usuário não autenticado." },
+        { status: 401 }
+      );
+    }
+
     const currentAccess = await getCurrentUserAccess(supabase);
     const resolved = currentAccess.resolved;
+
+    try {
+      await reconcileUserAccessSnapshot({
+        supabase,
+        userId: user.id,
+        now: new Date(),
+      });
+    } catch (snapshotError) {
+      console.error(
+        "[access/me] erro ao reconciliar snapshot user_access:",
+        snapshotError
+      );
+    }
+
     const ui = getResolvedUiState(resolved);
 
     const accessStatus = toFrontendAccessStatus(resolved);

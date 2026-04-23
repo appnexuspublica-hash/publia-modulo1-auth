@@ -28,7 +28,7 @@ type UserAccessSnapshotUpsertRow = {
   product_tier: ProductTier;
   trial_started_at: string;
   trial_ends_at: string;
-  trial_message_limit: number | null;
+  trial_message_limit: number;
   subscription_plan: string | null;
   subscription_started_at: string | null;
   subscription_ends_at: string | null;
@@ -60,7 +60,7 @@ function addDays(date: Date, days: number): Date {
 
 function resolveSafeTrialStartedAt(
   previousSnapshot: UserAccessRow | null,
-  now: Date,
+  now: Date
 ): string {
   return previousSnapshot?.trial_started_at ?? toIsoDate(now);
 }
@@ -87,8 +87,19 @@ function resolveSafeTrialEndsAt(params: {
   return toIsoDate(addDays(startedAt, durationDays));
 }
 
+function resolveSafeTrialMessageLimit(
+  previousSnapshot: UserAccessRow | null,
+  productTier: ProductTier
+): number {
+  if (typeof previousSnapshot?.trial_message_limit === "number") {
+    return previousSnapshot.trial_message_limit;
+  }
+
+  return resolveTrialMessageLimit(productTier);
+}
+
 function normalizeToSnapshotStatus(
-  accessStatus: ResolvedActiveAccessStatus,
+  accessStatus: ResolvedActiveAccessStatus
 ): SnapshotAccessStatus {
   return accessStatus === "trial_active" ? "trial_active" : "subscription_active";
 }
@@ -123,6 +134,10 @@ function buildActiveSnapshotRow(params: {
     productTier,
     fallbackEndsAt: trialEndsAt,
   });
+  const safeTrialMessageLimit = resolveSafeTrialMessageLimit(
+    previousSnapshot,
+    productTier
+  );
 
   if (accessStatus === "trial_active") {
     return {
@@ -131,7 +146,7 @@ function buildActiveSnapshotRow(params: {
       product_tier: productTier,
       trial_started_at: safeTrialStartedAt,
       trial_ends_at: safeTrialEndsAt,
-      trial_message_limit: resolveTrialMessageLimit(productTier),
+      trial_message_limit: safeTrialMessageLimit,
       subscription_plan: null,
       subscription_started_at: null,
       subscription_ends_at: null,
@@ -145,7 +160,7 @@ function buildActiveSnapshotRow(params: {
     product_tier: productTier,
     trial_started_at: safeTrialStartedAt,
     trial_ends_at: safeTrialEndsAt,
-    trial_message_limit: previousSnapshot?.trial_message_limit ?? null,
+    trial_message_limit: safeTrialMessageLimit,
     subscription_plan: subscriptionPlan,
     subscription_started_at:
       subscriptionStartedAt ??
@@ -229,7 +244,7 @@ function normalizeComparableUpsertRow(row: UserAccessSnapshotUpsertRow) {
 
 function areSnapshotsEquivalent(
   currentSnapshot: UserAccessRow | null,
-  nextSnapshot: UserAccessSnapshotUpsertRow,
+  nextSnapshot: UserAccessSnapshotUpsertRow
 ): boolean {
   const current = normalizeComparableSnapshot(currentSnapshot);
   const next = normalizeComparableUpsertRow(nextSnapshot);
@@ -253,20 +268,26 @@ export async function reconcileUserAccessSnapshot(params: {
   userId: string;
   now?: Date;
 }): Promise<ReconcileUserAccessSnapshotResult> {
-  const { supabase, userId } = params;
+  const { supabase } = params;
   const now = params.now ?? new Date();
 
-  if (!userId.trim()) {
+  const normalizedUserId =
+    typeof params.userId === "string" ? params.userId.trim() : "";
+
+  if (!normalizedUserId) {
     throw new Error(
-      "userId é obrigatório para reconciliar o snapshot de acesso.",
+      "userId é obrigatório para reconciliar o snapshot de acesso."
     );
   }
 
-  const currentAccess = await getCurrentUserAccessByUserId(supabase, userId);
+  const currentAccess = await getCurrentUserAccessByUserId(
+    supabase,
+    normalizedUserId
+  );
   const snapshotBefore = currentAccess.snapshot;
 
   const nextSnapshotRow = buildSnapshotRowFromResolved({
-    userId,
+    userId: normalizedUserId,
     now,
     currentAccess,
   });
@@ -274,7 +295,7 @@ export async function reconcileUserAccessSnapshot(params: {
   if (!nextSnapshotRow) {
     return {
       ok: true,
-      userId,
+      userId: normalizedUserId,
       changed: false,
       snapshotBefore,
       snapshotAfter: snapshotBefore,
@@ -285,7 +306,7 @@ export async function reconcileUserAccessSnapshot(params: {
   if (areSnapshotsEquivalent(snapshotBefore, nextSnapshotRow)) {
     return {
       ok: true,
-      userId,
+      userId: normalizedUserId,
       changed: false,
       snapshotBefore,
       snapshotAfter: snapshotBefore,
@@ -312,19 +333,19 @@ export async function reconcileUserAccessSnapshot(params: {
         created_at,
         updated_at,
         product_tier
-      `,
+      `
     )
     .maybeSingle<UserAccessRow>();
 
   if (upsertResult.error) {
     throw new Error(
-      `Erro ao reconciliar snapshot user_access: ${upsertResult.error.message}`,
+      `Erro ao reconciliar snapshot user_access: ${upsertResult.error.message}`
     );
   }
 
   return {
     ok: true,
-    userId,
+    userId: normalizedUserId,
     changed: true,
     snapshotBefore,
     snapshotAfter: upsertResult.data ?? null,
