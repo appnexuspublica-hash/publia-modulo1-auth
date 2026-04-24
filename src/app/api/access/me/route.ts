@@ -216,7 +216,7 @@ export async function GET() {
       : toFrontendAccessStatus(resolved);
 
     const productTier = isAdmin
-      ? "governance"
+      ? "strategic"
       : resolved.effectiveProductTier ?? "essential";
 
     const subscriptionPlan = isAdmin
@@ -246,7 +246,7 @@ export async function GET() {
       access_status: accessStatus,
       productTier,
       billingCycle,
-      scopeType: isAdmin ? "admin" : "individual",
+      scopeType: isAdmin ? "organization" : "individual",
       blockedMessage,
       blocked_message: blockedMessage,
       trialEndsAt: resolved.trialEndsAt,
@@ -256,10 +256,20 @@ export async function GET() {
       trialMessageLimit: resolved.snapshot?.trial_message_limit ?? null,
       isAdmin,
       capabilities: {
-        maxPdfsPerConversation: 3,
+        maxPdfsPerConversation: isAdmin ? 999 : 3,
         maxPdfUploadsPerAccount: null,
         maxPdfUploadsPerMonth: null,
-        responseModes: [],
+        responseModes: isAdmin
+          ? [
+              "objective",
+              "summary",
+              "step_by_step",
+              "checklist",
+              "document_draft",
+              "manager_guidance",
+              "attention_points",
+            ]
+          : [],
         canRenameConversation: true,
         canSearchHistory: true,
         canUsePdfChat: true,
@@ -278,9 +288,9 @@ export async function GET() {
           ? "PUBL.IA ADMIN"
           : productTier === "strategic"
             ? "Publ.IA ESTRATÉGICO"
-            : "Publ.IA ESSENCIAL",
+            : "PUBL.IA ESSENCIAL",
         versionLabel: isAdmin
-          ? "ADMIN"
+          ? ""
           : productTier === "strategic"
             ? "2.0"
             : "1.7",
@@ -291,7 +301,7 @@ export async function GET() {
         limit: null,
         used: 0,
         remaining: null,
-        period: null,
+        period: isAdmin ? "admin" : null,
       },
     });
   } catch (error) {

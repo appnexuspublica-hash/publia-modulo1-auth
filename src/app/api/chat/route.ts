@@ -864,6 +864,10 @@ function getMaxMultiPdfsInContext(params: {
     return Math.max(1, Math.floor(capabilityLimit));
   }
 
+  if (params.productTier === "governance") {
+    return Math.max(10, STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT);
+  }
+
   if (params.productTier === "strategic") {
     return STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT;
   }
@@ -1092,6 +1096,24 @@ async function getUserProfileContext(
     uf: (data as any).uf ?? null,
     porte_municipio: (data as any).porte_municipio ?? null,
   };
+}
+
+async function getIsAdminUser(client: any, userId: string): Promise<boolean> {
+  const { data, error } = await client
+    .from("profiles")
+    .select("is_admin, role")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[/api/chat] erro ao buscar perfil admin:", error);
+    return false;
+  }
+
+  return (
+    Boolean((data as any)?.is_admin) ||
+    String((data as any)?.role ?? "").toLowerCase() === "admin"
+  );
 }
 
 async function getConversationPdfState(
@@ -1809,6 +1831,8 @@ export async function POST(req: Request) {
     );
   }
 
+  const isAdmin = await getIsAdminUser(client, userId);
+
   const accessDecision = await syncEffectiveAccessStatus(client, accessSummary);
   if (!accessDecision.allowed) {
     return new Response(
@@ -1825,10 +1849,41 @@ export async function POST(req: Request) {
     );
   }
 
-  const responseModeAccess = resolveChatResponseModeAccess({
+  const baseResponseModeAccess = resolveChatResponseModeAccess({
     summary: accessSummary,
     requestedResponseMode: responseMode,
   });
+
+  const adminStrategicResponseModes: InternalResponseMode[] = [
+    "objective",
+    "summary",
+    "step_by_step",
+    "checklist",
+    "document_draft",
+    "manager_guidance",
+    "attention_points",
+  ];
+
+  const responseModeAccess = isAdmin
+    ? {
+        ...baseResponseModeAccess,
+        // Admin usa as regras e o prompt do Estratégico.
+        // Não usamos "governance" por enquanto, porque esse produto ainda não foi implementado.
+        productTier: "strategic" as const,
+        allowedModes: adminStrategicResponseModes,
+        requestedMode: baseResponseModeAccess.requestedMode,
+        effectiveMode:
+          baseResponseModeAccess.requestedMode &&
+          adminStrategicResponseModes.includes(
+            baseResponseModeAccess.requestedMode as InternalResponseMode
+          )
+            ? (baseResponseModeAccess.requestedMode as InternalResponseMode)
+            : ("objective" as InternalResponseMode),
+        canUseResponseMode: true,
+        rejected: false,
+        rejectionReason: null,
+      }
+    : baseResponseModeAccess;
 
   if (responseModeAccess.rejected) {
     const errorMessage =
@@ -2311,6 +2366,7 @@ export async function POST(req: Request) {
             responseModeRequested: responseModeAccess.requestedMode,
             responseModeAllowedForTier: responseModeAccess.canUseResponseMode,
             productTier: responseModeAccess.productTier,
+            isAdmin,
             userProfileContextApplied: !!userProfileContextText,
             maxMultiPdfsInContext,
             shortContinuationAccepted: !!continuationOfferText,
