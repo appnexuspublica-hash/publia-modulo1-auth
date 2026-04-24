@@ -87,7 +87,12 @@ function getRelevantBillingCycle(params: {
     | "subscription_active"
     | "subscription_expired";
   subscriptionPlan: SubscriptionPlan;
+  isAdmin?: boolean;
 }): BillingCycle {
+  if (params.isAdmin) {
+    return "none";
+  }
+
   if (params.accessStatus === "trial_active") {
     return "trial";
   }
@@ -109,7 +114,12 @@ function getBlockedMessage(params: {
     | "trial_expired"
     | "subscription_active"
     | "subscription_expired";
+  isAdmin?: boolean;
 }): string | null {
+  if (params.isAdmin) {
+    return null;
+  }
+
   if (params.isActive) {
     return null;
   }
@@ -172,6 +182,20 @@ export async function GET() {
     const currentAccess = await getCurrentUserAccess(supabase);
     const resolved = currentAccess.resolved;
 
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("is_admin, role")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error("[access/me] erro ao consultar perfil admin:", profileError);
+    }
+
+    const isAdmin =
+      Boolean(profile?.is_admin) ||
+      String(profile?.role ?? "").toLowerCase() === "admin";
+
     try {
       await reconcileUserAccessSnapshot({
         supabase,
@@ -187,27 +211,42 @@ export async function GET() {
 
     const ui = getResolvedUiState(resolved);
 
-    const accessStatus = toFrontendAccessStatus(resolved);
-    const productTier = resolved.effectiveProductTier ?? "essential";
-    const subscriptionPlan = getRelevantSubscriptionPlan(resolved);
+    const accessStatus = isAdmin
+      ? "subscription_active"
+      : toFrontendAccessStatus(resolved);
+
+    const productTier = isAdmin
+      ? "governance"
+      : resolved.effectiveProductTier ?? "essential";
+
+    const subscriptionPlan = isAdmin
+      ? null
+      : getRelevantSubscriptionPlan(resolved);
+
     const billingCycle = getRelevantBillingCycle({
       accessStatus,
       subscriptionPlan,
+      isAdmin,
     });
+
     const blockedMessage = getBlockedMessage({
-      isActive: ui.isActive,
+      isActive: isAdmin || ui.isActive,
       accessStatus,
+      isAdmin,
     });
 
     return NextResponse.json({
       resolvedAccess: resolved,
-      ui,
+      ui: {
+        ...ui,
+        isActive: isAdmin || ui.isActive,
+      },
 
       accessStatus,
       access_status: accessStatus,
       productTier,
       billingCycle,
-      scopeType: "individual",
+      scopeType: isAdmin ? "admin" : "individual",
       blockedMessage,
       blocked_message: blockedMessage,
       trialEndsAt: resolved.trialEndsAt,
@@ -215,7 +254,7 @@ export async function GET() {
       subscriptionPlan,
       messagesUsed: 0,
       trialMessageLimit: resolved.snapshot?.trial_message_limit ?? null,
-      isAdmin: false,
+      isAdmin,
       capabilities: {
         maxPdfsPerConversation: 3,
         maxPdfUploadsPerAccount: null,
@@ -227,18 +266,24 @@ export async function GET() {
         canUseExport: true,
         canUseLegalBase: true,
         canUseTemplates: true,
-        canUseOrganizationFeatures: false,
+        canUseOrganizationFeatures: isAdmin,
       },
       brand: {
-        productName:
-          productTier === "strategic"
+        productName: isAdmin
+          ? "Publ.IA Admin"
+          : productTier === "strategic"
             ? "Publ.IA Estratégico"
             : "Publ.IA Essencial",
-        productLabel:
-          productTier === "strategic"
+        productLabel: isAdmin
+          ? "PUBL.IA ADMIN"
+          : productTier === "strategic"
             ? "Publ.IA ESTRATÉGICO"
             : "Publ.IA ESSENCIAL",
-        versionLabel: productTier === "strategic" ? "2.0" : "1.7",
+        versionLabel: isAdmin
+          ? "ADMIN"
+          : productTier === "strategic"
+            ? "2.0"
+            : "1.7",
         vendorLabel: "Nexus Pública",
         accentVariant: productTier,
       },
