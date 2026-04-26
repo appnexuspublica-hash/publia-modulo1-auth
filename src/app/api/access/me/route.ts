@@ -10,6 +10,7 @@ import {
   getResolvedUiState,
   toFrontendAccessStatus,
 } from "@/lib/access/access-helpers";
+import { getCapabilitiesForTier } from "@/lib/access-control";
 import type { BillingCycle, SubscriptionPlan } from "@/types/access";
 
 export const dynamic = "force-dynamic";
@@ -235,6 +236,8 @@ export async function GET() {
       isAdmin,
     });
 
+    const tierCapabilities = getCapabilitiesForTier(productTier);
+
     return NextResponse.json({
       resolvedAccess: resolved,
       ui: {
@@ -256,7 +259,7 @@ export async function GET() {
       trialMessageLimit: resolved.snapshot?.trial_message_limit ?? null,
       isAdmin,
       capabilities: {
-        maxPdfsPerConversation: isAdmin ? 999 : 3,
+        maxPdfsPerConversation: isAdmin ? 999 : tierCapabilities.maxPdfsPerConversation,
         maxPdfUploadsPerAccount: null,
         maxPdfUploadsPerMonth: null,
         responseModes: isAdmin

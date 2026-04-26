@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getCurrentUserAccessByUserId } from "@/lib/access/getCurrentUserAccess";
+import { reconcileUserAccessSnapshot } from "@/lib/access/reconcileUserAccessSnapshot";
 import type { ProductTier } from "@/lib/access/resolveUserAccess";
 
 type SubscriptionPlan = "monthly" | "annual";
@@ -274,11 +275,12 @@ function getProductDescriptor(payload: unknown): string {
     .join(" | ");
 }
 
-function mapProductTier(
-  payload: unknown,
-  existingAccess: ExistingUserAccess | null
-): ProductTier {
+function mapProductTier(payload: unknown): ProductTier | null {
   const descriptor = getProductDescriptor(payload);
+
+  if (!descriptor) {
+    return null;
+  }
 
   if (
     descriptor.includes("estratégico") ||
@@ -292,11 +294,7 @@ function mapProductTier(
     return "essential";
   }
 
-  if (existingAccess?.product_tier === "strategic") {
-    return "strategic";
-  }
-
-  return "essential";
+  return null;
 }
 
 function mapPlan(payload: unknown): SubscriptionPlan | null {
@@ -774,7 +772,11 @@ async function syncUserAccessSnapshot(params: {
     return;
   }
 
-  if (resolved.effectiveAccessStatus === "active" && resolved.activeGrant) {
+  if (
+    (resolved.effectiveAccessStatus === "subscription_active" ||
+      resolved.effectiveAccessStatus === "active") &&
+    resolved.activeGrant
+  ) {
     const { trialStartedAt, trialEndsAt } = getSnapshotTrialDates({
       existingAccess,
       fallbackStartedAt: resolved.activeGrant.startedAt ?? null,
@@ -1040,7 +1042,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const productTier = mapProductTier(payload, existingAccess ?? null);
+    const productTier = mapProductTier(payload);
 
     if (isPendingPaymentEvent(payload) && !isApprovalEvent(payload)) {
       return finish(
@@ -1065,6 +1067,28 @@ export async function POST(request: NextRequest) {
     }
 
     if (isNegativeEvent(payload)) {
+      if (!productTier) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "product_tier_not_mapped_for_negative_event",
+            cpfCnpj,
+            productTier: null,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            reason: "product_tier_not_mapped_for_negative_event",
+            userId: profile.user_id,
+          }
+        );
+      }
+
       try {
         await expireSubscriptionGrants({
           supabase,
@@ -1074,12 +1098,9 @@ export async function POST(request: NextRequest) {
           reason: "negative_event_from_kiwify",
         });
 
-        await syncUserAccessSnapshot({
+        await reconcileUserAccessSnapshot({
           supabase,
           userId: profile.user_id,
-          fallbackProductTier:
-            existingAccess?.product_tier === "strategic" ? "strategic" : "essential",
-          existingAccess: existingAccess ?? null,
         });
       } catch (expireError) {
         console.error(
@@ -1145,6 +1166,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!productTier) {
+      return finish(
+        "ignored",
+        {
+          ok: true,
+          ignored: true,
+          reason: "product_tier_not_mapped",
+          cpfCnpj,
+          productTier: null,
+          eventType,
+          orderStatus,
+          subscriptionId,
+          orderId,
+        },
+        200,
+        {
+          reason: "product_tier_not_mapped",
+          userId: profile.user_id,
+        }
+      );
+    }
+
     const plan =
       mapPlan(payload) ??
       (existingAccess?.subscription_plan as SubscriptionPlan | null) ??
@@ -1187,11 +1230,9 @@ export async function POST(request: NextRequest) {
         sourceLabel: "kiwify_webhook",
       });
 
-      await syncUserAccessSnapshot({
+      await reconcileUserAccessSnapshot({
         supabase,
         userId: profile.user_id,
-        fallbackProductTier: productTier,
-        existingAccess: existingAccess ?? null,
       });
     } catch (activateError) {
       console.error(

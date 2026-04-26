@@ -12,6 +12,13 @@ type ChatHeaderProps = {
   vendorLabel?: string;
 };
 
+function formatUserLabel(value: string): { label: "Usuário"; value: string } {
+  return {
+    label: "Usuário",
+    value: String(value ?? "").trim(),
+  };
+}
+
 export function ChatHeader({
   userLabel,
   statusLabel = null,
@@ -23,6 +30,8 @@ export function ChatHeader({
     typeof statusLabel === "string" && statusLabel.trim().length > 0
       ? statusLabel.trim()
       : null;
+
+  const userDisplay = formatUserLabel(userLabel);
 
   return (
     <header className="flex h-16 items-center justify-between bg-white px-6 shadow">
@@ -44,9 +53,12 @@ export function ChatHeader({
         </div>
       </div>
 
-      <div className="flex items-center gap-4 text-xs">
-        <span className="text-slate-700">
-          Usuário: <span className="font-semibold text-slate-900">{userLabel}</span>{" "}
+      <div className="flex min-w-0 items-center gap-4 text-xs">
+        <span className="min-w-0 max-w-[320px] truncate text-slate-700">
+          {userDisplay.label}:{" "}
+          <span className="font-semibold text-slate-900">
+            {userDisplay.value}
+          </span>{" "}
           {normalizedStatusLabel && (
             <span className="font-semibold text-slate-700">
               [{normalizedStatusLabel}]

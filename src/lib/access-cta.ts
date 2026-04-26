@@ -124,7 +124,7 @@ export function getBlockedAccessCta(
   if (normalizedStatus === "trial_expired") {
     return {
       href: SUBSCRIBE_URL,
-      label: "ASSINAR AGORA",
+      label: "ASSINAR PUBLIA AGORA",
     };
   }
 
@@ -141,7 +141,7 @@ export function getBlockedAccessCta(
   ) {
     return {
       href: SUBSCRIBE_URL,
-      label: "ASSINAR AGORA",
+      label: "ASSINAR PUBLIA AGORA",
     };
   }
 
@@ -181,7 +181,14 @@ export function getSidebarAccessCta(
   if (status === "trial_active" || status === "trial_expired") {
     return {
       href: SUBSCRIBE_URL,
-      label: "ASSINAR AGORA",
+      label: "ASSINAR PUBLIA AGORA",
+    };
+  }
+
+  if (status === "subscription_active" && productTier === "essential") {
+    return {
+      href: SUBSCRIBE_URL,
+      label: "FAZER UPGRADE PARA ESTRATÉGICO",
     };
   }
 

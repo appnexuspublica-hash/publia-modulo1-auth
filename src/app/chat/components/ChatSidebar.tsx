@@ -54,6 +54,13 @@ function hasActiveAccess(status: string | null | undefined): boolean {
   return status === "trial_active" || status === "subscription_active";
 }
 
+function formatUserLabel(value: string): { label: "Usuário"; value: string } {
+  return {
+    label: "Usuário",
+    value: String(value ?? "").trim(),
+  };
+}
+
 function formatDateShort(dateStr: string): string {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return "";
@@ -257,7 +264,14 @@ export function ChatSidebar({
 
   const isStrategic = effectiveProductTier === "strategic";
   const isEssential = effectiveProductTier === "essential";
+  const effectiveMaxPdfsPerConversation =
+    effectiveProductTier === "strategic"
+      ? 5
+      : effectiveProductTier === "governance"
+        ? 7
+        : access?.capabilities?.maxPdfsPerConversation;
   const theme = useMemo(() => getChatTheme(isStrategic), [isStrategic]);
+  const userDisplay = useMemo(() => formatUserLabel(userLabel), [userLabel]);
 
   const strategicSidebarBg = "#656565";
   const strategicSidebarHover = "#727272";
@@ -316,35 +330,23 @@ export function ChatSidebar({
   const sidebarCta = useMemo(() => {
     if (access?.isAdmin) return null;
 
-    const baseCta = getSidebarAccessCta(access);
-    if (!baseCta) return null;
-
     const normalizedTier = normalizeProductTier(
       access?.resolvedAccess?.effectiveProductTier ?? access?.productTier
     );
     const currentStatus = access?.access_status ?? access?.accessStatus;
 
-    if (baseCta.label === "ASSINAR AGORA") {
-      if (
-        normalizedTier === "essential" &&
-        (currentStatus === "trial_active" || currentStatus === "trial_expired")
-      ) {
-        return {
-          ...baseCta,
-          label: "ASSINAR ESSENCIAL AGORA",
-        };
-      }
-
-      if (normalizedTier === "strategic" && currentStatus === "trial_active") {
-        return {
-          ...baseCta,
-          label: "ASSINAR ESTRATÉGICO AGORA",
-        };
-      }
-    }
-
-    return baseCta;
-  }, [access]);
+    return getSidebarAccessCta(currentStatus, {
+      productTier: normalizedTier,
+      subscriptionPlan: access?.subscriptionPlan,
+    });
+  }, [
+    access?.access_status,
+    access?.accessStatus,
+    access?.isAdmin,
+    access?.productTier,
+    access?.resolvedAccess?.effectiveProductTier,
+    access?.subscriptionPlan,
+  ]);
 
   const trialDaysRemaining = useMemo(
     () => getTrialDaysRemaining(access?.trialEndsAt),
@@ -439,34 +441,16 @@ export function ChatSidebar({
     if (isBlocked) return false;
 
     const currentStatus = access?.access_status ?? access?.accessStatus;
-    return currentStatus === "trial_active";
+
+    return currentStatus === "trial_active" || currentStatus === "subscription_active";
   }, [sidebarCta, isBlocked, access?.access_status, access?.accessStatus]);
 
   const canShowUpgradeButton = useMemo(() => {
-    if (accessLoading) return false;
-    if (!access) return false;
-    if (isAdmin) return false;
-    if (!isEssential) return false;
-
-    const hasActiveEssentialAccess =
-      status === "trial_active" ||
-      hasActiveAccess(status) ||
-      resolvedEffectiveStatus === "trial_active" ||
-      hasActiveAccess(resolvedEffectiveStatus) ||
-      (resolvedEffectiveStatus === "active" &&
-        (resolvedEffectiveGrantKind === "subscription" ||
-          resolvedEffectiveGrantKind === "upgrade"));
-
-    return hasActiveEssentialAccess;
-  }, [
-    accessLoading,
-    access,
-    isAdmin,
-    isEssential,
-    status,
-    resolvedEffectiveStatus,
-    resolvedEffectiveGrantKind,
-  ]);
+    // Regra comercial atual: o upgrade para o Estratégico deve ser feito pelo
+    // link de assinatura/upgrade do sidebarCta. O antigo teste de 7 dias fica
+    // neutralizado aqui para não criar grants conflitantes.
+    return false;
+  }, []);
 
   useEffect(() => {
     function handleOutsideClick(event: MouseEvent) {
@@ -579,8 +563,11 @@ export function ChatSidebar({
               </span>
 
               <div className="mt-2 flex items-center gap-2">
-                <span className="text-[12px] text-slate-700">
-                  Usuário: <span className="font-semibold">{userLabel}</span>
+                <span className="min-w-0 flex-1 truncate text-[12px] text-slate-700">
+                  {userDisplay.label}:{" "}
+                  <span className="font-semibold">
+                    {userDisplay.value}
+                  </span>
                 </span>
 
                 <button
@@ -619,10 +606,13 @@ export function ChatSidebar({
 
               <div className="mt-2 flex items-center gap-2">
                 <span
-                  className="text-[12px]"
+                  className="min-w-0 flex-1 truncate text-[12px]"
                   style={{ color: strategicHeaderMuted }}
                 >
-                  Usuário: <span className="font-semibold">{userLabel}</span>
+                  {userDisplay.label}:{" "}
+                  <span className="font-semibold">
+                    {userDisplay.value}
+                  </span>
                 </span>
 
                 <button
@@ -842,9 +832,9 @@ export function ChatSidebar({
                   <div className="mt-1 text-[12px] text-slate-700">
                     {effectiveBrand.productName}
                   </div>
-                  {typeof access?.capabilities?.maxPdfsPerConversation === "number" && (
+                  {typeof effectiveMaxPdfsPerConversation === "number" && (
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Até {access.capabilities.maxPdfsPerConversation} PDFs por conversa
+                      Até {effectiveMaxPdfsPerConversation} PDFs por conversa
                     </div>
                   )}
                 </div>

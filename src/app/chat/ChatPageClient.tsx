@@ -2340,9 +2340,10 @@ export default function ChatPageClient({
           : null;
 
         if (isCommercialBlock) {
-          showSidebarFeedbackMessage({
-            text: apiMessage,
+          showToast(apiMessage, {
             type: "warning",
+            persistent: true,
+            cta: toastCta,
           });
           return;
         }

@@ -12,8 +12,8 @@ import type { AccessStatus, PdfPeriod, ProductTier } from "@/types/access";
 const PDF_UPLOAD_MAX_MB = 30;
 const TRIAL_PDF_LIMIT = 10;
 
-const ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION = 1;
-const ESSENTIAL_PAID_PDFS_PER_CONVERSATION = 3;
+const ESSENTIAL_PDFS_PER_CONVERSATION = 3;
+const STRATEGIC_PDFS_PER_CONVERSATION = 5;
 
 type PdfUploadPlanValidation = {
   allowed: boolean;
@@ -114,7 +114,7 @@ async function validatePdfUploadByPlan(
       isAdmin: false,
       productTier: "essential",
       capabilities: {
-        maxPdfsPerConversation: ESSENTIAL_PAID_PDFS_PER_CONVERSATION,
+        maxPdfsPerConversation: ESSENTIAL_PDFS_PER_CONVERSATION,
         maxPdfUploadsPerAccount: TRIAL_PDF_LIMIT,
         maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("essential"),
       },
@@ -253,31 +253,44 @@ async function getConversationPdfCount(
 }
 
 function getConversationPdfLimit(params: {
-  accessStatus: AccessStatus;
   isAdmin: boolean;
   productTier: ProductTier;
   capabilities: {
     maxPdfsPerConversation: number;
   };
 }) {
-  const { accessStatus, isAdmin, productTier, capabilities } = params;
+  const { isAdmin, productTier, capabilities } = params;
 
   if (isAdmin) {
     return capabilities.maxPdfsPerConversation;
   }
 
-  if (productTier === "essential" && accessStatus === "trial_active") {
-    return ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION;
+  if (productTier === "essential") {
+    return ESSENTIAL_PDFS_PER_CONVERSATION;
   }
 
-  if (
-    productTier === "essential" &&
-    accessStatus === "subscription_active"
-  ) {
-    return ESSENTIAL_PAID_PDFS_PER_CONVERSATION;
+  if (productTier === "strategic") {
+    return STRATEGIC_PDFS_PER_CONVERSATION;
   }
 
   return capabilities.maxPdfsPerConversation;
+}
+
+function getConversationPdfLimitMessage(params: {
+  productTier: ProductTier;
+  limit: number;
+}) {
+  const { productTier, limit } = params;
+
+  if (productTier === "essential") {
+    return "Você atingiu o limite de 3 PDFs por conversa. Para enviar até 5 PDFs, faça upgrade para o Publ.IA Estratégico.";
+  }
+
+  if (productTier === "strategic") {
+    return "Você atingiu o limite de 5 PDFs por conversa.";
+  }
+
+  return `Você atingiu o limite de ${limit} PDFs por conversa.`;
 }
 
 async function setConversationActivePdf(params: {
@@ -472,7 +485,6 @@ export async function POST(request: NextRequest) {
     }
 
     const conversationPdfLimit = getConversationPdfLimit({
-      accessStatus: planValidation.accessStatus,
       isAdmin: planValidation.isAdmin,
       productTier: planValidation.productTier,
       capabilities: planValidation.capabilities,
@@ -484,16 +496,12 @@ export async function POST(request: NextRequest) {
     );
 
     if (conversationPdfCount >= conversationPdfLimit) {
-      const isEssentialTrial =
-        planValidation.productTier === "essential" &&
-        planValidation.accessStatus === "trial_active" &&
-        !planValidation.isAdmin;
-
       return NextResponse.json(
         {
-          error: isEssentialTrial
-            ? `No trial do Publ.IA Essencial, cada conversa pode ter até ${ESSENTIAL_TRIAL_PDFS_PER_CONVERSATION} PDF.`
-            : `Esta conversa já atingiu o limite de ${conversationPdfLimit} PDFs vinculados.`,
+          error: getConversationPdfLimitMessage({
+            productTier: planValidation.productTier,
+            limit: conversationPdfLimit,
+          }),
           accessStatus: planValidation.accessStatus,
           access_status: planValidation.accessStatus,
           isAdmin: planValidation.isAdmin,
