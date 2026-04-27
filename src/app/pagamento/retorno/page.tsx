@@ -1,46 +1,41 @@
 // src/app/pagamento/retorno/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+"use client";
+
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
-type RedirectTarget = "/chat" | "/criar-conta";
+type StepStatus = "checking" | "redirecting";
 
-const REDIRECT_DELAY_MS = 1800;
+function buildCreateAccountUrl(orderId: string | null) {
+  const params = new URLSearchParams();
 
-export default function PagamentoRetornoPage() {
+  if (orderId) {
+    params.set("order_id", orderId);
+  }
+
+  const query = params.toString();
+  return query ? `/criar-conta?${query}` : "/criar-conta";
+}
+
+function PagamentoRetornoContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [status, setStatus] = useState<StepStatus>("checking");
 
-  const [message, setMessage] = useState("Confirmando seu acesso...");
-  const [target, setTarget] = useState<RedirectTarget | null>(null);
-  const [manualTarget, setManualTarget] = useState<RedirectTarget>("/criar-conta");
+  const orderId = useMemo(() => {
+    const orderCode = searchParams.get("order_code");
+    const orderIdParam = searchParams.get("order_id");
 
-  const criarContaUrl = useMemo(() => {
-    const params = new URLSearchParams();
-
-    // Mantém um marcador simples para a tela de cadastro saber que veio de pagamento.
-    params.set("origem", "pagamento");
-
-    // Preserva parâmetros úteis, caso a Kiwify envie algo no futuro.
-    const orderId = searchParams.get("order_id") || searchParams.get("orderId");
-    const email = searchParams.get("email");
-    const cpfCnpj = searchParams.get("cpf_cnpj") || searchParams.get("document");
-
-    if (orderId) params.set("order_id", orderId);
-    if (email) params.set("email", email);
-    if (cpfCnpj) params.set("cpf_cnpj", cpfCnpj);
-
-    return `/criar-conta?${params.toString()}`;
+    return (orderCode || orderIdParam || "").trim() || null;
   }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function resolveDestination() {
+    async function resolveRedirect() {
       try {
-        setMessage("Verificando sua sessão...");
-
         const response = await fetch("/api/access/me", {
           method: "GET",
           credentials: "include",
@@ -49,84 +44,88 @@ export default function PagamentoRetornoPage() {
 
         if (cancelled) return;
 
-        if (response.ok) {
-          setTarget("/chat");
-          setManualTarget("/chat");
-          setMessage("Pagamento confirmado. Vamos abrir seu painel.");
-          window.setTimeout(() => {
-            if (!cancelled) router.replace("/chat");
-          }, REDIRECT_DELAY_MS);
-          return;
-        }
+        setStatus("redirecting");
 
-        setTarget("/criar-conta");
-        setManualTarget("/criar-conta");
-        setMessage("Pagamento confirmado. Vamos abrir a criação da sua conta.");
-        window.setTimeout(() => {
-          if (!cancelled) router.replace(criarContaUrl);
-        }, REDIRECT_DELAY_MS);
+        const timeoutId = window.setTimeout(() => {
+          if (response.ok) {
+            router.replace("/chat");
+            return;
+          }
+
+          router.replace(buildCreateAccountUrl(orderId));
+        }, 600);
+
+        return () => window.clearTimeout(timeoutId);
       } catch {
         if (cancelled) return;
 
-        setTarget("/criar-conta");
-        setManualTarget("/criar-conta");
-        setMessage("Pagamento confirmado. Vamos abrir a criação da sua conta.");
-        window.setTimeout(() => {
-          if (!cancelled) router.replace(criarContaUrl);
-        }, REDIRECT_DELAY_MS);
+        setStatus("redirecting");
+
+        const timeoutId = window.setTimeout(() => {
+          router.replace(buildCreateAccountUrl(orderId));
+        }, 600);
+
+        return () => window.clearTimeout(timeoutId);
       }
     }
 
-    resolveDestination();
+    let cleanupTimer: (() => void) | undefined;
+
+    resolveRedirect().then((cleanup) => {
+      cleanupTimer = cleanup;
+    });
 
     return () => {
       cancelled = true;
+      cleanupTimer?.();
     };
-  }, [router, criarContaUrl]);
-
-  const manualHref = manualTarget === "/chat" ? "/chat" : criarContaUrl;
+  }, [orderId, router]);
 
   return (
-    <main className="min-h-screen bg-slate-50 px-4 py-10 text-slate-900">
-      <div className="mx-auto flex min-h-[70vh] w-full max-w-xl items-center justify-center">
-        <section className="w-full rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-          <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-50 text-2xl text-emerald-700">
-            ✓
-          </div>
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+      <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-sm">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-50 text-2xl">
+          ✓
+        </div>
 
-          <h1 className="text-2xl font-bold tracking-tight">
-            Pagamento aprovado
-          </h1>
+        <h1 className="text-lg font-semibold text-slate-900">
+          Pagamento confirmado
+        </h1>
 
-          <p className="mt-3 text-sm leading-6 text-slate-600">
-            {message}
-          </p>
+        <p className="mt-2 text-sm leading-6 text-slate-600">
+          {status === "checking"
+            ? "Estamos verificando seu acesso para direcionar você ao Publ.IA."
+            : "Tudo certo. Estamos redirecionando você agora."}
+        </p>
 
-          <div className="mt-6 flex justify-center">
-            <div className="h-2 w-40 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full w-2/3 animate-pulse rounded-full bg-slate-300" />
-            </div>
-          </div>
-
-          <div className="mt-7 text-xs text-slate-500">
-            {target === "/chat" ? (
-              <p>Você será redirecionado para o chat.</p>
-            ) : (
-              <p>
-                Se você ainda não possui senha, crie sua conta usando os mesmos
-                dados informados na compra.
-              </p>
-            )}
-          </div>
-
-          <a
-            href={manualHref}
-            className="mt-6 inline-flex rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
-          >
-            Continuar agora
-          </a>
-        </section>
-      </div>
+        <p className="mt-4 text-xs text-slate-500">
+          Se você ainda não tem conta, será direcionado para criar sua senha de acesso.
+        </p>
+      </section>
     </main>
   );
 }
+
+function PagamentoRetornoFallback() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+      <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-sm">
+        <h1 className="text-lg font-semibold text-slate-900">
+          Carregando retorno do pagamento...
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          Aguarde enquanto preparamos o próximo passo.
+        </p>
+      </section>
+    </main>
+  );
+}
+
+export default function PagamentoRetornoPage() {
+  return (
+    <Suspense fallback={<PagamentoRetornoFallback />}>
+      <PagamentoRetornoContent />
+    </Suspense>
+  );
+}
+
