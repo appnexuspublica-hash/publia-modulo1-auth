@@ -47,8 +47,9 @@ function CriarContaInner({ tk }: { tk: string }) {
 
   const disabled = !!state?.ok;
 
-  const showRegen =
-    state?.code === "signup_token_missing" || state?.code === "signup_token_invalid";
+  const hasToken = tk.trim().length > 0;
+
+  const showRegen = hasToken && state?.code === "signup_token_invalid";
 
   async function handleGenerateNewLink() {
     try {
@@ -78,6 +79,14 @@ function CriarContaInner({ tk }: { tk: string }) {
   return (
     <AuthShell title="Publ.IA - Nexus Pública" subtitle="Crie sua conta para acessar o painel.">
       <div className="mx-auto w-full max-w-2xl">
+        {!hasToken && !state.ok && (
+          <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">
+            <strong>Comprou o Publ.IA?</strong>{" "}
+            Crie sua conta usando o mesmo CPF/CNPJ e e-mail informados na compra.
+            Assim que o cadastro for concluído, seu plano pago será aplicado automaticamente.
+          </div>
+        )}
+
         {state.error && !state.ok && (
           <div className="space-y-2">
             <Alert type="error">{state.error}</Alert>

@@ -1,15 +1,8 @@
 //src/app/(auth)/criar-conta/page.tsx
 import { Suspense } from "react";
-import { redirect } from "next/navigation";
 import CriarContaPageClient from "./CriarContaPageClient";
 
-export default function CriarContaPage({ searchParams }: { searchParams: { tk?: string } }) {
-  const tk = (searchParams.tk ?? "").trim();
-
-  if (!tk) {
-    redirect("/login");
-  }
-
+export default function CriarContaPage() {
   return (
     <Suspense
       fallback={

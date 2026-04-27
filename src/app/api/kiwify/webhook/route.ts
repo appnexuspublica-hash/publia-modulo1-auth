@@ -1,5 +1,6 @@
-// src/app/api/kiwify/webhook/route.ts
+//src/app/api/kiwify/webhook/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getCurrentUserAccessByUserId } from "@/lib/access/getCurrentUserAccess";
 import { reconcileUserAccessSnapshot } from "@/lib/access/reconcileUserAccessSnapshot";
@@ -150,6 +151,23 @@ function getCustomerCpfCnpj(payload: unknown): string {
   ]);
 
   return onlyDigits(raw);
+}
+
+
+function getCustomerEmail(payload: unknown): string {
+  const root = getOrderRoot(payload);
+
+  const raw = getFirstAvailable(root, [
+    ["Customer", "email"],
+    ["Customer", "Email"],
+    ["customer", "email"],
+    ["customer", "Email"],
+    ["cliente", "email"],
+    ["cliente", "Email"],
+    ["email"],
+  ]);
+
+  return String(raw ?? "").trim().toLowerCase();
 }
 
 function getSubscriptionStatus(payload: unknown): string {
@@ -729,6 +747,86 @@ async function expireSubscriptionGrants(params: {
   }
 }
 
+
+async function createPendingSignupTokenForPurchase(params: {
+  supabase: ReturnType<typeof createSupabaseAdminClient>;
+  cpfCnpj: string;
+  email: string | null;
+  productTier: ProductTier;
+  subscriptionPlan: SubscriptionPlan;
+  payload: unknown;
+  orderId: string | null;
+  subscriptionId: string | null;
+}): Promise<{ token: string; created: boolean; expiresAt: string | null }> {
+  const {
+    supabase,
+    cpfCnpj,
+    email,
+    productTier,
+    subscriptionPlan,
+    payload,
+    orderId,
+    subscriptionId,
+  } = params;
+
+  if (orderId) {
+    const { data: existingByOrder, error: existingByOrderError } = await supabase
+      .from("signup_tokens")
+      .select("token, expires_at")
+      .eq("order_id", orderId)
+      .is("used_at", null)
+      .maybeSingle<{ token: string; expires_at: string | null }>();
+
+    if (existingByOrderError) {
+      throw new Error(
+        `Erro ao buscar token pendente da compra: ${existingByOrderError.message}`
+      );
+    }
+
+    if (existingByOrder?.token) {
+      return {
+        token: existingByOrder.token,
+        created: false,
+        expiresAt: existingByOrder.expires_at ?? null,
+      };
+    }
+  }
+
+  const token = crypto.randomBytes(18).toString("base64url");
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { error: insertError } = await supabase.from("signup_tokens").insert({
+    token,
+    expires_at: expiresAt,
+    product_tier: productTier,
+    grant_kind: "subscription",
+    trial_days: null,
+    subscription_plan: subscriptionPlan,
+    source: "kiwify_purchase_pending_signup",
+    notes: JSON.stringify({
+      provider: "kiwify",
+      purpose: "paid_signup_without_existing_profile",
+      cpf_cnpj: cpfCnpj,
+      email,
+      order_id: orderId,
+      subscription_id: subscriptionId,
+    }),
+    cpf_cnpj: cpfCnpj,
+    email,
+    order_id: orderId,
+    subscription_id: subscriptionId,
+    raw_payload: payload,
+  });
+
+  if (insertError) {
+    throw new Error(
+      `Erro ao criar token de cadastro da compra: ${insertError.message}`
+    );
+  }
+
+  return { token, created: true, expiresAt };
+}
+
 async function syncUserAccessSnapshot(params: {
   supabase: ReturnType<typeof createSupabaseAdminClient>;
   userId: string;
@@ -840,6 +938,7 @@ export async function POST(request: NextRequest) {
   let eventType = "";
   let orderStatus = "";
   let cpfCnpj = "";
+  let customerEmail = "";
   let subscriptionId: string | null = null;
   let orderId: string | null = null;
 
@@ -920,6 +1019,7 @@ export async function POST(request: NextRequest) {
     eventType = getEventType(payload);
     orderStatus = getOrderStatus(payload);
     cpfCnpj = getCustomerCpfCnpj(payload);
+    customerEmail = getCustomerEmail(payload);
     subscriptionId = getSubscriptionId(payload);
     orderId = getOrderId(payload);
 
@@ -927,6 +1027,7 @@ export async function POST(request: NextRequest) {
       eventType,
       orderStatus,
       cpfCnpj,
+      customerEmail,
       subscriptionId,
       orderId,
     });
@@ -997,21 +1098,146 @@ export async function POST(request: NextRequest) {
     }
 
     if (!profile?.user_id) {
-      return finish(
-        "ignored",
-        {
-          ok: true,
-          ignored: true,
-          reason: "profile_not_found",
+      const productTier = mapProductTier(payload);
+
+      if (isPendingPaymentEvent(payload) && !isApprovalEvent(payload)) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "pending_payment_without_profile",
+            cpfCnpj,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            reason: "pending_payment_without_profile",
+          }
+        );
+      }
+
+      if (!isApprovalEvent(payload)) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "profile_not_found_event_not_approved",
+            cpfCnpj,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            reason: "profile_not_found_event_not_approved",
+          }
+        );
+      }
+
+      if (!productTier) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "profile_not_found_product_tier_not_mapped",
+            cpfCnpj,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            reason: "profile_not_found_product_tier_not_mapped",
+          }
+        );
+      }
+
+      const plan = mapPlan(payload);
+
+      if (!plan) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "profile_not_found_plan_not_mapped",
+            cpfCnpj,
+            productTier,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            reason: "profile_not_found_plan_not_mapped",
+          }
+        );
+      }
+
+      try {
+        const pendingToken = await createPendingSignupTokenForPurchase({
+          supabase,
           cpfCnpj,
-          eventType,
-          orderStatus,
-        },
-        200,
-        {
-          reason: "profile_not_found",
-        }
-      );
+          email: customerEmail || null,
+          productTier,
+          subscriptionPlan: plan,
+          payload,
+          orderId,
+          subscriptionId,
+        });
+
+        return finish(
+          "processed",
+          {
+            ok: true,
+            processed: true,
+            action: pendingToken.created
+              ? "pending_paid_signup_token_created"
+              : "pending_paid_signup_token_already_exists",
+            cpfCnpj,
+            email: customerEmail || null,
+            productTier,
+            plan,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+          },
+          200,
+          {
+            action: pendingToken.created
+              ? "pending_paid_signup_token_created"
+              : "pending_paid_signup_token_already_exists",
+            reason: "profile_not_found_paid_purchase_stored_for_signup",
+          }
+        );
+      } catch (pendingTokenError) {
+        console.error(
+          "[kiwify/webhook] erro ao criar token de cadastro pago pendente:",
+          pendingTokenError
+        );
+
+        return finish(
+          "error",
+          {
+            ok: false,
+            error: "Erro ao preparar cadastro do comprador.",
+          },
+          500,
+          {
+            errorMessage: "Erro ao preparar cadastro do comprador.",
+          }
+        );
+      }
     }
 
     const { data: existingAccess, error: existingAccessError } = await supabase

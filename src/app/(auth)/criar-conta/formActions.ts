@@ -64,6 +64,67 @@ const schema = z.object({
   ts: z.string().optional(),
 });
 
+
+type PendingSignupTokenRow = {
+  token: string;
+  expires_at: string | null;
+  product_tier: string | null;
+  grant_kind: string | null;
+  subscription_plan: string | null;
+  source: string | null;
+};
+
+function hasDateExpired(value: string | null | undefined): boolean {
+  if (!value) return false;
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return false;
+
+  return parsed.getTime() < Date.now();
+}
+
+async function findPendingPaidSignupToken(params: {
+  supa: ReturnType<typeof admin>;
+  cpfCnpj: string;
+  email: string;
+}): Promise<{ token: string | null; error: string | null }> {
+  const { supa, cpfCnpj, email } = params;
+
+  const query = supa
+    .from("signup_tokens")
+    .select("token, expires_at, product_tier, grant_kind, subscription_plan, source")
+    .eq("grant_kind", "subscription")
+    .is("used_at", null)
+    .or(`cpf_cnpj.eq.${cpfCnpj},email.eq.${email}`)
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error("[signup] erro ao buscar compra pendente", error);
+    return {
+      token: null,
+      error: "Não foi possível verificar sua compra. Tente novamente em alguns instantes.",
+    };
+  }
+
+  const rows = (data ?? []) as PendingSignupTokenRow[];
+  const validToken = rows.find(
+    (row) =>
+      row.token &&
+      row.grant_kind === "subscription" &&
+      (row.product_tier === "essential" || row.product_tier === "strategic") &&
+      !hasDateExpired(row.expires_at)
+  );
+
+  if (!validToken?.token) {
+    return { token: null, error: null };
+  }
+
+  return { token: validToken.token, error: null };
+}
+
 export async function criarConta(
   prevState: SignUpState,
   formData: FormData
@@ -136,14 +197,33 @@ export async function criarConta(
     }
 
     const emailNorm = email.trim().toLowerCase();
-    const token = (tk ?? "").trim();
+    let token = (tk ?? "").trim();
 
     if (!token) {
-      return {
-        ok: false,
-        error: "Link de cadastro inválido. Volte e clique em “Criar conta” novamente.",
-        code: "signup_token_missing",
-      };
+      const pendingTokenResult = await findPendingPaidSignupToken({
+        supa,
+        cpfCnpj: cpf_cnpj,
+        email: emailNorm,
+      });
+
+      if (pendingTokenResult.error) {
+        return {
+          ok: false,
+          error: pendingTokenResult.error,
+          code: "pending_purchase_lookup_failed",
+        };
+      }
+
+      if (!pendingTokenResult.token) {
+        return {
+          ok: false,
+          error:
+            "Não encontramos uma compra aprovada para este CPF/CNPJ ou e-mail. Se você comprou agora, use os mesmos dados informados na compra ou aguarde alguns instantes e tente novamente.",
+          code: "paid_signup_not_found",
+        };
+      }
+
+      token = pendingTokenResult.token;
     }
 
     const { data: existingCpf, error: existsCpfErr } = await supa
