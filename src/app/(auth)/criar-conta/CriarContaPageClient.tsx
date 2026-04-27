@@ -25,11 +25,12 @@ const initialState: State = { ok: false };
 export default function CriarContaPageClient() {
   const sp = useSearchParams();
   const tk = sp.get("tk") ?? "";
+  const orderId = sp.get("order_id") ?? sp.get("order_code") ?? "";
 
-  return <CriarContaInner key={tk} tk={tk} />;
+  return <CriarContaInner key={`${tk}:${orderId}`} tk={tk} orderId={orderId} />;
 }
 
-function CriarContaInner({ tk }: { tk: string }) {
+function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
   const router = useRouter();
 
   const ts = React.useMemo(() => String(Date.now()), []);
@@ -47,9 +48,8 @@ function CriarContaInner({ tk }: { tk: string }) {
 
   const disabled = !!state?.ok;
 
-  const hasToken = tk.trim().length > 0;
-
-  const showRegen = hasToken && state?.code === "signup_token_invalid";
+  const showRegen =
+    state?.code === "signup_token_missing" || state?.code === "signup_token_invalid";
 
   async function handleGenerateNewLink() {
     try {
@@ -79,14 +79,6 @@ function CriarContaInner({ tk }: { tk: string }) {
   return (
     <AuthShell title="Publ.IA - Nexus Pública" subtitle="Crie sua conta para acessar o painel.">
       <div className="mx-auto w-full max-w-2xl">
-        {!hasToken && !state.ok && (
-          <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">
-            <strong>Comprou o Publ.IA?</strong>{" "}
-            Crie sua conta usando o mesmo CPF/CNPJ e e-mail informados na compra.
-            Assim que o cadastro for concluído, seu plano pago será aplicado automaticamente.
-          </div>
-        )}
-
         {state.error && !state.ok && (
           <div className="space-y-2">
             <Alert type="error">{state.error}</Alert>
@@ -106,6 +98,7 @@ function CriarContaInner({ tk }: { tk: string }) {
 
         <form action={formAction} className="mt-2 space-y-4">
           <input type="hidden" name="tk" value={tk} />
+          <input type="hidden" name="order_id" value={orderId} />
           <input type="hidden" name="ts" value={ts} />
 
           <div
@@ -119,8 +112,14 @@ function CriarContaInner({ tk }: { tk: string }) {
             }}
             aria-hidden="true"
           >
-            <label htmlFor="company">Company</label>
-            <input id="company" name="company" type="text" tabIndex={-1} autoComplete="off" />
+            <label htmlFor="publia_hp">Não preencha este campo</label>
+            <input
+              id="publia_hp"
+              name="publia_hp"
+              type="text"
+              tabIndex={-1}
+              autoComplete="new-password"
+            />
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
