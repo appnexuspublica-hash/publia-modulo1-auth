@@ -106,7 +106,7 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
           </div>
         )}
 
-        <form action={formAction} className="mt-2 space-y-4">
+        <form action={formAction} className="mt-2 space-y-4" autoComplete="off">
           <input type="hidden" name="tk" value={tk} />
           <input type="hidden" name="order_id" value={orderId} />
           <input type="hidden" name="ts" value={ts} />
@@ -130,10 +130,16 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
             <div className="md:col-span-2">
               <AuthInput
                 name="cpf_cnpj"
+                type="text"
                 label="CPF / CNPJ"
                 placeholder="Digite seu CPF ou CNPJ"
                 disabled={disabled}
                 required
+                inputMode="numeric"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
               />
             </div>
 
@@ -149,10 +155,13 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
 
             <AuthInput
               name="telefone"
+              type="tel"
               label="Telefone/WhatsApp"
               placeholder="(00) 00000-0000"
               disabled={disabled}
               required
+              inputMode="tel"
+              autoComplete="tel"
             />
 
             <AuthInput
@@ -162,6 +171,11 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
               placeholder="Seu melhor e-mail"
               disabled={disabled}
               required
+              inputMode="email"
+              autoComplete="email"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
             />
 
             <AuthInput
@@ -249,6 +263,7 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
                 disabled={disabled}
                 minLength={8}
                 required
+                autoComplete="new-password"
               />
             </div>
           </div>

@@ -108,6 +108,91 @@ function getRelevantBillingCycle(params: {
   return "none";
 }
 
+
+function getMonthStart(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function countUserMessagesThisMonth(params: {
+  supabase: any;
+  userId: string;
+  now: Date;
+}): Promise<number> {
+  const monthStartIso = getMonthStart(params.now).toISOString();
+
+  const { data: conversations, error: conversationsError } = await params.supabase
+    .from("conversations")
+    .select("id")
+    .eq("user_id", params.userId);
+
+  if (conversationsError) {
+    console.error(
+      "[access/me] erro ao buscar conversas para contar mensagens:",
+      conversationsError
+    );
+    return 0;
+  }
+
+  const conversationIds = (conversations ?? [])
+    .map((conversation: any) => String(conversation?.id ?? "").trim())
+    .filter(Boolean);
+
+  if (!conversationIds.length) {
+    return 0;
+  }
+
+  let total = 0;
+
+  for (const idsChunk of chunkArray(conversationIds, 200)) {
+    const { count, error } = await params.supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .in("conversation_id", idsChunk)
+      .eq("role", "user")
+      .gte("created_at", monthStartIso);
+
+    if (error) {
+      console.error("[access/me] erro ao contar mensagens do mês:", error);
+      return total;
+    }
+
+    total += count ?? 0;
+  }
+
+  return total;
+}
+
+async function countUserPdfsThisMonth(params: {
+  supabase: any;
+  userId: string;
+  now: Date;
+}): Promise<number> {
+  const monthStartIso = getMonthStart(params.now).toISOString();
+
+  const { count, error } = await params.supabase
+    .from("pdf_files")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", params.userId)
+    .gte("created_at", monthStartIso);
+
+  if (error) {
+    console.error("[access/me] erro ao contar PDFs do mês:", error);
+    return 0;
+  }
+
+  return count ?? 0;
+}
+
 function getBlockedMessage(params: {
   isActive: boolean;
   accessStatus:
@@ -237,6 +322,20 @@ export async function GET() {
     });
 
     const tierCapabilities = getCapabilitiesForTier(productTier);
+    const now = new Date();
+
+    const [messagesUsed, pdfsUsedThisMonth] = await Promise.all([
+      countUserMessagesThisMonth({
+        supabase,
+        userId: user.id,
+        now,
+      }),
+      countUserPdfsThisMonth({
+        supabase,
+        userId: user.id,
+        now,
+      }),
+    ]);
 
     return NextResponse.json({
       resolvedAccess: resolved,
@@ -255,7 +354,7 @@ export async function GET() {
       trialEndsAt: resolved.trialEndsAt,
       subscriptionEndsAt: resolved.subscriptionEndsAt,
       subscriptionPlan,
-      messagesUsed: 0,
+      messagesUsed,
       trialMessageLimit: resolved.snapshot?.trial_message_limit ?? null,
       isAdmin,
       capabilities: {
@@ -302,9 +401,9 @@ export async function GET() {
       },
       pdfUsage: {
         limit: null,
-        used: 0,
+        used: pdfsUsedThisMonth,
         remaining: null,
-        period: isAdmin ? "admin" : null,
+        period: isAdmin ? "admin" : "month",
       },
     });
   } catch (error) {

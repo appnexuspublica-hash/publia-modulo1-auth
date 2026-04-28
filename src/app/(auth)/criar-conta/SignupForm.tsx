@@ -30,7 +30,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
   const blocked = !tokenOk;
 
   return (
-    <form action={formAction} className="space-y-4">
+    <form action={formAction} className="space-y-4" autoComplete="off">
       <input type="hidden" name="tk" value={token} />
 
       {!tokenOk && (
@@ -47,10 +47,16 @@ export default function SignupForm({ token, tokenOk }: Props) {
 
       <AuthInput
         name="cpf_cnpj"
+        type="text"
         label="CPF/CNPJ"
         placeholder="Digite seu CPF ou CNPJ"
         required
         disabled={blocked}
+        inputMode="numeric"
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="none"
+        spellCheck={false}
       />
 
       <AuthInput
@@ -68,14 +74,22 @@ export default function SignupForm({ token, tokenOk }: Props) {
         placeholder="seuemail@exemplo.com"
         required
         disabled={blocked}
+        inputMode="email"
+        autoComplete="email"
+        autoCorrect="off"
+        autoCapitalize="none"
+        spellCheck={false}
       />
 
       <AuthInput
         name="telefone"
+        type="tel"
         label="Telefone (WhatsApp)"
         placeholder="(00) 99999-0000"
         required
         disabled={blocked}
+        inputMode="tel"
+        autoComplete="tel"
       />
 
       <AuthInput
@@ -100,6 +114,7 @@ export default function SignupForm({ token, tokenOk }: Props) {
         placeholder="Digite uma senha segura"
         required
         disabled={blocked}
+        autoComplete="new-password"
       />
 
       <div className="pt-2">
