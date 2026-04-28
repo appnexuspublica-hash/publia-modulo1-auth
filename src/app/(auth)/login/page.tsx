@@ -115,7 +115,7 @@ export default function LoginPage() {
           >
             {loadingPlan === "strategic"
               ? "Gerando acesso..."
-              : "Testa Publ.IA Estratégico - 7 dias Grátis"}
+              : "Testar Publ.IA Estratégico - 7 dias Grátis"}
           </button>
         </div>
       </div>

@@ -48,8 +48,9 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
 
   const disabled = !!state?.ok;
 
-  const showRegen =
-    state?.code === "signup_token_missing" || state?.code === "signup_token_invalid";
+  const isPaidPurchaseMode = !tk || !!orderId;
+
+  const showRegen = Boolean(tk) && state?.code === "signup_token_invalid";
 
   async function handleGenerateNewLink() {
     try {
@@ -79,6 +80,15 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
   return (
     <AuthShell title="Publ.IA - Nexus Pública" subtitle="Crie sua conta para acessar o painel.">
       <div className="mx-auto w-full max-w-2xl">
+        {isPaidPurchaseMode && !state.ok && (
+          <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">
+            <strong>Comprou o Publ.IA?</strong>{" "}
+            Crie sua conta usando o mesmo CPF/CNPJ e e-mail informados na compra.
+            <br />
+            Assim que o cadastro for concluído, seu plano pago será aplicado automaticamente.
+          </div>
+        )}
+
         {state.error && !state.ok && (
           <div className="space-y-2">
             <Alert type="error">{state.error}</Alert>
@@ -112,14 +122,8 @@ function CriarContaInner({ tk, orderId }: { tk: string; orderId: string }) {
             }}
             aria-hidden="true"
           >
-            <label htmlFor="publia_hp">Não preencha este campo</label>
-            <input
-              id="publia_hp"
-              name="publia_hp"
-              type="text"
-              tabIndex={-1}
-              autoComplete="new-password"
-            />
+            <label htmlFor="company">Company</label>
+            <input id="company" name="company" type="text" tabIndex={-1} autoComplete="off" />
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
