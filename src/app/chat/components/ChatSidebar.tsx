@@ -155,6 +155,20 @@ function getTrialDaysRemaining(trialEndsAt?: string | null) {
 function getSubscriptionPlanLabel(
   access?: FrontendAccessSummary | null
 ): string | null {
+  const status =
+    access?.access_status ??
+    access?.accessStatus ??
+    access?.resolvedAccess?.effectiveAccessStatus ??
+    null;
+
+  const grantKind =
+    access?.resolvedAccess?.effectiveGrantKind ??
+    null;
+
+  if (status === "trial_active" || grantKind === "trial") {
+    return "Trial ativo";
+  }
+
   const rawPlan = access?.subscriptionPlan ?? null;
 
   if (!rawPlan) return null;
