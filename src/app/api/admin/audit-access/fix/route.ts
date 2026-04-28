@@ -17,6 +17,8 @@ type FixAction =
   | "deleted_stale_snapshot"
   | "would_reconcile_snapshot"
   | "reconciled_snapshot"
+  | "would_expire_trial_superseded_by_paid_access"
+  | "expired_trial_superseded_by_paid_access"
   | "skipped_no_safe_action"
   | "error";
 
@@ -30,6 +32,8 @@ type FixResult = {
   resolvedProductTier?: string | null;
   resolvedFrom?: string;
   activeGrantIds?: string[];
+  paidGrantIds?: string[];
+  trialGrantIds?: string[];
   error?: string;
 };
 
@@ -53,6 +57,24 @@ function summarizeActions(results: FixResult[]): Record<string, number> {
     acc[result.action] = (acc[result.action] ?? 0) + 1;
     return acc;
   }, {});
+}
+
+function isPaidGrantKind(kind: string | null | undefined): boolean {
+  return kind === "subscription" || kind === "upgrade";
+}
+
+function buildSupersededTrialMetadata(
+  grant: UserAccessGrantRow,
+  paidGrantIds: string[],
+  nowIso: string
+): Record<string, unknown> {
+  return {
+    ...(grant.metadata ?? {}),
+    expired_by_audit_fix: true,
+    expired_reason: "superseded_by_active_subscription",
+    expired_at: nowIso,
+    superseded_by_active_grant_ids: paidGrantIds,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -135,12 +157,97 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
+      const activeTrialGrants = activeGrants.filter(
+        (grant) => grant.grantKind === "trial"
+      );
+      const activePaidGrants = activeGrants.filter((grant) =>
+        isPaidGrantKind(grant.grantKind)
+      );
+
+      const shouldExpireTrialsSupersededByPaidAccess =
+        activeTrialGrants.length > 0 && activePaidGrants.length > 0;
+
+      if (shouldExpireTrialsSupersededByPaidAccess) {
+        const trialGrantIds = activeTrialGrants.map((grant) => grant.id);
+        const paidGrantIds = activePaidGrants.map((grant) => grant.id);
+
+        if (dryRun) {
+          results.push({
+            ...baseResult,
+            action: "would_expire_trial_superseded_by_paid_access",
+            reason:
+              "Usuário possui trial ativo junto com assinatura/upgrade ativo. Em execução real, somente os trials serão expirados; o acesso pago será mantido.",
+            trialGrantIds,
+            paidGrantIds,
+          });
+          continue;
+        }
+
+        const nowIso = new Date().toISOString();
+        const rawTrialGrantsToExpire = userGrants.filter((grant) =>
+          trialGrantIds.includes(grant.id)
+        );
+
+        let updateError: string | null = null;
+
+        for (const trialGrant of rawTrialGrantsToExpire) {
+          const updateResult = await supabase
+            .from("user_access_grants")
+            .update({
+              status: "expired",
+              ends_at: nowIso,
+              updated_at: nowIso,
+              metadata: buildSupersededTrialMetadata(
+                trialGrant,
+                paidGrantIds,
+                nowIso
+              ),
+            })
+            .eq("id", trialGrant.id)
+            .eq("user_id", userId);
+
+          if (updateResult.error) {
+            updateError = updateResult.error.message;
+            break;
+          }
+        }
+
+        if (updateError) {
+          results.push({
+            ...baseResult,
+            action: "error",
+            reason:
+              "Falha ao expirar trial sobrescrito por assinatura/upgrade ativo.",
+            trialGrantIds,
+            paidGrantIds,
+            error: updateError,
+          });
+          continue;
+        }
+
+        const reconcileResult = await reconcileUserAccessSnapshot({
+          supabase,
+          userId,
+        });
+
+        results.push({
+          ...baseResult,
+          action: "expired_trial_superseded_by_paid_access",
+          reason: reconcileResult.changed
+            ? "Trials expirados e snapshot reconciliado com o acesso pago ativo."
+            : "Trials expirados. Snapshot já estava equivalente ao acesso pago ativo.",
+          trialGrantIds,
+          paidGrantIds,
+        });
+        continue;
+      }
+
       if (activeGrants.length > 1) {
         results.push({
           ...baseResult,
           action: "skipped_no_safe_action",
           reason:
-            "Usuário possui múltiplos grants ativos. Este endpoint não altera grants automaticamente; exige revisão manual.",
+            "Usuário possui múltiplos grants ativos que não são apenas trial sobrescrito por assinatura/upgrade. Exige revisão manual.",
         });
         continue;
       }

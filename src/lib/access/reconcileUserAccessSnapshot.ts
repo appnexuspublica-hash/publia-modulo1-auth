@@ -104,6 +104,27 @@ function normalizeToSnapshotStatus(
   return accessStatus === "trial_active" ? "trial_active" : "subscription_active";
 }
 
+/**
+ * user_access.subscription_plan é um campo legado do snapshot/cache.
+ *
+ * A fonte da verdade do plano atual está em:
+ * - user_access.product_tier
+ * - user_access_grants.product_tier
+ * - user_access_grants.grant_kind
+ *
+ * Alguns grants vindos de integrações externas podem ter subscription_plan com
+ * valores específicos de produto/checkout que não necessariamente passam no
+ * CHECK constraint legado de user_access.subscription_plan.
+ *
+ * Para evitar quebrar a reconciliação do snapshot, preservamos apenas o valor
+ * que já estava salvo em user_access. Se não havia valor anterior, mantemos null.
+ */
+function resolveSafeSnapshotSubscriptionPlan(
+  previousSnapshot: UserAccessRow | null
+): string | null {
+  return previousSnapshot?.subscription_plan ?? null;
+}
+
 function buildActiveSnapshotRow(params: {
   userId: string;
   now: Date;
@@ -200,10 +221,7 @@ function buildSnapshotRowFromResolved(params: {
     accessStatus: resolved.effectiveAccessStatus,
     trialEndsAt: resolved.trialEndsAt,
     subscriptionEndsAt: resolved.subscriptionEndsAt,
-    subscriptionPlan:
-      resolved.activeGrant?.subscriptionPlan ??
-      snapshot?.subscription_plan ??
-      null,
+    subscriptionPlan: resolveSafeSnapshotSubscriptionPlan(snapshot),
     subscriptionStartedAt:
       resolved.activeGrant?.grantKind === "subscription" ||
       resolved.activeGrant?.grantKind === "upgrade"

@@ -49,19 +49,50 @@ export async function POST() {
     const currentAccess = await getCurrentUserAccessByUserId(admin, user.id);
     const resolved = currentAccess.resolved;
 
-    const isEligibleEssentialAccess =
-      resolved.effectiveProductTier === "essential" &&
-      (resolved.effectiveAccessStatus === "trial_active" ||
-        resolved.effectiveAccessStatus === "subscription_active" ||
-        resolved.effectiveAccessStatus === "active");
+    const hasActiveStrategic =
+      resolved.activeGrant?.productTier === "strategic" &&
+      resolved.activeGrant.isCurrentlyActive;
 
-    if (!isEligibleEssentialAccess) {
+    if (hasActiveStrategic) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Sua conta já possui acesso Estratégico ativo.",
+          code: "strategic_already_active",
+        },
+        { status: 409 },
+      );
+    }
+
+    const hasActivePaidSubscription =
+      resolved.effectiveAccessStatus === "subscription_active" ||
+      resolved.effectiveGrantKind === "subscription" ||
+      resolved.effectiveGrantKind === "upgrade";
+
+    if (hasActivePaidSubscription) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "O trial Estratégico está disponível uma única vez para contas Publ.IA Essencial com acesso ativo.",
-          code: "essential_active_access_required",
+            "Sua conta já possui assinatura ativa. Para mudar para o Publ.IA Estratégico, use o fluxo de upgrade.",
+          code: "active_subscription_cannot_start_trial",
+        },
+        { status: 409 },
+      );
+    }
+
+    const isEligibleEssentialTrial =
+      resolved.effectiveProductTier === "essential" &&
+      resolved.effectiveAccessStatus === "trial_active" &&
+      resolved.effectiveGrantKind === "trial";
+
+    if (!isEligibleEssentialTrial) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "O trial Estratégico está disponível uma única vez para contas Publ.IA Essencial em período de trial.",
+          code: "essential_trial_access_required",
         },
         { status: 403 },
       );
@@ -78,21 +109,6 @@ export async function POST() {
           ok: false,
           error: "Seu trial do Publ.IA Estratégico já foi utilizado.",
           code: "strategic_trial_already_consumed",
-        },
-        { status: 409 },
-      );
-    }
-
-    const hasActiveStrategic =
-      resolved.activeGrant?.productTier === "strategic" &&
-      resolved.activeGrant.isCurrentlyActive;
-
-    if (hasActiveStrategic) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Sua conta já possui acesso Estratégico ativo.",
-          code: "strategic_already_active",
         },
         { status: 409 },
       );

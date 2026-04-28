@@ -83,6 +83,7 @@ export type ApplySignupTokenAccessFailureReason =
   | "TOKEN_INVALID_GRANT_KIND"
   | "ESSENTIAL_TRIAL_ALREADY_CONSUMED"
   | "STRATEGIC_TRIAL_ALREADY_CONSUMED"
+  | "ACTIVE_SUBSCRIPTION_CANNOT_START_TRIAL"
   | "USER_ALREADY_HAS_ACTIVE_STRATEGIC"
   | "USER_ALREADY_HAS_ACTIVE_ESSENTIAL"
   | "DATABASE_ERROR";
@@ -382,11 +383,38 @@ function findBestBaseGrantForFallback(grants: ResolvedGrant[]): ResolvedGrant | 
   );
 }
 
+function hasActivePaidAccess(
+  resolved: Awaited<ReturnType<typeof getCurrentUserAccessByUserId>>["resolved"],
+): boolean {
+  const activeGrant = resolved.activeGrant;
+
+  if (
+    activeGrant?.isCurrentlyActive &&
+    (activeGrant.grantKind === "subscription" || activeGrant.grantKind === "upgrade")
+  ) {
+    return true;
+  }
+
+  return (
+    resolved.effectiveAccessStatus === "subscription_active" &&
+    (resolved.effectiveGrantKind === "subscription" ||
+      resolved.effectiveGrantKind === "upgrade")
+  );
+}
+
 function shouldBlockTrialGrant(params: {
   productTier: ProductTier;
   resolved: Awaited<ReturnType<typeof getCurrentUserAccessByUserId>>["resolved"];
 }): ApplySignupTokenAccessFailure | null {
   const { productTier, resolved } = params;
+
+  if (hasActivePaidAccess(resolved)) {
+    return buildFailure(
+      "ACTIVE_SUBSCRIPTION_CANNOT_START_TRIAL",
+      "Usuário com assinatura ativa não pode iniciar trial.",
+    );
+  }
+
   const { hasConsumedEssentialTrial, hasConsumedStrategicTrial } =
     resolveConsumedTrialFlags(resolved.grants);
 
