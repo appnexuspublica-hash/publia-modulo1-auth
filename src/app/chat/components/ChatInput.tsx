@@ -306,7 +306,7 @@ export function ChatInput({
               isSending
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
-                  ? "Acesso bloqueado. Regularize sua conta para enviar novas mensagens."
+                  ? "Validando acesso..."
                   : "Envie sua pergunta..."
             }
             value={value}

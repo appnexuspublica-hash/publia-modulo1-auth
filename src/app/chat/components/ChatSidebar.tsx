@@ -155,20 +155,6 @@ function getTrialDaysRemaining(trialEndsAt?: string | null) {
 function getSubscriptionPlanLabel(
   access?: FrontendAccessSummary | null
 ): string | null {
-  const status =
-    access?.access_status ??
-    access?.accessStatus ??
-    access?.resolvedAccess?.effectiveAccessStatus ??
-    null;
-
-  const grantKind =
-    access?.resolvedAccess?.effectiveGrantKind ??
-    null;
-
-  if (status === "trial_active" || grantKind === "trial") {
-    return "Trial ativo";
-  }
-
   const rawPlan = access?.subscriptionPlan ?? null;
 
   if (!rawPlan) return null;
@@ -267,6 +253,7 @@ export function ChatSidebar({
     null
   );
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
+  const isAccessResolving = accessLoading || !access;
 
   const effectiveProductTier = useMemo(
     () =>
@@ -342,7 +329,7 @@ export function ChatSidebar({
   );
 
   const sidebarCta = useMemo(() => {
-    if (access?.isAdmin) return null;
+    if (isAccessResolving || access?.isAdmin) return null;
 
     const normalizedTier = normalizeProductTier(
       access?.resolvedAccess?.effectiveProductTier ?? access?.productTier
@@ -360,6 +347,7 @@ export function ChatSidebar({
     access?.productTier,
     access?.resolvedAccess?.effectiveProductTier,
     access?.subscriptionPlan,
+    isAccessResolving,
   ]);
 
   const trialDaysRemaining = useMemo(
@@ -555,7 +543,35 @@ export function ChatSidebar({
           backgroundColor: isStrategic ? strategicHeaderBg : "#ffffff",
         }}
       >
-        {isEssential ? (
+        {isAccessResolving ? (
+          <div className="flex items-start gap-2">
+            <a
+              href="https://nexuspublica.com.br/"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <Image
+                src="/logos/nexus.png"
+                alt="Logo Publ.IA"
+                width={32}
+                height={32}
+                className="rounded-lg"
+              />
+            </a>
+
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span className="text-sm font-semibold text-slate-900">
+                Publ.IA
+              </span>
+
+              <div className="mt-2 flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-[12px] text-slate-700">
+                  Carregando plano...
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : isEssential ? (
           <div className="flex items-start gap-2">
             <a
               href="https://nexuspublica.com.br/"

@@ -537,6 +537,37 @@ async function ensureUserAccessRow(client: any, userId: string) {
   return Boolean(existing);
 }
 
+
+async function getAdminAccessSummary(
+  client: any,
+  userId: string
+): Promise<AccessSummary | null> {
+  const isAdmin = await getIsAdmin(client, userId);
+
+  if (!isAdmin) {
+    return null;
+  }
+
+  // Admin não depende de linha em user_access/user_access_summary para usar o chat.
+  // Isso evita falha em /api/chat quando o perfil é admin, mas não possui snapshot comum.
+  return {
+    user_id: userId,
+    access_status: "subscription_active",
+    trial_started_at: null,
+    trial_ends_at: null,
+    trial_message_limit: STRATEGIC_TRIAL_MESSAGE_LIMIT,
+    subscription_plan: null,
+    subscription_started_at: null,
+    subscription_ends_at: null,
+    messages_used: 0,
+    pdf_uploads_used: 0,
+    input_tokens_used: 0,
+    output_tokens_used: 0,
+    total_tokens_used: 0,
+    product_tier: "strategic",
+  };
+}
+
 async function getAccessSummaryFromView(
   client: any,
   userId: string
@@ -671,6 +702,11 @@ export async function getAccessSummary(
   const fromTables = await getAccessSummaryFromTables(client, userId);
   if (fromTables) {
     return fromTables;
+  }
+
+  const fromAdminProfile = await getAdminAccessSummary(client, userId);
+  if (fromAdminProfile) {
+    return fromAdminProfile;
   }
 
   console.error(
