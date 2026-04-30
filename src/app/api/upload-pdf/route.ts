@@ -374,9 +374,9 @@ async function registerPdfUploadEvent(params: {
   const payload = {
     user_id: userId,
     event_type: "pdf_upload",
-    feature_key: "pdf_upload",
-    value: 1,
     metadata: {
+      feature_key: "pdf_upload",
+      value: 1,
       conversation_id: conversationId,
       file_name: fileName,
       storage_path: storagePath,
