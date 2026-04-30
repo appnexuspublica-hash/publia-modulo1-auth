@@ -2118,8 +2118,17 @@ export default function ChatPageClient({
       );
       if (!msg) throw new Error("Mensagem não encontrada para copiar.");
 
-      const plainText = markdownToPlainText(msg.content);
-      await navigator.clipboard.writeText(plainText);
+      try {
+        await copyMessageToClipboard(messageId);
+      } catch (copyFromDomError) {
+        console.warn(
+          "Não foi possível copiar a resposta formatada; usando texto simples.",
+          copyFromDomError
+        );
+
+        const plainText = markdownToPlainText(msg.content);
+        await navigator.clipboard.writeText(plainText);
+      }
 
       showActionToast(messageId, "Resposta copiada.", "success");
     } catch (err) {
