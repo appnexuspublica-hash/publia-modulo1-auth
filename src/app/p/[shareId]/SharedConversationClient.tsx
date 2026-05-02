@@ -373,7 +373,7 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
 
                         <div>
                           <div className="inline-flex rounded-md bg-slate-100 px-2.5 py-1 text-[13px] font-black uppercase tracking-[0.16em] text-slate-900 ring-1 ring-slate-300">
-                            Resposta do Publ.IA
+                            Resposta da Publ.IA
                           </div>
                           {selected.assistantMessage.created_at && (
                             <div className="mt-2 text-sm font-medium text-slate-500">
