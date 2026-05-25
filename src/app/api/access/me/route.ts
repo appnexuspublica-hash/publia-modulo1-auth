@@ -6,6 +6,8 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
 import { reconcileUserAccessSnapshot } from "@/lib/access/reconcileUserAccessSnapshot";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { autoApplyPendingPaidSignupTokens } from "@/lib/access/applySignupTokenAccess";
 import {
   getResolvedUiState,
   toFrontendAccessStatus,
@@ -265,23 +267,33 @@ export async function GET() {
       );
     }
 
-    const {
-      data: { user: authenticatedUser },
-    } = await supabase.auth.getUser();
+    try {
+      const adminSupabase = createSupabaseAdminClient();
 
-    if (authenticatedUser) {
-      try {
-        await reconcileUserAccessSnapshot({
-          supabase,
-          userId: authenticatedUser.id,
-          now: new Date(),
+      const autoApplyResult = await autoApplyPendingPaidSignupTokens({
+        supabase: adminSupabase,
+        userId: user.id,
+        now: new Date(),
+      });
+
+      if (autoApplyResult.applied > 0) {
+        console.info("[access/me] signup_tokens pagos pendentes conciliados:", {
+          userId: user.id,
+          tokenIds: autoApplyResult.tokenIds,
         });
-      } catch (snapshotError) {
-        console.error(
-          "[access/me] erro ao reconciliar snapshot user_access:",
-          snapshotError
-        );
       }
+
+      if (autoApplyResult.skipped.length > 0) {
+        console.info("[access/me] signup_tokens pagos pendentes ignorados:", {
+          userId: user.id,
+          skipped: autoApplyResult.skipped,
+        });
+      }
+    } catch (autoApplyError) {
+      console.error(
+        "[access/me] erro ao conciliar signup_tokens pagos pendentes:",
+        autoApplyError,
+      );
     }
 
     const currentAccess = await getCurrentUserAccess(supabase);
@@ -300,6 +312,19 @@ export async function GET() {
     const isAdmin =
       Boolean(profile?.is_admin) ||
       String(profile?.role ?? "").toLowerCase() === "admin";
+
+    try {
+      await reconcileUserAccessSnapshot({
+        supabase,
+        userId: user.id,
+        now: new Date(),
+      });
+    } catch (snapshotError) {
+      console.error(
+        "[access/me] erro ao reconciliar snapshot user_access:",
+        snapshotError
+      );
+    }
 
     const ui = getResolvedUiState(resolved);
 

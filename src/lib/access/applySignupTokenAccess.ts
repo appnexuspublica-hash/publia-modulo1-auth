@@ -495,6 +495,257 @@ function shouldBlockNonTrialGrant(params: {
   return null;
 }
 
+
+type PendingPaidSignupTokenCandidate = {
+  id: string;
+  token: string;
+  created_at: string | null;
+  expires_at: string | null;
+  used_at: string | null;
+  product_tier: string | null;
+  grant_kind: string | null;
+  subscription_plan: string | null;
+  source: string | null;
+  cpf_cnpj: string | null;
+  email: string | null;
+  order_id?: string | null;
+  subscription_id?: string | null;
+};
+
+export type AutoApplyPendingPaidSignupTokensResult = {
+  ok: true;
+  userId: string;
+  checked: number;
+  applied: number;
+  tokenIds: string[];
+  skipped: Array<{
+    tokenId: string;
+    reason: ApplySignupTokenAccessFailureReason | "UNKNOWN";
+    message: string;
+  }>;
+};
+
+function normalizeEmail(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function normalizeCpfCnpj(value: unknown): string {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function isPaidSignupTokenCandidate(
+  token: PendingPaidSignupTokenCandidate,
+): boolean {
+  return (
+    !token.used_at &&
+    (token.grant_kind === "subscription" || token.grant_kind === "upgrade") &&
+    (token.product_tier === "essential" || token.product_tier === "strategic")
+  );
+}
+
+function sortPendingPaidTokensByPriority(
+  tokens: PendingPaidSignupTokenCandidate[],
+): PendingPaidSignupTokenCandidate[] {
+  return [...tokens].sort((a, b) => {
+    const aTierScore = a.product_tier === "strategic" ? 2 : 1;
+    const bTierScore = b.product_tier === "strategic" ? 2 : 1;
+
+    if (aTierScore !== bTierScore) {
+      return bTierScore - aTierScore;
+    }
+
+    const aCreated = new Date(a.created_at ?? 0).getTime();
+    const bCreated = new Date(b.created_at ?? 0).getTime();
+
+    return bCreated - aCreated;
+  });
+}
+
+async function getProfileIdentityForPendingPaidTokens(params: {
+  supabase: SupabaseClient;
+  userId: string;
+}): Promise<{ cpfCnpj: string; email: string }> {
+  const { data, error } = await params.supabase
+    .from("profiles")
+    .select("cpf_cnpj, email")
+    .eq("user_id", params.userId)
+    .maybeSingle<{ cpf_cnpj: string | null; email: string | null }>();
+
+  if (error) {
+    throw new Error(`Erro ao consultar profile para conciliação de tokens: ${error.message}`);
+  }
+
+  return {
+    cpfCnpj: normalizeCpfCnpj(data?.cpf_cnpj),
+    email: normalizeEmail(data?.email),
+  };
+}
+
+async function findPendingPaidSignupTokensByIdentity(params: {
+  supabase: SupabaseClient;
+  cpfCnpj: string;
+  email: string;
+}): Promise<PendingPaidSignupTokenCandidate[]> {
+  const allCandidates = new Map<string, PendingPaidSignupTokenCandidate>();
+
+  async function collectByCpfCnpj() {
+    if (!params.cpfCnpj) return;
+
+    const { data, error } = await params.supabase
+      .from("signup_tokens")
+      .select(
+        `
+          id,
+          token,
+          created_at,
+          expires_at,
+          used_at,
+          product_tier,
+          grant_kind,
+          subscription_plan,
+          source,
+          cpf_cnpj,
+          email,
+          order_id,
+          subscription_id
+        `,
+      )
+      .is("used_at", null)
+      .eq("cpf_cnpj", params.cpfCnpj)
+      .in("grant_kind", ["subscription", "upgrade"])
+      .order("created_at", { ascending: false })
+      .returns<PendingPaidSignupTokenCandidate[]>();
+
+    if (error) {
+      throw new Error(`Erro ao buscar tokens pagos pendentes por CPF/CNPJ: ${error.message}`);
+    }
+
+    for (const token of data ?? []) {
+      if (isPaidSignupTokenCandidate(token)) {
+        allCandidates.set(token.id, token);
+      }
+    }
+  }
+
+  async function collectByEmail() {
+    if (!params.email) return;
+
+    const { data, error } = await params.supabase
+      .from("signup_tokens")
+      .select(
+        `
+          id,
+          token,
+          created_at,
+          expires_at,
+          used_at,
+          product_tier,
+          grant_kind,
+          subscription_plan,
+          source,
+          cpf_cnpj,
+          email,
+          order_id,
+          subscription_id
+        `,
+      )
+      .is("used_at", null)
+      .eq("email", params.email)
+      .in("grant_kind", ["subscription", "upgrade"])
+      .order("created_at", { ascending: false })
+      .returns<PendingPaidSignupTokenCandidate[]>();
+
+    if (error) {
+      throw new Error(`Erro ao buscar tokens pagos pendentes por e-mail: ${error.message}`);
+    }
+
+    for (const token of data ?? []) {
+      if (isPaidSignupTokenCandidate(token)) {
+        allCandidates.set(token.id, token);
+      }
+    }
+  }
+
+  await collectByCpfCnpj();
+  await collectByEmail();
+
+  return sortPendingPaidTokensByPriority([...allCandidates.values()]);
+}
+
+/**
+ * Concilia automaticamente compras pagas criadas antes do cadastro/login.
+ *
+ * O webhook da Kiwify pode criar um signup_token pago quando ainda não existe
+ * profile para o comprador. Depois que o usuário cria conta ou faz login, este
+ * helper transforma o token pendente em user_access_grants e atualiza o snapshot.
+ *
+ * Regra de produto:
+ * - assinatura/upgrade pago sempre vence trial;
+ * - strategic pago vence essential trial;
+ * - token já usado não é reaplicado.
+ */
+export async function autoApplyPendingPaidSignupTokens(params: {
+  supabase: SupabaseClient;
+  userId: string;
+  now?: Date;
+}): Promise<AutoApplyPendingPaidSignupTokensResult> {
+  const now = params.now ?? new Date();
+  const { cpfCnpj, email } = await getProfileIdentityForPendingPaidTokens({
+    supabase: params.supabase,
+    userId: params.userId,
+  });
+
+  if (!cpfCnpj && !email) {
+    return {
+      ok: true,
+      userId: params.userId,
+      checked: 0,
+      applied: 0,
+      tokenIds: [],
+      skipped: [],
+    };
+  }
+
+  const candidates = await findPendingPaidSignupTokensByIdentity({
+    supabase: params.supabase,
+    cpfCnpj,
+    email,
+  });
+
+  const appliedTokenIds: string[] = [];
+  const skipped: AutoApplyPendingPaidSignupTokensResult["skipped"] = [];
+
+  for (const candidate of candidates) {
+    const result = await applySignupTokenAccess({
+      supabase: params.supabase,
+      userId: params.userId,
+      token: candidate.token,
+      now,
+    });
+
+    if (result.ok) {
+      appliedTokenIds.push(result.tokenId);
+      continue;
+    }
+
+    skipped.push({
+      tokenId: candidate.id,
+      reason: result.reason ?? "UNKNOWN",
+      message: result.message,
+    });
+  }
+
+  return {
+    ok: true,
+    userId: params.userId,
+    checked: candidates.length,
+    applied: appliedTokenIds.length,
+    tokenIds: appliedTokenIds,
+    skipped,
+  };
+}
+
+
 export async function applySignupTokenAccess(params: {
   supabase: SupabaseClient;
   userId: string;
