@@ -281,6 +281,319 @@ function areSnapshotsEquivalent(
   );
 }
 
+
+type SignupTokenRow = {
+  id: string;
+  token: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  used_at: string | null;
+  product_tier: string | null;
+  grant_kind: string | null;
+  trial_days: number | null;
+  subscription_plan: string | null;
+  source: string | null;
+  notes: string | null;
+  used_by: string | null;
+  cpf_cnpj: string | null;
+  email: string | null;
+  order_id: string | null;
+  subscription_id: string | null;
+  raw_payload: Record<string, unknown> | null;
+};
+
+type ProfileIdentityRow = {
+  cpf_cnpj: string | null;
+  email: string | null;
+};
+
+function normalizeProductTier(value: unknown): ProductTier | null {
+  if (value === "essential" || value === "strategic") {
+    return value;
+  }
+
+  return null;
+}
+
+function normalizeGrantKind(value: unknown): "trial" | "subscription" | "upgrade" {
+  if (value === "trial" || value === "subscription" || value === "upgrade") {
+    return value;
+  }
+
+  return "subscription";
+}
+
+function normalizeTokenSubscriptionPlan(value: unknown): string | null {
+  if (value === "monthly" || value === "annual") {
+    return value;
+  }
+
+  return null;
+}
+
+function readNestedString(source: unknown, path: string[]): string | null {
+  let current: unknown = source;
+
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return null;
+    }
+
+    current = (current as Record<string, unknown>)[key];
+  }
+
+  return typeof current === "string" && current.trim() ? current.trim() : null;
+}
+
+function normalizeDateIso(value: string | null | undefined): string | null {
+  if (!value) return null;
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function addDaysToIso(baseIso: string, days: number): string {
+  const date = new Date(baseIso);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString();
+}
+
+function resolveTokenStartedAt(token: SignupTokenRow, now: Date): string {
+  const rawPayload = token.raw_payload;
+
+  return (
+    normalizeDateIso(
+      readNestedString(rawPayload, ["Subscription", "start_date"])
+    ) ??
+    normalizeDateIso(
+      readNestedString(rawPayload, ["approved_date"])
+    ) ??
+    normalizeDateIso(token.created_at) ??
+    now.toISOString()
+  );
+}
+
+function resolveTokenEndsAt(params: {
+  token: SignupTokenRow;
+  startedAt: string;
+  grantKind: "trial" | "subscription" | "upgrade";
+}): string | null {
+  const { token, startedAt, grantKind } = params;
+  const rawPayload = token.raw_payload;
+
+  const subscriptionEnd =
+    normalizeDateIso(
+      readNestedString(rawPayload, [
+        "Subscription",
+        "customer_access",
+        "access_until",
+      ])
+    ) ??
+    normalizeDateIso(
+      readNestedString(rawPayload, ["Subscription", "next_payment"])
+    );
+
+  if (subscriptionEnd) {
+    return subscriptionEnd;
+  }
+
+  if (grantKind === "trial") {
+    const trialDays =
+      typeof token.trial_days === "number" && token.trial_days > 0
+        ? token.trial_days
+        : token.product_tier === "strategic"
+          ? 7
+          : 15;
+
+    return addDaysToIso(startedAt, trialDays);
+  }
+
+  return normalizeDateIso(token.expires_at);
+}
+
+function sortPendingTokensByPriority(tokens: SignupTokenRow[]): SignupTokenRow[] {
+  return [...tokens].sort((a, b) => {
+    const aTierScore = a.product_tier === "strategic" ? 200 : 100;
+    const bTierScore = b.product_tier === "strategic" ? 200 : 100;
+
+    const aKindScore = a.grant_kind === "subscription" || a.grant_kind === "upgrade" ? 20 : 10;
+    const bKindScore = b.grant_kind === "subscription" || b.grant_kind === "upgrade" ? 20 : 10;
+
+    const priorityDiff = bTierScore + bKindScore - (aTierScore + aKindScore);
+
+    if (priorityDiff !== 0) return priorityDiff;
+
+    return (
+      new Date(b.created_at ?? 0).getTime() -
+      new Date(a.created_at ?? 0).getTime()
+    );
+  });
+}
+
+async function consumePendingSignupTokensForUser(params: {
+  supabase: SupabaseClient;
+  userId: string;
+  now: Date;
+}) {
+  const { supabase, userId, now } = params;
+
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("cpf_cnpj, email")
+    .eq("user_id", userId)
+    .maybeSingle<ProfileIdentityRow>();
+
+  if (profileError) {
+    console.error(
+      "[access/reconcile] Erro ao buscar perfil para consumir token pendente:",
+      profileError,
+    );
+    return;
+  }
+
+  const cpf = String(profile?.cpf_cnpj ?? "").replace(/\D/g, "");
+  const email = String(profile?.email ?? "").trim().toLowerCase();
+
+  const tokenFilters = [`used_by.eq.${userId}`];
+
+  if (cpf) {
+    tokenFilters.push(`cpf_cnpj.eq.${cpf}`);
+  }
+
+  if (email) {
+    tokenFilters.push(`email.eq.${email}`);
+  }
+
+  const { data: tokens, error: tokensError } = await supabase
+    .from("signup_tokens")
+    .select(
+      `
+        id,
+        token,
+        created_at,
+        expires_at,
+        used_at,
+        product_tier,
+        grant_kind,
+        trial_days,
+        subscription_plan,
+        source,
+        notes,
+        used_by,
+        cpf_cnpj,
+        email,
+        order_id,
+        subscription_id,
+        raw_payload
+      `,
+    )
+    .or(tokenFilters.join(","))
+    .returns<SignupTokenRow[]>();
+
+  if (tokensError) {
+    console.error(
+      "[access/reconcile] Erro ao buscar tokens pendentes do usuário:",
+      tokensError,
+    );
+    return;
+  }
+
+  const pendingTokens = sortPendingTokensByPriority(
+    (tokens ?? []).filter((token) => {
+      const productTier = normalizeProductTier(token.product_tier);
+      const grantKind = normalizeGrantKind(token.grant_kind);
+      const isUsableKind =
+        grantKind === "subscription" || grantKind === "upgrade" || grantKind === "trial";
+
+      return Boolean(productTier && isUsableKind && !token.used_at);
+    }),
+  );
+
+  for (const token of pendingTokens) {
+    const productTier = normalizeProductTier(token.product_tier);
+
+    if (!productTier) continue;
+
+    const grantKind = normalizeGrantKind(token.grant_kind);
+    const startedAt = resolveTokenStartedAt(token, now);
+    const endsAt = resolveTokenEndsAt({ token, startedAt, grantKind });
+    const subscriptionPlan = normalizeTokenSubscriptionPlan(
+      token.subscription_plan,
+    );
+
+    const { data: existingGrant, error: existingGrantError } = await supabase
+      .from("user_access_grants")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("source_token_id", token.id)
+      .maybeSingle<{ id: string }>();
+
+    if (existingGrantError) {
+      console.error(
+        "[access/reconcile] Erro ao verificar grant existente:",
+        existingGrantError,
+      );
+      continue;
+    }
+
+    if (!existingGrant) {
+      const { error: insertGrantError } = await supabase
+        .from("user_access_grants")
+        .insert({
+          user_id: userId,
+          product_tier: productTier,
+          grant_kind: grantKind,
+          status: "active",
+          source: token.source ?? "signup_token",
+          source_token_id: token.id,
+          subscription_plan: subscriptionPlan,
+          started_at: startedAt,
+          ends_at: endsAt,
+          activated_at: now.toISOString(),
+          consumed_at: null,
+          canceled_at: null,
+          origin_grant_id: null,
+          fallback_product_tier: null,
+          fallback_reference: null,
+          metadata: {
+            order_id: token.order_id,
+            subscription_id: token.subscription_id,
+            token: token.token,
+            notes: token.notes,
+          },
+        });
+
+      if (insertGrantError) {
+        console.error(
+          "[access/reconcile] Erro ao criar grant a partir do token:",
+          insertGrantError,
+        );
+        continue;
+      }
+    }
+
+    const { error: tokenUpdateError } = await supabase
+      .from("signup_tokens")
+      .update({
+        used_by: userId,
+        used_at: now.toISOString(),
+      })
+      .eq("id", token.id);
+
+    if (tokenUpdateError) {
+      console.error(
+        "[access/reconcile] Erro ao marcar token como usado:",
+        tokenUpdateError,
+      );
+    }
+  }
+}
+
 export async function reconcileUserAccessSnapshot(params: {
   supabase: SupabaseClient;
   userId: string;
@@ -297,6 +610,12 @@ export async function reconcileUserAccessSnapshot(params: {
       "userId é obrigatório para reconciliar o snapshot de acesso."
     );
   }
+
+  await consumePendingSignupTokensForUser({
+    supabase,
+    userId: normalizedUserId,
+    now,
+  });
 
   const currentAccess = await getCurrentUserAccessByUserId(
     supabase,

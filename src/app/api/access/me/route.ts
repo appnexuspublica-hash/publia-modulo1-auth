@@ -265,6 +265,25 @@ export async function GET() {
       );
     }
 
+    const {
+      data: { user: authenticatedUser },
+    } = await supabase.auth.getUser();
+
+    if (authenticatedUser) {
+      try {
+        await reconcileUserAccessSnapshot({
+          supabase,
+          userId: authenticatedUser.id,
+          now: new Date(),
+        });
+      } catch (snapshotError) {
+        console.error(
+          "[access/me] erro ao reconciliar snapshot user_access:",
+          snapshotError
+        );
+      }
+    }
+
     const currentAccess = await getCurrentUserAccess(supabase);
     const resolved = currentAccess.resolved;
 
@@ -281,19 +300,6 @@ export async function GET() {
     const isAdmin =
       Boolean(profile?.is_admin) ||
       String(profile?.role ?? "").toLowerCase() === "admin";
-
-    try {
-      await reconcileUserAccessSnapshot({
-        supabase,
-        userId: user.id,
-        now: new Date(),
-      });
-    } catch (snapshotError) {
-      console.error(
-        "[access/me] erro ao reconciliar snapshot user_access:",
-        snapshotError
-      );
-    }
 
     const ui = getResolvedUiState(resolved);
 

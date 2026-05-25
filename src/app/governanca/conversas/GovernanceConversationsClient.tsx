@@ -1,0 +1,698 @@
+// src/app/governanca/conversas/GovernanceConversationsClient.tsx
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Bot,
+  Building2,
+  Clock3,
+  ExternalLink,
+  Loader2,
+  Lock,
+  MessageSquarePlus,
+  Send,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+
+import GovernanceHeader from "../components/GovernanceHeader";
+import GovernanceSidebar from "../components/GovernanceSidebar";
+import {
+  getGovernanceFunctionalRoleLabel,
+  getGovernanceResponseModeLabel,
+  getGovernanceTechnicalRoleLabel,
+  getGovernanceVisibilityLabel,
+  getOrganizationStatusLabel,
+  type GovernanceContext,
+  type GovernanceConversation,
+  type GovernanceConversationVisibility,
+  type GovernanceMessage,
+  type GovernanceResponseMode,
+} from "@/types/governance";
+
+type GovernanceConversationsClientProps = {
+  userId: string;
+  userLabel: string;
+  userEmail: string | null;
+  context: GovernanceContext;
+  initialConversations: GovernanceConversation[];
+  initialMessages: GovernanceMessage[];
+};
+
+const responseModes: Array<{
+  value: GovernanceResponseMode;
+  label: string;
+}> = [
+  { value: "objective", label: "Objetivo" },
+  { value: "summary", label: "Resumo" },
+  { value: "checklist", label: "Checklist" },
+  { value: "technical_opinion", label: "Parecer técnico" },
+  { value: "risk_analysis", label: "Análise de risco" },
+  { value: "draft", label: "Minuta" },
+  { value: "manager_guidance", label: "Orientação ao gestor" },
+];
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function mergeMessages(
+  currentMessages: GovernanceMessage[],
+  newMessages: GovernanceMessage[],
+) {
+  const map = new Map<string, GovernanceMessage>();
+
+  for (const message of currentMessages) {
+    map.set(message.id, message);
+  }
+
+  for (const message of newMessages) {
+    map.set(message.id, message);
+  }
+
+  return Array.from(map.values()).sort((a, b) => {
+    return (
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  });
+}
+
+export default function GovernanceConversationsClient({
+  userId,
+  userLabel,
+  userEmail,
+  context,
+  initialConversations,
+  initialMessages,
+}: GovernanceConversationsClientProps) {
+  const router = useRouter();
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const [selectedConversationId, setSelectedConversationId] = useState<
+    string | null
+  >(initialConversations[0]?.id ?? null);
+
+  const [messages, setMessages] =
+    useState<GovernanceMessage[]>(initialMessages);
+
+  const [title, setTitle] = useState("Nova conversa institucional");
+  const [category, setCategory] = useState("");
+  const [responseMode, setResponseMode] =
+    useState<GovernanceResponseMode>("objective");
+  const [visibility, setVisibility] =
+    useState<GovernanceConversationVisibility>("private");
+
+  const [messageText, setMessageText] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [messageError, setMessageError] = useState<string | null>(null);
+
+  const [pendingAssistantConversationId, setPendingAssistantConversationId] =
+    useState<string | null>(null);
+
+  const [isCreatingConversation, startCreateConversationTransition] =
+    useTransition();
+  const [isSendingMessage, startSendMessageTransition] = useTransition();
+
+  const { organization, membership } = context;
+
+  const selectedConversation = useMemo(() => {
+    return (
+      initialConversations.find(
+        (conversation) => conversation.id === selectedConversationId,
+      ) ?? initialConversations[0] ?? null
+    );
+  }, [initialConversations, selectedConversationId]);
+
+  const selectedMessages = useMemo(() => {
+    if (!selectedConversation) return [];
+
+    return messages.filter(
+      (message) => message.conversation_id === selectedConversation.id,
+    );
+  }, [messages, selectedConversation]);
+
+  const isWaitingForAssistant =
+    Boolean(selectedConversation) &&
+    pendingAssistantConversationId === selectedConversation?.id;
+
+  useEffect(() => {
+    setMessages((currentMessages) =>
+      mergeMessages(currentMessages, initialMessages),
+    );
+  }, [initialMessages]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [selectedConversationId, selectedMessages.length, isWaitingForAssistant]);
+
+  async function handleCreateConversation() {
+    setErrorMessage(null);
+
+    startCreateConversationTransition(async () => {
+      try {
+        const response = await fetch("/api/governance/conversations", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title,
+            category,
+            responseMode,
+            visibility,
+          }),
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            payload?.error ?? "Não foi possível criar a conversa.",
+          );
+        }
+
+        setSelectedConversationId(payload.conversation.id);
+        setTitle("Nova conversa institucional");
+        setCategory("");
+        setResponseMode("objective");
+        setVisibility("private");
+
+        router.refresh();
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado ao criar conversa.";
+
+        setErrorMessage(message);
+      }
+    });
+  }
+
+  async function handleSendMessage() {
+    const content = messageText.trim();
+
+    if (!selectedConversation) {
+      setMessageError("Selecione ou crie uma conversa antes de enviar.");
+      return;
+    }
+
+    if (!content) {
+      setMessageError("Digite uma mensagem antes de enviar.");
+      return;
+    }
+
+    setMessageError(null);
+    setMessageText("");
+    setPendingAssistantConversationId(selectedConversation.id);
+
+    startSendMessageTransition(async () => {
+      try {
+        const response = await fetch("/api/governance/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            conversationId: selectedConversation.id,
+            content,
+          }),
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            payload?.error ?? "Não foi possível gerar a resposta da IA.",
+          );
+        }
+
+        const newMessages = [
+          payload.userMessage as GovernanceMessage,
+          payload.assistantMessage as GovernanceMessage,
+        ].filter(Boolean);
+
+        setMessages((currentMessages) =>
+          mergeMessages(currentMessages, newMessages),
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado ao enviar mensagem.";
+
+        setMessageError(message);
+        setMessageText(content);
+      } finally {
+        setPendingAssistantConversationId(null);
+      }
+    });
+  }
+
+  function handleMessageKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter") return;
+
+    event.preventDefault();
+    handleSendMessage();
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
+      <GovernanceHeader
+        userLabel={userLabel}
+        userEmail={userEmail}
+        organizationName={organization.name}
+        organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
+      />
+
+      <div className="flex min-h-0 flex-1">
+        <GovernanceSidebar
+          organizationName={organization.name}
+          functionalRoleLabel={getGovernanceFunctionalRoleLabel(
+            membership.functional_role,
+          )}
+          technicalRoleLabel={getGovernanceTechnicalRoleLabel(
+            membership.technical_role,
+          )}
+        />
+
+        <main className="grid min-w-0 flex-1 grid-cols-1 gap-6 overflow-hidden p-6 xl:grid-cols-[380px_1fr]">
+          <section className="flex min-h-0 flex-col rounded-3xl border border-[#dedede] bg-white shadow-sm">
+            <div className="border-b border-[#dedede] p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
+                    <Building2 size={14} />
+                    Conversas institucionais
+                  </div>
+
+                  <h1 className="text-xl font-bold text-slate-950">
+                    Conversas do órgão
+                  </h1>
+
+                  <p className="mt-1 text-sm leading-6 text-slate-600">
+                    Histórico vinculado à organização atual, separado dos planos
+                    individuais.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5 space-y-3 rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                <div>
+                  <label
+                    htmlFor="governance-conversation-title"
+                    className="text-xs font-semibold text-slate-700"
+                  >
+                    Título
+                  </label>
+
+                  <input
+                    id="governance-conversation-title"
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    className="mt-1 w-full rounded-xl border border-[#dedede] bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0f3a4a]"
+                    placeholder="Ex.: Análise de decreto municipal"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="governance-conversation-category"
+                    className="text-xs font-semibold text-slate-700"
+                  >
+                    Categoria
+                  </label>
+
+                  <input
+                    id="governance-conversation-category"
+                    value={category}
+                    onChange={(event) => setCategory(event.target.value)}
+                    className="mt-1 w-full rounded-xl border border-[#dedede] bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0f3a4a]"
+                    placeholder="Ex.: Jurídico, Licitações, Controle Interno"
+                  />
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  <div>
+                    <label
+                      htmlFor="governance-response-mode"
+                      className="text-xs font-semibold text-slate-700"
+                    >
+                      Modo de resposta
+                    </label>
+
+                    <select
+                      id="governance-response-mode"
+                      value={responseMode}
+                      onChange={(event) =>
+                        setResponseMode(
+                          event.target.value as GovernanceResponseMode,
+                        )
+                      }
+                      className="mt-1 w-full rounded-xl border border-[#dedede] bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0f3a4a]"
+                    >
+                      {responseModes.map((mode) => (
+                        <option key={mode.value} value={mode.value}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="governance-visibility"
+                      className="text-xs font-semibold text-slate-700"
+                    >
+                      Visibilidade
+                    </label>
+
+                    <select
+                      id="governance-visibility"
+                      value={visibility}
+                      onChange={(event) =>
+                        setVisibility(
+                          event.target
+                            .value as GovernanceConversationVisibility,
+                        )
+                      }
+                      className="mt-1 w-full rounded-xl border border-[#dedede] bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0f3a4a]"
+                    >
+                      <option value="private">Privada</option>
+                      <option value="organization">Organização</option>
+                    </select>
+                  </div>
+                </div>
+
+                {errorMessage && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    {errorMessage}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleCreateConversation}
+                  disabled={isCreatingConversation}
+                  className="flex w-full items-center justify-center gap-2 rounded-2xl bg-[#0f3a4a] px-4 py-3 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isCreatingConversation ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <MessageSquarePlus size={18} />
+                  )}
+                  Nova conversa
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              {initialConversations.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-[#dedede] bg-[#f8f8f8] p-5 text-sm text-slate-600">
+                  Nenhuma conversa institucional criada ainda. Crie a primeira
+                  conversa para validar o fluxo do Governança.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {initialConversations.map((conversation) => {
+                    const isSelected =
+                      conversation.id === selectedConversation?.id;
+
+                    return (
+                      <button
+                        key={conversation.id}
+                        type="button"
+                        onClick={() =>
+                          setSelectedConversationId(conversation.id)
+                        }
+                        className={[
+                          "w-full rounded-2xl border p-4 text-left transition",
+                          isSelected
+                            ? "border-[#0f3a4a] bg-[#f8f8f8]"
+                            : "border-[#dedede] bg-white hover:bg-[#f8f8f8]",
+                        ].join(" ")}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <h2 className="line-clamp-2 text-sm font-bold text-slate-950">
+                              {conversation.title}
+                            </h2>
+
+                            <p className="mt-1 text-xs text-slate-500">
+                              {conversation.category || "Sem categoria"}
+                            </p>
+                          </div>
+
+                          {conversation.visibility === "private" ? (
+                            <Lock
+                              size={16}
+                              className="shrink-0 text-slate-500"
+                            />
+                          ) : (
+                            <Users
+                              size={16}
+                              className="shrink-0 text-slate-500"
+                            />
+                          )}
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
+                          <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
+                            {getGovernanceResponseModeLabel(
+                              conversation.response_mode,
+                            )}
+                          </span>
+
+                          <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
+                            {getGovernanceVisibilityLabel(
+                              conversation.visibility,
+                            )}
+                          </span>
+                        </div>
+
+                        <div className="mt-3 flex items-center gap-1 text-[11px] text-slate-500">
+                          <Clock3 size={13} />
+                          {formatDateTime(conversation.updated_at)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="flex min-h-0 flex-col rounded-3xl border border-[#dedede] bg-white shadow-sm">
+            {selectedConversation ? (
+              <>
+                <div className="border-b border-[#dedede] p-6">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
+                        <ShieldCheck size={14} />
+                        organization_id: {organization.id}
+                      </div>
+
+                      <h2 className="text-2xl font-bold text-slate-950">
+                        {selectedConversation.title}
+                      </h2>
+
+                      <p className="mt-2 text-sm text-slate-600">
+                        {selectedConversation.category ||
+                          "Conversa institucional sem categoria definida."}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col gap-3">
+                      <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-xs text-slate-700">
+                        <p>
+                          <strong>Modo:</strong>{" "}
+                          {getGovernanceResponseModeLabel(
+                            selectedConversation.response_mode,
+                          )}
+                        </p>
+
+                        <p className="mt-1">
+                          <strong>Visibilidade:</strong>{" "}
+                          {getGovernanceVisibilityLabel(
+                            selectedConversation.visibility,
+                          )}
+                        </p>
+                      </div>
+
+                      <Link
+                        href={`/governanca/conversas/${selectedConversation.id}`}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[#0f3a4a] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110"
+                      >
+                        <ExternalLink size={14} />
+                        Abrir tela dedicada
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-y-auto bg-[#f8f8f8] p-6">
+                  {selectedMessages.length === 0 && !isWaitingForAssistant ? (
+                    <div className="flex h-full items-center justify-center">
+                      <div className="max-w-xl text-center">
+                        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
+                          <MessageSquarePlus size={26} />
+                        </div>
+
+                        <h3 className="text-xl font-bold text-slate-950">
+                          Envie a primeira mensagem
+                        </h3>
+
+                        <p className="mt-3 text-sm leading-6 text-slate-600">
+                          A mensagem será salva em governance_messages e a IA do
+                          Governança responderá usando o modo institucional da
+                          conversa.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {selectedMessages.map((message) => {
+                        const isCurrentUser =
+                          message.role === "user" && message.user_id === userId;
+
+                        const isAssistant = message.role === "assistant";
+
+                        return (
+                          <div
+                            key={message.id}
+                            className={[
+                              "flex",
+                              isCurrentUser ? "justify-end" : "justify-start",
+                            ].join(" ")}
+                          >
+                            <div
+                              className={[
+                                "overflow-x-auto break-words rounded-3xl px-4 py-3 text-sm leading-6 shadow-sm",
+                                isCurrentUser
+                                  ? "max-w-[78%] bg-[#0f3a4a] text-white"
+                                  : "max-w-[88%] border border-[#dedede] bg-white text-slate-800",
+                              ].join(" ")}
+                            >
+                              {isAssistant && (
+                                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#0f3a4a]">
+                                  <Bot size={15} />
+                                  Publ.IA Governança
+                                </div>
+                              )}
+
+                              <p className="whitespace-pre-wrap">
+                                {message.content}
+                              </p>
+
+                              <p
+                                className={[
+                                  "mt-2 text-[11px]",
+                                  isCurrentUser
+                                    ? "text-white/70"
+                                    : "text-slate-400",
+                                ].join(" ")}
+                              >
+                                {formatDateTime(message.created_at)}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {isWaitingForAssistant && (
+                        <div className="flex justify-start">
+                          <div className="max-w-[88%] rounded-3xl border border-[#dedede] bg-white px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm">
+                            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#0f3a4a]">
+                              <Bot size={15} />
+                              Publ.IA Governança
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <Loader2
+                                size={16}
+                                className="animate-spin text-[#0f3a4a]"
+                              />
+                              <span>Elaborando resposta institucional...</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div ref={messagesEndRef} />
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-[#dedede] bg-white p-4">
+                  {messageError && (
+                    <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      {messageError}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-3 rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm text-slate-700">
+                    <input
+                      value={messageText}
+                      onChange={(event) => setMessageText(event.target.value)}
+                      onKeyDown={handleMessageKeyDown}
+                      disabled={isSendingMessage}
+                      placeholder={
+                        isSendingMessage
+                          ? "A Publ.IA Governança está respondendo..."
+                          : "Digite uma mensagem institucional..."
+                      }
+                      className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={handleSendMessage}
+                      disabled={isSendingMessage || !messageText.trim()}
+                      className="flex h-10 w-10 items-center justify-center rounded-full bg-[#0f3a4a] text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label="Enviar mensagem"
+                    >
+                      {isSendingMessage ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Send size={18} />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <div className="max-w-xl text-center">
+                  <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
+                    <MessageSquarePlus size={26} />
+                  </div>
+
+                  <h2 className="text-xl font-bold text-slate-950">
+                    Crie a primeira conversa institucional
+                  </h2>
+
+                  <p className="mt-3 text-sm leading-6 text-slate-600">
+                    As conversas do Governança pertencem ao órgão e são
+                    separadas das conversas individuais do Essencial e do
+                    Estratégico.
+                  </p>
+                </div>
+              </div>
+            )}
+          </section>
+        </main>
+      </div>
+    </div>
+  );
+}

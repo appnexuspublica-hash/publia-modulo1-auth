@@ -3,6 +3,10 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
+function isGovernancePublicRoute(pathname: string) {
+  return pathname === "/governanca/login";
+}
+
 function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
   for (const cookie of req.cookies.getAll()) {
     if (cookie.name.startsWith("sb-")) {
@@ -16,19 +20,14 @@ function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
   }
 }
 
-function isGovernancePublicRoute(pathname: string) {
-  return pathname === "/governanca/login";
-}
-
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
-  const res = NextResponse.next();
 
-  // A página de login institucional precisa ficar pública.
-  // Se ela for protegida, o app entra em loop de 307.
   if (isGovernancePublicRoute(pathname)) {
-    return res;
+    return NextResponse.next();
   }
+
+  const res = NextResponse.next();
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -47,7 +46,7 @@ export async function middleware(req: NextRequest) {
         res.cookies.set({ name, value, ...options });
       },
       remove(name, options) {
-        res.cookies.set({ name, value: "", ...options });
+        res.cookies.set({ name, value: "", ...options, maxAge: 0 });
       },
     },
   });
@@ -57,7 +56,7 @@ export async function middleware(req: NextRequest) {
     error,
   } = await supabase.auth.getUser();
 
-  if (error?.name === "AuthSessionMissingError") {
+  if (error?.name === "AuthSessionMissingError" || !user) {
     if (pathname.startsWith("/governanca")) {
       return NextResponse.redirect(new URL("/governanca/login", req.url));
     }
@@ -80,10 +79,6 @@ export async function middleware(req: NextRequest) {
   }
 
   if (pathname.startsWith("/governanca")) {
-    if (!user) {
-      return NextResponse.redirect(new URL("/governanca/login", req.url));
-    }
-
     const { data: membership, error: membershipError } = await supabase
       .from("organization_members")
       .select("id, status, organization_id")
@@ -94,7 +89,6 @@ export async function middleware(req: NextRequest) {
 
     if (membershipError) {
       console.error("[middleware] governance membership error:", membershipError);
-
       return NextResponse.redirect(new URL("/governanca/login", req.url));
     }
 
