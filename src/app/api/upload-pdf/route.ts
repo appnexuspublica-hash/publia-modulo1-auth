@@ -5,11 +5,11 @@ import {
   buildAccessContext,
   evaluateAccessWithAdmin,
   getAccessSummary,
+  getPdfUploadMaxMbForTier,
   getPdfUploadsPerMonthForTier,
 } from "@/lib/access-control";
 import type { AccessStatus, PdfPeriod, ProductTier } from "@/types/access";
 
-const PDF_UPLOAD_MAX_MB = 30;
 const TRIAL_PDF_LIMIT = 10;
 
 const ESSENTIAL_PDFS_PER_CONVERSATION = 3;
@@ -430,15 +430,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const maxBytes = PDF_UPLOAD_MAX_MB * 1024 * 1024;
-
-    if (fileSizeBytes > maxBytes) {
-      return NextResponse.json(
-        { error: `O PDF excede o limite de ${PDF_UPLOAD_MAX_MB} MB.` },
-        { status: 400 }
-      );
-    }
-
     const { data: conversation, error: conversationError } = await supabase
       .from("conversations")
       .select("id")
@@ -481,6 +472,23 @@ export async function POST(request: NextRequest) {
           },
         },
         { status: 403 }
+      );
+    }
+
+    const pdfUploadMaxMb = getPdfUploadMaxMbForTier(planValidation.productTier);
+    const maxBytes = pdfUploadMaxMb * 1024 * 1024;
+
+    if (fileSizeBytes > maxBytes) {
+      const sizeMb = (fileSizeBytes / (1024 * 1024)).toFixed(1);
+
+      return NextResponse.json(
+        {
+          error: `PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB para o seu plano.`,
+          code: "PDF_TOO_LARGE",
+          uploadMaxMb: pdfUploadMaxMb,
+          productTier: planValidation.productTier,
+        },
+        { status: 400 }
       );
     }
 
@@ -614,6 +622,7 @@ export async function POST(request: NextRequest) {
         ),
         isAdmin: planValidation.isAdmin,
         productTier: planValidation.productTier,
+        pdfUploadMaxMb,
         pdfUsage: {
           limit: planValidation.limit,
           used: planValidation.used + 1,

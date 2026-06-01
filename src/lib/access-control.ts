@@ -54,6 +54,10 @@ const GOVERNANCE_TRIAL_MESSAGE_LIMIT = 75;
 
 const TRIAL_PDF_LIMIT = 10;
 
+const ESSENTIAL_PDF_UPLOAD_MAX_MB = 48;
+const STRATEGIC_PDF_UPLOAD_MAX_MB = 90;
+const GOVERNANCE_PDF_UPLOAD_MAX_MB = 120;
+
 const ESSENTIAL_SUBSCRIPTION_PDF_LIMIT_MONTH = 25;
 const STRATEGIC_SUBSCRIPTION_PDF_LIMIT_MONTH = 40;
 
@@ -121,6 +125,18 @@ export function getPdfUploadsPerMonthForTier(productTier: ProductTier): number |
     case "essential":
     default:
       return ESSENTIAL_SUBSCRIPTION_PDF_LIMIT_MONTH;
+  }
+}
+
+export function getPdfUploadMaxMbForTier(productTier: ProductTier): number {
+  switch (productTier) {
+    case "governance":
+      return GOVERNANCE_PDF_UPLOAD_MAX_MB;
+    case "strategic":
+      return STRATEGIC_PDF_UPLOAD_MAX_MB;
+    case "essential":
+    default:
+      return ESSENTIAL_PDF_UPLOAD_MAX_MB;
   }
 }
 
@@ -194,7 +210,7 @@ export function getBrandConfig(productTier: ProductTier): BrandConfig {
       return {
         productName: "Publ.IA Estratégico",
         productLabel: "Publ.IA ESTRATÉGICO",
-        versionLabel: "2.0",
+        versionLabel: "2.01",
         vendorLabel: "Nexus Pública",
         accentVariant: "strategic",
       };

@@ -425,7 +425,7 @@ export async function GET() {
         versionLabel: isAdmin
           ? ""
           : productTier === "strategic"
-            ? "2.0"
+            ? "2.01"
             : "1.7",
         vendorLabel: "Nexus Pública",
         accentVariant: productTier,

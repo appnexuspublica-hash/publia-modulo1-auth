@@ -132,7 +132,21 @@ function getLegacyStatusLabel(access: FrontendAccessSummary | null) {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const MAX_PDF_SIZE_MB = 30;
+const ESSENTIAL_PDF_UPLOAD_MAX_MB = 48;
+const STRATEGIC_PDF_UPLOAD_MAX_MB = 90;
+const GOVERNANCE_PDF_UPLOAD_MAX_MB = 120;
+
+function getPdfUploadMaxMbForTier(productTier: string | null | undefined) {
+  switch (productTier) {
+    case "governance":
+      return GOVERNANCE_PDF_UPLOAD_MAX_MB;
+    case "strategic":
+      return STRATEGIC_PDF_UPLOAD_MAX_MB;
+    case "essential":
+    default:
+      return ESSENTIAL_PDF_UPLOAD_MAX_MB;
+  }
+}
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 const SIDEBAR_FEEDBACK_DURATION_MS = 5000;
 
@@ -796,6 +810,11 @@ export default function ChatPageClient({
   }, [access]);
 
   const resolvedProductTier = access?.resolvedAccess?.effectiveProductTier ?? null;
+  const currentProductTier = resolvedProductTier ?? access?.productTier ?? null;
+  const pdfUploadMaxMb = useMemo(
+    () => getPdfUploadMaxMbForTier(currentProductTier),
+    [currentProductTier]
+  );
   const isStrategic =
     resolvedProductTier === "strategic" || access?.productTier === "strategic";
   const theme = useMemo(() => getChatTheme(isStrategic), [isStrategic]);
@@ -2246,10 +2265,10 @@ export default function ChatPageClient({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const maxBytes = MAX_PDF_SIZE_MB * 1024 * 1024;
+    const maxBytes = pdfUploadMaxMb * 1024 * 1024;
     if (file.size > maxBytes) {
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      showToast(`PDF grande (${sizeMb} MB). Limite atual: ${MAX_PDF_SIZE_MB} MB.`, {
+      showToast(`PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB.`, {
         type: "warning",
         persistent: true,
       });

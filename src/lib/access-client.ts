@@ -90,7 +90,7 @@ function normalizeBrand(input: any, productTier: ProductTier): BrandConfig {
     strategic: {
       productName: "Publ.IA Estratégico",
       productLabel: "Publ.IA ESTRATÉGICO",
-      versionLabel: "2.0",
+      versionLabel: "2.01",
       vendorLabel: "Nexus Pública",
       accentVariant: "strategic",
     },

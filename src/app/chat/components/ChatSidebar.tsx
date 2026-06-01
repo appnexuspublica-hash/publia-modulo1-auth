@@ -307,7 +307,7 @@ export function ChatSidebar({
       strategic: {
         productName: "Publ.IA Estratégico",
         productLabel: "Publ.IA ESTRATÉGICO",
-        versionLabel: "2.0",
+        versionLabel: "2.01",
         vendorLabel: "Nexus Pública",
         accentVariant: "strategic",
       },

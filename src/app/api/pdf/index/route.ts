@@ -1,13 +1,16 @@
 // src/app/api/pdf/index/route.ts
 import { NextResponse } from "next/server";
 
-import { getAccessSummary, syncEffectiveAccessStatus } from "@/lib/access-control";
+import {
+  buildAccessContext,
+  getAccessSummary,
+  getPdfUploadMaxMbForTier,
+  syncEffectiveAccessStatus,
+} from "@/lib/access-control";
 import { processPdfForIndexing } from "@/lib/pdf/processForIndexing";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-
-const PDF_UPLOAD_MAX_MB = Number(process.env.PDF_UPLOAD_MAX_MB ?? 30);
 
 const uuidRe =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -79,6 +82,13 @@ export async function POST(req: Request) {
       );
     }
 
+    const accessContext = buildAccessContext({
+      summary: accessSummary,
+      effectiveStatus: accessDecision.effectiveStatus,
+      isAdmin: accessDecision.reason === "admin_override",
+    });
+    const pdfUploadMaxMb = getPdfUploadMaxMbForTier(accessContext.productTier);
+
     const body = await req.json().catch(() => null);
     const pdfFileId = String(body?.pdfFileId ?? "").trim();
 
@@ -113,16 +123,17 @@ export async function POST(req: Request) {
         ? Number((pdfRow as any).file_size)
         : null;
 
-    const uploadMaxBytes = PDF_UPLOAD_MAX_MB * 1024 * 1024;
+    const uploadMaxBytes = pdfUploadMaxMb * 1024 * 1024;
 
     if (fileSize !== null && fileSize > uploadMaxBytes) {
       const sizeMb = (fileSize / (1024 * 1024)).toFixed(1);
 
       return NextResponse.json(
         {
-          error: `PDF grande (${sizeMb} MB). Limite atual: ${PDF_UPLOAD_MAX_MB} MB.`,
+          error: `PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB para o seu plano.`,
           code: "PDF_TOO_LARGE",
-          uploadMaxMb: PDF_UPLOAD_MAX_MB,
+          uploadMaxMb: pdfUploadMaxMb,
+          productTier: accessContext.productTier,
         },
         { status: 413 }
       );
