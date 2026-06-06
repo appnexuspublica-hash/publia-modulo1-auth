@@ -127,6 +127,40 @@ export type GovernanceMessage = {
   created_at: string;
 };
 
+
+export type GovernanceIndicators = {
+  organization: {
+    id: string;
+    name: string;
+    seats_limit: number | null;
+  };
+  users: {
+    total: number;
+    active: number;
+    suspended: number;
+    seats_limit: number | null;
+    seats_used: number;
+  };
+  chat: {
+    conversations_total: number;
+    conversations_active: number;
+    messages_total: number;
+  };
+  institutional_documents: {
+    total: number;
+    indexed: number;
+    pending_indexing: number;
+  };
+  official_sources: {
+    total: number;
+    active: number;
+  };
+  audit: {
+    events_total: number;
+    events_last_30_days: number;
+  };
+};
+
 export function getGovernanceFunctionalRoleLabel(
   role: GovernanceFunctionalRole,
 ): string {

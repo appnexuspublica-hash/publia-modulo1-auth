@@ -10,6 +10,7 @@ import {
   Landmark,
   MessageSquare,
   Settings,
+  ShieldCheck,
   Users,
 } from "lucide-react";
 
@@ -27,10 +28,11 @@ const navigationItems = [
     enabled: true,
   },
   {
-    label: "Conversas",
+    label: "Chat Governança",
     icon: MessageSquare,
-    href: "/governanca/conversas",
+    href: "/governanca/chat",
     enabled: true,
+    alsoActiveWhen: ["/governanca/conversas"],
   },
   {
     label: "Usuários",
@@ -42,19 +44,25 @@ const navigationItems = [
     label: "Base institucional",
     icon: BookOpen,
     href: "/governanca/base-institucional",
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Fontes oficiais",
     icon: FileSearch,
     href: "/governanca/fontes-oficiais",
-    enabled: false,
+    enabled: true,
+  },
+  {
+    label: "Auditoria",
+    icon: ShieldCheck,
+    href: "/governanca/auditoria",
+    enabled: true,
   },
   {
     label: "Indicadores",
     icon: BarChart3,
     href: "/governanca/indicadores",
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Configurações",
@@ -100,7 +108,12 @@ export default function GovernanceSidebar({
           const Icon = item.icon;
           const isActive =
             pathname === item.href ||
-            (item.href !== "/governanca" && pathname.startsWith(item.href));
+            (item.href !== "/governanca" && pathname.startsWith(item.href)) ||
+            Boolean(
+              item.alsoActiveWhen?.some((activePath) =>
+                pathname.startsWith(activePath),
+              ),
+            );
 
           if (!item.enabled) {
             return (
