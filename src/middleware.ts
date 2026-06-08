@@ -22,18 +22,10 @@ function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
   }
 }
 
-function redirectToGovernanceLogin(req: NextRequest, sourceResponse: NextResponse) {
-  const redirectResponse = NextResponse.redirect(
-    new URL("/governanca/login", req.url),
-  );
-
+function redirectToLogin(req: NextRequest, sourceResponse: NextResponse) {
+  const redirectResponse = NextResponse.redirect(new URL("/login", req.url));
   copyResponseCookies(sourceResponse, redirectResponse);
-
   return redirectResponse;
-}
-
-function isGovernancePublicRoute(pathname: string) {
-  return pathname === "/governanca/login";
 }
 
 export async function middleware(req: NextRequest) {
@@ -45,9 +37,21 @@ export async function middleware(req: NextRequest) {
     },
   });
 
-  // A página de login institucional precisa ficar pública.
-  // Se ela for protegida, o app entra em loop de 307.
-  if (isGovernancePublicRoute(pathname)) {
+  /*
+    Importante:
+    O Governança foi removido do middleware.
+
+    Motivo:
+    Em produção, o log da Vercel mostrou que o redirect 307 para
+    /governanca/login estava saindo do middleware antes da página abrir.
+
+    A proteção do Governança deve ficar nas próprias páginas e route handlers,
+    onde o Supabase SSR consegue ler a sessão no contexto correto da requisição.
+  */
+
+  const shouldProtectDefaultChat = pathname.startsWith("/chat");
+
+  if (!shouldProtectDefaultChat) {
     return res;
   }
 
@@ -87,47 +91,26 @@ export async function middleware(req: NextRequest) {
     error,
   } = await supabase.auth.getUser();
 
-  if (error?.name === "AuthSessionMissingError") {
-    if (pathname.startsWith("/governanca")) {
-      return redirectToGovernanceLogin(req, res);
-    }
-
-    return res;
-  }
-
   if (error?.code === "refresh_token_not_found") {
     clearSupabaseCookies(req, res);
+    return redirectToLogin(req, res);
+  }
 
-    if (pathname.startsWith("/governanca")) {
-      return redirectToGovernanceLogin(req, res);
-    }
-
-    return res;
+  if (error?.name === "AuthSessionMissingError") {
+    return redirectToLogin(req, res);
   }
 
   if (error) {
     console.error("[middleware] supabase auth error:", error);
   }
 
-  if (pathname.startsWith("/governanca") && !user) {
-    return redirectToGovernanceLogin(req, res);
+  if (!user) {
+    return redirectToLogin(req, res);
   }
-
-  /*
-    Importante:
-    O middleware roda no Edge Runtime e deve validar apenas a sessão.
-    A validação de vínculo institucional em organization_members fica nas páginas
-    e nos route handlers do Governança.
-
-    Motivo:
-    Validar organization_members aqui pode gerar falso redirect em produção,
-    especialmente em navegações RSC/prefetch como /governanca/chat?_rsc=...
-    O log da Vercel mostrou que o 307 estava saindo do middleware antes da página abrir.
-  */
 
   return res;
 }
 
 export const config = {
-  matcher: ["/login", "/chat/:path*", "/governanca/:path*"],
+  matcher: ["/chat/:path*"],
 };
