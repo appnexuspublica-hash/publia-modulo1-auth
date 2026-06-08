@@ -1,17 +1,51 @@
 // src/app/api/governance/auth/login/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const runtime = "nodejs";
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
 }
 
-export async function POST(request: Request) {
+function createSupabaseAuthClient(request: NextRequest, response: NextResponse) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Variáveis públicas do Supabase não configuradas.");
+  }
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
+      },
+      setAll(cookiesToSet) {
+        for (const { name, value, options } of cookiesToSet) {
+          response.cookies.set(name, value, {
+            ...options,
+            path: options?.path ?? "/",
+            sameSite: options?.sameSite ?? "lax",
+            secure: process.env.NODE_ENV === "production",
+            httpOnly: options?.httpOnly ?? true,
+          });
+        }
+      },
+    },
+  });
+}
+
+export async function POST(request: NextRequest) {
+  const response = NextResponse.json({
+    ok: true,
+    redirectTo: "/governanca",
+  });
+
   try {
     const body = await request.json();
 
@@ -21,30 +55,21 @@ export async function POST(request: Request) {
 
     if (cnpj.length !== 14) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Informe um CNPJ válido.",
-        },
+        { ok: false, error: "Informe um CNPJ válido." },
         { status: 400 },
       );
     }
 
     if (cpf.length !== 11) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Informe um CPF válido.",
-        },
+        { ok: false, error: "Informe um CPF válido." },
         { status: 400 },
       );
     }
 
     if (!password) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Informe a senha.",
-        },
+        { ok: false, error: "Informe a senha." },
         { status: 400 },
       );
     }
@@ -59,10 +84,7 @@ export async function POST(request: Request) {
 
     if (organizationError || !organization) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Órgão não encontrado.",
-        },
+        { ok: false, error: "Órgão não encontrado." },
         { status: 404 },
       );
     }
@@ -75,10 +97,7 @@ export async function POST(request: Request) {
 
     if (profileError || !profile?.email || !profile?.user_id) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Usuário não encontrado.",
-        },
+        { ok: false, error: "Usuário não encontrado." },
         { status: 404 },
       );
     }
@@ -92,60 +111,39 @@ export async function POST(request: Request) {
 
     if (memberError || !member) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Usuário não vinculado ao órgão.",
-        },
+        { ok: false, error: "Usuário não vinculado ao órgão." },
         { status: 403 },
       );
     }
 
     if (member.status !== "active") {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Usuário sem acesso ativo ao Governança.",
-        },
+        { ok: false, error: "Usuário sem acesso ativo ao Governança." },
         { status: 403 },
       );
     }
 
-    const supabase = createSupabaseServerClient();
+    const supabase = createSupabaseAuthClient(request, response);
 
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: profile.email,
-      password,
-    });
+    const { data: signInData, error: signInError } =
+      await supabase.auth.signInWithPassword({
+        email: profile.email,
+        password,
+      });
 
-    if (signInError) {
+    if (signInError || !signInData.session) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CPF/CNPJ ou senha inválidos.",
-        },
+        { ok: false, error: "CPF/CNPJ ou senha inválidos." },
         { status: 401 },
       );
     }
 
-    return NextResponse.json(
-      {
-        ok: true,
-        redirectTo: "/governanca",
-      },
-      {
-        headers: {
-          "Cache-Control": "no-store",
-        },
-      },
-    );
+    return response;
   } catch (error) {
     console.error("[governance/auth/login]", error);
 
     return NextResponse.json(
-      {
-        ok: false,
-        error: "Erro interno ao autenticar.",
-      },
+      { ok: false, error: "Erro interno ao autenticar." },
       { status: 500 },
     );
   }

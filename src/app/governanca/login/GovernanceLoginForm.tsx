@@ -2,12 +2,15 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
 }
 
 export default function GovernanceLoginForm() {
+  const router = useRouter();
+
   const [cnpj, setCnpj] = useState("");
   const [cpf, setCpf] = useState("");
   const [password, setPassword] = useState("");
@@ -42,9 +45,8 @@ export default function GovernanceLoginForm() {
         return;
       }
 
-      // Navegação completa para garantir que o navegador grave os cookies
-      // recebidos da Route Handler antes de carregar a área protegida.
-      window.location.assign(data.redirectTo ?? "/governanca");
+      router.replace(data?.redirectTo ?? "/governanca");
+      router.refresh();
     } catch {
       setError("Erro de conexão ao autenticar.");
     } finally {
