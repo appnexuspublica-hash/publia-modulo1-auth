@@ -3,10 +3,32 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { createBrowserClient } from "@supabase/ssr";
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
 }
+
+function createSupabaseBrowserClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Variáveis públicas do Supabase ausentes.");
+  }
+
+  return createBrowserClient(supabaseUrl, supabaseAnonKey);
+}
+
+type LoginResponse = {
+  ok?: boolean;
+  error?: string;
+  redirectTo?: string;
+  session?: {
+    access_token?: string;
+    refresh_token?: string;
+  };
+};
 
 export default function GovernanceLoginForm() {
   const router = useRouter();
@@ -38,15 +60,38 @@ export default function GovernanceLoginForm() {
         }),
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as LoginResponse;
 
       if (!response.ok || !data?.ok) {
         setError(data?.error ?? "Não foi possível autenticar.");
         return;
       }
 
-      window.location.href = String(data?.redirectTo ?? "/governanca");
-    } catch {
+      const accessToken = data.session?.access_token;
+      const refreshToken = data.session?.refresh_token;
+
+      if (!accessToken || !refreshToken) {
+        setError("Sessão não retornada pelo servidor.");
+        return;
+      }
+
+      const supabase = createSupabaseBrowserClient();
+
+      const { error: setSessionError } = await supabase.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+
+      if (setSessionError) {
+        console.error("[GovernanceLoginForm] setSession error:", setSessionError);
+        setError("Login validado, mas a sessão não foi salva no navegador.");
+        return;
+      }
+
+      router.replace(data.redirectTo ?? "/governanca");
+      router.refresh();
+    } catch (loginError) {
+      console.error("[GovernanceLoginForm] login error:", loginError);
       setError("Erro de conexão ao autenticar.");
     } finally {
       setLoading(false);
