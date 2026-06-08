@@ -45,8 +45,7 @@ export default function GovernanceLoginForm() {
         return;
       }
 
-      router.replace(data?.redirectTo ?? "/governanca");
-      router.refresh();
+      window.location.href = String(data?.redirectTo ?? "/governanca");
     } catch {
       setError("Erro de conexão ao autenticar.");
     } finally {
