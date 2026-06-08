@@ -11,6 +11,9 @@ import type {
 
 import GovernanceChatClient from "./GovernanceChatClient";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 async function getUserCpfLabel(
   supabase: ReturnType<typeof createReadonlySupabaseServerClient>,
   userId: string,
@@ -134,7 +137,7 @@ export default async function GovernanceChatPage() {
     <GovernanceChatClient
       userId={user.id}
       userLabel={userLabel}
-      userEmail={null}
+      userEmail={user.email ?? null}
       context={context}
       initialConversations={conversations}
       initialMessages={initialMessages}

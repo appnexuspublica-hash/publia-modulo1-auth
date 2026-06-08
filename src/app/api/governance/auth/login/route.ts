@@ -1,4 +1,3 @@
-// src/app/api/governance/auth/login/route.ts
 import { NextResponse } from "next/server";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -109,12 +108,13 @@ export async function POST(request: Request) {
 
     const supabase = createSupabaseServerClient();
 
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: profile.email,
-      password,
-    });
+    const { data: signInData, error: signInError } =
+      await supabase.auth.signInWithPassword({
+        email: profile.email,
+        password,
+      });
 
-    if (signInError) {
+    if (signInError || !signInData.session) {
       return NextResponse.json(
         {
           ok: false,
@@ -124,10 +124,18 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({
-      ok: true,
-      redirectTo: "/governanca",
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        redirectTo: "/governanca",
+      },
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      },
+    );
   } catch (error) {
     console.error("[governance/auth/login]", error);
 

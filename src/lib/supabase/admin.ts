@@ -1,4 +1,3 @@
-// src/lib/supabase/admin.ts
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -11,11 +10,15 @@ export function createSupabaseAdminClient(): AdminClient {
   if (!url || !url.startsWith("http")) {
     throw new Error("NEXT_PUBLIC_SUPABASE_URL inválida. Confira seu .env.local");
   }
+
   if (!service) {
     throw new Error("SUPABASE_SERVICE_ROLE_KEY ausente. Confira seu .env.local");
   }
 
   return createClient(url, service, {
-    auth: { autoRefreshToken: false, persistSession: false },
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
   });
 }
