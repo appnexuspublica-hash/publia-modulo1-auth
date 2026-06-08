@@ -1,15 +1,13 @@
+// src/app/governanca/login/GovernanceLoginForm.tsx
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
 }
 
 export default function GovernanceLoginForm() {
-  const router = useRouter();
-
   const [cnpj, setCnpj] = useState("");
   const [cpf, setCpf] = useState("");
   const [password, setPassword] = useState("");
@@ -44,8 +42,9 @@ export default function GovernanceLoginForm() {
         return;
       }
 
-      router.replace(data?.redirectTo ?? "/governanca");
-      router.refresh();
+      // Navegação completa para garantir que o navegador grave os cookies
+      // recebidos da Route Handler antes de carregar a área protegida.
+      window.location.assign(data.redirectTo ?? "/governanca");
     } catch {
       setError("Erro de conexão ao autenticar.");
     } finally {
@@ -65,7 +64,6 @@ export default function GovernanceLoginForm() {
           value={cnpj}
           onChange={(event) => setCnpj(event.target.value)}
           placeholder="00.000.000/0000-00"
-          autoComplete="organization"
           className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 outline-none focus:border-[#0b4a55]"
         />
       </div>
@@ -80,7 +78,6 @@ export default function GovernanceLoginForm() {
           value={cpf}
           onChange={(event) => setCpf(event.target.value)}
           placeholder="000.000.000-00"
-          autoComplete="username"
           className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 outline-none focus:border-[#0b4a55]"
         />
       </div>
@@ -95,7 +92,6 @@ export default function GovernanceLoginForm() {
           value={password}
           onChange={(event) => setPassword(event.target.value)}
           placeholder="Sua senha institucional"
-          autoComplete="current-password"
           className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 outline-none focus:border-[#0b4a55]"
         />
       </div>

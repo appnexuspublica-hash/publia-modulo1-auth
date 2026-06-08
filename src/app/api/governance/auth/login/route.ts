@@ -1,7 +1,11 @@
+// src/app/api/governance/auth/login/route.ts
 import { NextResponse } from "next/server";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
@@ -108,13 +112,12 @@ export async function POST(request: Request) {
 
     const supabase = createSupabaseServerClient();
 
-    const { data: signInData, error: signInError } =
-      await supabase.auth.signInWithPassword({
-        email: profile.email,
-        password,
-      });
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: profile.email,
+      password,
+    });
 
-    if (signInError || !signInData.session) {
+    if (signInError) {
       return NextResponse.json(
         {
           ok: false,
@@ -130,7 +133,6 @@ export async function POST(request: Request) {
         redirectTo: "/governanca",
       },
       {
-        status: 200,
         headers: {
           "Cache-Control": "no-store",
         },

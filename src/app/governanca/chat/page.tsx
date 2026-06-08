@@ -1,3 +1,4 @@
+// src/app/governanca/chat/page.tsx
 import { redirect } from "next/navigation";
 
 import {
@@ -137,7 +138,7 @@ export default async function GovernanceChatPage() {
     <GovernanceChatClient
       userId={user.id}
       userLabel={userLabel}
-      userEmail={user.email ?? null}
+      userEmail={null}
       context={context}
       initialConversations={conversations}
       initialMessages={initialMessages}

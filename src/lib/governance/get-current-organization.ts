@@ -15,19 +15,25 @@ type SupabaseOrganizationMemberRow = GovernanceMembership & {
 export function createReadonlySupabaseServerClient() {
   const cookieStore = cookies();
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseUrl.startsWith("http")) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_URL inválida. Confira seu .env.local");
+  }
+
+  if (!supabaseAnonKey) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_ANON_KEY ausente. Confira seu .env.local");
+  }
 
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      get(name: string) {
-        return cookieStore.get(name)?.value;
+      getAll() {
+        return cookieStore.getAll();
       },
-      set(_name: string, _value: string, _options: any) {
+      setAll() {
         // Server Components não devem modificar cookies.
-      },
-      remove(_name: string, _options: any) {
-        // Server Components não devem modificar cookies.
+        // A renovação/persistência da sessão acontece no middleware.
       },
     },
   });
