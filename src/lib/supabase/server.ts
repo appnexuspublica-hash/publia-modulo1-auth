@@ -34,7 +34,6 @@ export function createSupabaseServerClient() {
             cookieStore.set(name, value, cookieOptions);
           } catch {
             // Server Components não podem alterar cookies.
-            // Em Route Handlers e Server Actions, o set funciona normalmente.
           }
         });
       },

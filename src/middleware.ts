@@ -10,18 +10,6 @@ function redirectToLogin(req: NextRequest) {
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
 
-  /*
-    Governança não é validado aqui.
-
-    Motivo:
-    Em produção, as navegações RSC/prefetch de /governanca podem chegar ao Edge
-    antes do cookie SSR estar legível pelo middleware. As páginas e APIs do
-    Governança continuam protegidas no servidor com supabase.auth.getUser().
-  */
-  if (pathname.startsWith("/governanca")) {
-    return NextResponse.next();
-  }
-
   if (!pathname.startsWith("/chat")) {
     return NextResponse.next();
   }
@@ -74,5 +62,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/chat/:path*", "/governanca/:path*"],
+  matcher: ["/chat/:path*"],
 };

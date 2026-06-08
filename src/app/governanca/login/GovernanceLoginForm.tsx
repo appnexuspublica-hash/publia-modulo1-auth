@@ -3,31 +3,18 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createBrowserClient } from "@supabase/ssr";
+
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 function onlyDigits(value: string) {
   return value.replace(/\D/g, "");
 }
 
-function createSupabaseBrowserClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Variáveis públicas do Supabase ausentes.");
-  }
-
-  return createBrowserClient(supabaseUrl, supabaseAnonKey);
-}
-
 type LoginResponse = {
   ok?: boolean;
   error?: string;
+  email?: string;
   redirectTo?: string;
-  session?: {
-    access_token?: string;
-    refresh_token?: string;
-  };
 };
 
 export default function GovernanceLoginForm() {
@@ -67,23 +54,33 @@ export default function GovernanceLoginForm() {
         return;
       }
 
-      const accessToken = data.session?.access_token;
-      const refreshToken = data.session?.refresh_token;
-
-      if (!accessToken || !refreshToken) {
-        setError("Sessão não retornada pelo servidor.");
+      if (!data.email) {
+        setError("Login validado, mas o e-mail do usuário não foi retornado.");
         return;
       }
 
       const supabase = createSupabaseBrowserClient();
 
-      const { error: setSessionError } = await supabase.auth.setSession({
-        access_token: accessToken,
-        refresh_token: refreshToken,
+      await supabase.auth.signOut({ scope: "local" });
+
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: data.email,
+        password,
       });
 
-      if (setSessionError) {
-        console.error("[GovernanceLoginForm] setSession error:", setSessionError);
+      if (signInError) {
+        console.error("[GovernanceLoginForm] signInWithPassword error:", signInError);
+        setError("CPF/CNPJ ou senha inválidos.");
+        return;
+      }
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session) {
+        console.error("[GovernanceLoginForm] getSession error:", sessionError);
         setError("Login validado, mas a sessão não foi salva no navegador.");
         return;
       }
