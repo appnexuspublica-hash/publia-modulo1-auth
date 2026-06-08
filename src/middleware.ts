@@ -1,27 +1,12 @@
 // src/middleware.ts
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
-
-function isGovernancePublicRoute(pathname: string) {
-  return pathname === "/governanca/login";
-}
-
-function isGovernanceRoute(pathname: string) {
-  return pathname.startsWith("/governanca");
-}
+import { createServerClient } from "@supabase/ssr";
 
 function copyResponseCookies(from: NextResponse, to: NextResponse) {
   for (const cookie of from.cookies.getAll()) {
     to.cookies.set(cookie);
   }
-
-  return to;
-}
-
-function redirectWithCookies(req: NextRequest, res: NextResponse, pathname: string) {
-  const redirectResponse = NextResponse.redirect(new URL(pathname, req.url));
-  return copyResponseCookies(res, redirectResponse);
 }
 
 function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
@@ -37,6 +22,20 @@ function clearSupabaseCookies(req: NextRequest, res: NextResponse) {
   }
 }
 
+function redirectToGovernanceLogin(req: NextRequest, sourceResponse: NextResponse) {
+  const redirectResponse = NextResponse.redirect(
+    new URL("/governanca/login", req.url),
+  );
+
+  copyResponseCookies(sourceResponse, redirectResponse);
+
+  return redirectResponse;
+}
+
+function isGovernancePublicRoute(pathname: string) {
+  return pathname === "/governanca/login";
+}
+
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
 
@@ -47,7 +46,7 @@ export async function middleware(req: NextRequest) {
   });
 
   // A página de login institucional precisa ficar pública.
-  // Se ela for protegida, o app entra em loop de redirect.
+  // Se ela for protegida, o app entra em loop de 307.
   if (isGovernancePublicRoute(pathname)) {
     return res;
   }
@@ -66,9 +65,9 @@ export async function middleware(req: NextRequest) {
         return req.cookies.getAll();
       },
       setAll(cookiesToSet) {
-        cookiesToSet.forEach(({ name, value }) => {
+        for (const { name, value } of cookiesToSet) {
           req.cookies.set(name, value);
-        });
+        }
 
         res = NextResponse.next({
           request: {
@@ -76,16 +75,9 @@ export async function middleware(req: NextRequest) {
           },
         });
 
-        cookiesToSet.forEach(({ name, value, options }) => {
-          const cookieOptions: CookieOptions = {
-            ...options,
-            path: options?.path ?? "/",
-            sameSite: options?.sameSite ?? "lax",
-            secure: process.env.NODE_ENV === "production",
-          };
-
-          res.cookies.set(name, value, cookieOptions);
-        });
+        for (const { name, value, options } of cookiesToSet) {
+          res.cookies.set(name, value, options);
+        }
       },
     },
   });
@@ -96,8 +88,8 @@ export async function middleware(req: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (error?.name === "AuthSessionMissingError") {
-    if (isGovernanceRoute(pathname)) {
-      return redirectWithCookies(req, res, "/governanca/login");
+    if (pathname.startsWith("/governanca")) {
+      return redirectToGovernanceLogin(req, res);
     }
 
     return res;
@@ -106,8 +98,8 @@ export async function middleware(req: NextRequest) {
   if (error?.code === "refresh_token_not_found") {
     clearSupabaseCookies(req, res);
 
-    if (isGovernanceRoute(pathname)) {
-      return redirectWithCookies(req, res, "/governanca/login");
+    if (pathname.startsWith("/governanca")) {
+      return redirectToGovernanceLogin(req, res);
     }
 
     return res;
@@ -117,28 +109,21 @@ export async function middleware(req: NextRequest) {
     console.error("[middleware] supabase auth error:", error);
   }
 
-  if (isGovernanceRoute(pathname)) {
-    if (!user) {
-      return redirectWithCookies(req, res, "/governanca/login");
-    }
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("organization_members")
-      .select("id, status, organization_id")
-      .eq("user_id", user.id)
-      .eq("status", "active")
-      .limit(1)
-      .maybeSingle();
-
-    if (membershipError) {
-      console.error("[middleware] governance membership error:", membershipError);
-      return redirectWithCookies(req, res, "/governanca/login");
-    }
-
-    if (!membership?.organization_id) {
-      return redirectWithCookies(req, res, "/governanca/login");
-    }
+  if (pathname.startsWith("/governanca") && !user) {
+    return redirectToGovernanceLogin(req, res);
   }
+
+  /*
+    Importante:
+    O middleware roda no Edge Runtime e deve validar apenas a sessão.
+    A validação de vínculo institucional em organization_members fica nas páginas
+    e nos route handlers do Governança.
+
+    Motivo:
+    Validar organization_members aqui pode gerar falso redirect em produção,
+    especialmente em navegações RSC/prefetch como /governanca/chat?_rsc=...
+    O log da Vercel mostrou que o 307 estava saindo do middleware antes da página abrir.
+  */
 
   return res;
 }

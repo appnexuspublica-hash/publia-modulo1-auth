@@ -6,6 +6,9 @@ import { createServerClient } from "@supabase/ssr";
 import GovernanceShell from "./GovernanceShell";
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
@@ -36,7 +39,7 @@ export default async function GovernancePage() {
   } = await supabase.auth.getUser();
 
   if (error || !user) {
-    redirect("/login");
+    redirect("/governanca/login");
   }
 
   let userLabel = "CPF não informado";
@@ -51,8 +54,12 @@ export default async function GovernancePage() {
     if (!profileError && profile?.cpf_cnpj) {
       userLabel = profile.cpf_cnpj;
     }
+
+    if (profileError) {
+      console.error("[governanca/page] Erro ao buscar profile:", profileError);
+    }
   } catch (profileError) {
-    console.error("[governanca/page] Erro ao buscar profile:", profileError);
+    console.error("[governanca/page] Erro inesperado ao buscar profile:", profileError);
   }
 
   const governanceContext = await getCurrentGovernanceOrganization(user.id);
@@ -60,7 +67,7 @@ export default async function GovernancePage() {
   return (
     <GovernanceShell
       userLabel={userLabel}
-      userEmail={null}
+      userEmail={user.email ?? null}
       context={governanceContext}
     />
   );
