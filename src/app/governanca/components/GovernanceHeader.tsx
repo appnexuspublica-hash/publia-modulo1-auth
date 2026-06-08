@@ -11,6 +11,17 @@ type GovernanceHeaderProps = {
   organizationStatusLabel: string;
 };
 
+async function handleLogout() {
+  try {
+    await fetch("/logout", {
+      method: "POST",
+      cache: "no-store",
+    });
+  } finally {
+    window.location.href = "/governanca/login";
+  }
+}
+
 export default function GovernanceHeader({
   userLabel,
   organizationName,
@@ -68,12 +79,13 @@ export default function GovernanceHeader({
           </span>
         </div>
 
-        <Link
-          href="/logout"
+        <button
+          type="button"
+          onClick={handleLogout}
           className="rounded-full border border-[#0f8a5f] bg-[#0f8a5f] px-3 py-1.5 font-semibold text-white transition hover:border-[#0b6f4c] hover:bg-[#0b6f4c]"
         >
           SAIR
-        </Link>
+        </button>
       </div>
     </header>
   );

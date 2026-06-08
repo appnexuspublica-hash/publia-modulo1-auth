@@ -2,7 +2,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 
 type ChatHeaderProps = {
   userLabel: string;
@@ -17,6 +16,17 @@ function formatUserLabel(value: string): { label: "Usuário"; value: string } {
     label: "Usuário",
     value: String(value ?? "").trim(),
   };
+}
+
+async function handleLogout() {
+  try {
+    await fetch("/logout", {
+      method: "POST",
+      cache: "no-store",
+    });
+  } finally {
+    window.location.href = "/login";
+  }
 }
 
 export function ChatHeader({
@@ -66,9 +76,13 @@ export function ChatHeader({
           )}
         </span>
 
-        <Link href="/logout" className="text-xs font-semibold text-red-600 hover:text-red-700">
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="text-xs font-semibold text-red-600 hover:text-red-700"
+        >
           [ SAIR ]
-        </Link>
+        </button>
       </div>
     </header>
   );
