@@ -1,4 +1,3 @@
-// src/app/governanca/base-institucional/page.tsx
 import { redirect } from "next/navigation";
 import { BookOpen, ShieldAlert } from "lucide-react";
 
@@ -16,6 +15,45 @@ import {
   getCurrentGovernanceOrganization,
 } from "@/lib/governance/get-current-organization";
 
+type ProfileRow = {
+  cpf_cnpj: string | null;
+};
+
+function formatCpf(value: string | null | undefined) {
+  if (!value) return "CPF não informado";
+
+  const digits = value.replace(/\D/g, "");
+
+  if (digits.length !== 11) {
+    return value;
+  }
+
+  return digits.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4");
+}
+
+async function getGovernanceUserLabel(params: {
+  supabase: ReturnType<typeof createReadonlySupabaseServerClient>;
+  userId: string;
+}) {
+  const { supabase, userId } = params;
+
+  try {
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("cpf_cnpj")
+      .eq("user_id", userId)
+      .maybeSingle<ProfileRow>();
+
+    if (!error && profile?.cpf_cnpj) {
+      return formatCpf(profile.cpf_cnpj);
+    }
+  } catch (error) {
+    console.error("[governance/base-institucional] Erro ao buscar CPF:", error);
+  }
+
+  return "CPF não informado";
+}
+
 export default async function GovernanceInstitutionalBasePage() {
   const supabase = createReadonlySupabaseServerClient();
 
@@ -28,14 +66,19 @@ export default async function GovernanceInstitutionalBasePage() {
     redirect("/governanca/login");
   }
 
+  const userLabel = await getGovernanceUserLabel({
+    supabase,
+    userId: user.id,
+  });
+
   const context = await getCurrentGovernanceOrganization(user.id);
 
   if (!context) {
     return (
       <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
         <GovernanceHeader
-          userLabel={user.email ?? "Usuário"}
-          userEmail={user.email}
+          userLabel={userLabel}
+          userEmail={null}
           organizationName="Governança não configurada"
           organizationStatusLabel="Sem organização"
         />
@@ -112,8 +155,8 @@ export default async function GovernanceInstitutionalBasePage() {
   return (
     <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
       <GovernanceHeader
-        userLabel={user.email ?? "Usuário"}
-        userEmail={user.email}
+        userLabel={userLabel}
+        userEmail={null}
         organizationName={organization.name}
         organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
       />

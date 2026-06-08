@@ -1,3 +1,4 @@
+//src/lib/pdf/processForIndexing.ts
 import OpenAI from "openai";
 
 import { chunkText } from "@/lib/pdf/chunking";
@@ -17,6 +18,11 @@ const CHUNK_MAX = 500;
 
 const PDF_EXTRACT_MAX_MB = Number(process.env.PDF_EXTRACT_MAX_MB ?? 48);
 const EXTRACT_TEXT_HARD_LIMIT = DEFAULT_EXTRACT_TEXT_HARD_LIMIT;
+
+const PDF_STORAGE_BUCKET =
+  process.env.NEXT_PUBLIC_SUPABASE_PDF_BUCKET ||
+  process.env.NEXT_PUBLIC_SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
+  "pdf-files";
 
 let openai: OpenAI | null = null;
 if (process.env.OPENAI_API_KEY) {
@@ -79,9 +85,9 @@ function errToDetail(error: any) {
 }
 
 async function downloadPdfBuffer(client: any, storagePath: string): Promise<Buffer> {
-  console.log("[processPdfForIndexing] downloadPdfBuffer:start", { storagePath });
+  console.log("[processPdfForIndexing] downloadPdfBuffer:start", { bucket: PDF_STORAGE_BUCKET, storagePath });
 
-  const { data: fileData, error } = await client.storage.from("pdf-files").download(storagePath);
+  const { data: fileData, error } = await client.storage.from(PDF_STORAGE_BUCKET).download(storagePath);
 
   if (error || !fileData) {
     throw new Error(`Falha ao baixar PDF do Storage: ${error?.message ?? "download falhou"}`);

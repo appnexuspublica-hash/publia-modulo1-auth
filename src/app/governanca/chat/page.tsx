@@ -1,4 +1,3 @@
-// src/app/governanca/chat/page.tsx
 import { redirect } from "next/navigation";
 
 import {
@@ -12,26 +11,35 @@ import type {
 
 import GovernanceChatClient from "./GovernanceChatClient";
 
-function getUserLabel(user: {
-  id: string;
-  email?: string | null;
-  phone?: string | null;
-  user_metadata?: Record<string, any>;
-}) {
-  const metadataName =
-    typeof user.user_metadata?.name === "string"
-      ? user.user_metadata.name
-      : null;
+async function getUserCpfLabel(
+  supabase: ReturnType<typeof createReadonlySupabaseServerClient>,
+  userId: string,
+) {
+  try {
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("cpf_cnpj")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-  if (metadataName) return metadataName;
+    if (!profileError && profile?.cpf_cnpj) {
+      return profile.cpf_cnpj;
+    }
 
-  if (user.email) {
-    return user.email.split("@")[0] ?? user.email;
+    if (profileError) {
+      console.error(
+        "[governance/chat] Erro ao buscar CPF/CNPJ do profile:",
+        profileError,
+      );
+    }
+  } catch (profileError) {
+    console.error(
+      "[governance/chat] Erro inesperado ao buscar CPF/CNPJ do profile:",
+      profileError,
+    );
   }
 
-  if (user.phone) return user.phone;
-
-  return user.id;
+  return "CPF não informado";
 }
 
 export default async function GovernanceChatPage() {
@@ -50,6 +58,8 @@ export default async function GovernanceChatPage() {
   if (!context) {
     redirect("/governanca");
   }
+
+  const userLabel = await getUserCpfLabel(supabase, user.id);
 
   const { data: conversationsData, error: conversationsError } = await supabase
     .from("governance_conversations")
@@ -71,6 +81,8 @@ export default async function GovernanceChatPage() {
       `,
     )
     .eq("organization_id", context.organization.id)
+    .eq("user_id", user.id)
+    .eq("visibility", "private")
     .is("deleted_at", null)
     .neq("status", "deleted")
     .order("is_pinned", { ascending: false })
@@ -121,8 +133,8 @@ export default async function GovernanceChatPage() {
   return (
     <GovernanceChatClient
       userId={user.id}
-      userLabel={getUserLabel(user)}
-      userEmail={user.email ?? null}
+      userLabel={userLabel}
+      userEmail={null}
       context={context}
       initialConversations={conversations}
       initialMessages={initialMessages}

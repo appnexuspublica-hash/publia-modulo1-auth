@@ -1,4 +1,3 @@
-// src/app/governanca/conversas/page.tsx
 import { redirect } from "next/navigation";
 
 import {
@@ -71,6 +70,8 @@ export default async function GovernanceConversationsPage() {
       `,
     )
     .eq("organization_id", context.organization.id)
+    .eq("user_id", user.id)
+    .eq("visibility", "private")
     .is("deleted_at", null)
     .neq("status", "deleted")
     .order("updated_at", { ascending: false });

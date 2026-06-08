@@ -1,6 +1,7 @@
 // src/app/api/upload-pdf/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import {
   buildAccessContext,
   evaluateAccessWithAdmin,
@@ -14,6 +15,22 @@ const TRIAL_PDF_LIMIT = 10;
 
 const ESSENTIAL_PDFS_PER_CONVERSATION = 3;
 const STRATEGIC_PDFS_PER_CONVERSATION = 5;
+
+const PDF_STORAGE_BUCKET =
+  process.env.NEXT_PUBLIC_SUPABASE_PDF_BUCKET ||
+  process.env.NEXT_PUBLIC_SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
+  "pdf-files";
+
+function sanitizeStorageFileName(fileName: string) {
+  return String(fileName || "arquivo.pdf")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
 
 type PdfUploadPlanValidation = {
   allowed: boolean;
@@ -33,6 +50,7 @@ type PdfUploadPlanValidation = {
 };
 
 type UploadPdfRequestBody = {
+  product?: "essential" | "strategic" | "governance" | string;
   conversationId?: string;
   fileName?: string;
   storagePath?: string;
@@ -294,7 +312,7 @@ function getConversationPdfLimitMessage(params: {
 }
 
 async function setConversationActivePdf(params: {
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  supabase: any;
   conversationId: string;
   userId: string;
   pdfFileId: string;
@@ -343,7 +361,7 @@ async function setConversationActivePdf(params: {
 }
 
 async function registerPdfUploadEvent(params: {
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  supabase: any;
   userId: string;
   fileName: string;
   storagePath: string;
@@ -355,6 +373,7 @@ async function registerPdfUploadEvent(params: {
   pdfPeriod: PdfPeriod;
   conversationId: string | null;
   productTier: ProductTier;
+  isGovernanceUpload: boolean;
 }) {
   const {
     supabase,
@@ -369,6 +388,7 @@ async function registerPdfUploadEvent(params: {
     pdfPeriod,
     conversationId,
     productTier,
+    isGovernanceUpload,
   } = params;
 
   const payload = {
@@ -377,7 +397,7 @@ async function registerPdfUploadEvent(params: {
     metadata: {
       feature_key: "pdf_upload",
       value: 1,
-      conversation_id: conversationId,
+      conversation_id: isGovernanceUpload ? null : conversationId,
       file_name: fileName,
       storage_path: storagePath,
       file_size_bytes: fileSizeBytes,
@@ -400,6 +420,7 @@ async function registerPdfUploadEvent(params: {
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createSupabaseServerClient();
+    const writeSupabase = createSupabaseAdminClient();
 
     const {
       data: { user },
@@ -413,7 +434,56 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = (await request.json()) as UploadPdfRequestBody;
+    const contentType = request.headers.get("content-type") ?? "";
+
+    let body: UploadPdfRequestBody;
+    let pendingStorageUploadFile: File | null = null;
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const fileValue = formData.get("file");
+
+      if (!(fileValue instanceof File)) {
+        return NextResponse.json(
+          { error: "Arquivo PDF não enviado." },
+          { status: 400 }
+        );
+      }
+
+      if (fileValue.type && fileValue.type !== "application/pdf") {
+        return NextResponse.json(
+          { error: "Envie apenas arquivos PDF." },
+          { status: 400 }
+        );
+      }
+
+      const conversationIdFromForm = String(
+        formData.get("conversationId") ?? ""
+      ).trim();
+      const safeFileName = sanitizeStorageFileName(fileValue.name);
+      const storagePath = [
+        user.id,
+        "governance",
+        conversationIdFromForm,
+        `${Date.now()}-${crypto.randomUUID()}-${safeFileName}`,
+      ].join("/");
+
+      pendingStorageUploadFile = fileValue;
+
+      body = {
+        product: String(formData.get("product") ?? "").trim(),
+        conversationId: conversationIdFromForm,
+        fileName: fileValue.name,
+        storagePath,
+        fileSize: fileValue.size,
+        mimeType: fileValue.type || "application/pdf",
+      };
+    } else {
+      body = (await request.json()) as UploadPdfRequestBody;
+    }
+
+    const product = String(body.product ?? "").trim().toLowerCase();
+    const isGovernanceUpload = product === "governance";
 
     const conversationId = String(body.conversationId ?? "").trim();
     const fileName = String(body.fileName ?? "").trim();
@@ -430,26 +500,57 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: conversation, error: conversationError } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("id", conversationId)
-      .eq("user_id", user.id)
-      .maybeSingle();
+    if (isGovernanceUpload) {
+      const { data: governanceConversation, error: governanceConversationError } =
+        await supabase
+          .from("governance_conversations")
+          .select("id")
+          .eq("id", conversationId)
+          .eq("user_id", user.id)
+          .is("deleted_at", null)
+          .neq("status", "deleted")
+          .maybeSingle();
 
-    if (conversationError) {
-      console.error("Erro ao validar conversa do PDF:", conversationError.message);
-      return NextResponse.json(
-        { error: "Não foi possível validar a conversa do PDF." },
-        { status: 500 }
-      );
-    }
+      if (governanceConversationError) {
+        console.error(
+          "Erro ao validar conversa de Governança do PDF:",
+          governanceConversationError.message
+        );
 
-    if (!conversation) {
-      return NextResponse.json(
-        { error: "Conversa inválida para vincular o PDF." },
-        { status: 400 }
-      );
+        return NextResponse.json(
+          { error: "Não foi possível validar a conversa de Governança do PDF." },
+          { status: 500 }
+        );
+      }
+
+      if (!governanceConversation) {
+        return NextResponse.json(
+          { error: "Conversa de Governança inválida para vincular o PDF." },
+          { status: 400 }
+        );
+      }
+    } else {
+      const { data: conversation, error: conversationError } = await supabase
+        .from("conversations")
+        .select("id")
+        .eq("id", conversationId)
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (conversationError) {
+        console.error("Erro ao validar conversa do PDF:", conversationError.message);
+        return NextResponse.json(
+          { error: "Não foi possível validar a conversa do PDF." },
+          { status: 500 }
+        );
+      }
+
+      if (!conversation) {
+        return NextResponse.json(
+          { error: "Conversa inválida para vincular o PDF." },
+          { status: 400 }
+        );
+      }
     }
 
     const planValidation = await validatePdfUploadByPlan(supabase, user.id);
@@ -498,12 +599,11 @@ export async function POST(request: NextRequest) {
       capabilities: planValidation.capabilities,
     });
 
-    const conversationPdfCount = await getConversationPdfCount(
-      supabase,
-      conversationId
-    );
+    const conversationPdfCount = isGovernanceUpload
+      ? 0
+      : await getConversationPdfCount(supabase, conversationId);
 
-    if (conversationPdfCount >= conversationPdfLimit) {
+    if (!isGovernanceUpload && conversationPdfCount >= conversationPdfLimit) {
       return NextResponse.json(
         {
           error: getConversationPdfLimitMessage({
@@ -530,15 +630,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (pendingStorageUploadFile) {
+      const uploadBuffer = Buffer.from(await pendingStorageUploadFile.arrayBuffer());
+
+      const { error: storageUploadError } = await writeSupabase.storage
+        .from(PDF_STORAGE_BUCKET)
+        .upload(storagePath, uploadBuffer, {
+          contentType: body.mimeType || "application/pdf",
+          upsert: false,
+        });
+
+      if (storageUploadError) {
+        console.error(
+          "Erro ao enviar PDF para o Storage:",
+          storageUploadError.message
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível enviar o PDF para o Storage." },
+          { status: 500 }
+        );
+      }
+    }
+
     const pdfInsertPayload = {
       user_id: user.id,
-      conversation_id: conversationId,
+      conversation_id: isGovernanceUpload ? null : conversationId,
       file_name: fileName,
       storage_path: storagePath,
       file_size: fileSizeBytes,
     };
 
-    const { data: insertedPdf, error: insertError } = await supabase
+    const { data: insertedPdf, error: insertError } = await writeSupabase
       .from("pdf_files")
       .insert(pdfInsertPayload as never)
       .select()
@@ -555,47 +678,49 @@ export async function POST(request: NextRequest) {
 
     const insertedPdfId = (insertedPdf as { id: string }).id;
 
-    const { error: linkInsertError } = await supabase
-      .from("conversation_pdf_links")
-      .insert({
-        conversation_id: conversationId,
-        pdf_file_id: insertedPdfId,
-        user_id: user.id,
-        is_active: false,
-      } as never);
+    if (!isGovernanceUpload) {
+      const { error: linkInsertError } = await writeSupabase
+        .from("conversation_pdf_links")
+        .insert({
+          conversation_id: conversationId,
+          pdf_file_id: insertedPdfId,
+          user_id: user.id,
+          is_active: false,
+        } as never);
 
-    if (linkInsertError) {
-      console.error(
-        "Erro ao salvar conversation_pdf_links:",
-        linkInsertError.message
-      );
+      if (linkInsertError) {
+        console.error(
+          "Erro ao salvar conversation_pdf_links:",
+          linkInsertError.message
+        );
 
-      return NextResponse.json(
-        { error: "Não foi possível vincular o PDF à conversa." },
-        { status: 500 }
-      );
-    }
+        return NextResponse.json(
+          { error: "Não foi possível vincular o PDF à conversa." },
+          { status: 500 }
+        );
+      }
 
-    try {
-      await setConversationActivePdf({
-        supabase,
-        conversationId,
-        userId: user.id,
-        pdfFileId: insertedPdfId,
-      });
-    } catch (activePdfError) {
-      console.error(activePdfError);
+      try {
+        await setConversationActivePdf({
+          supabase: writeSupabase,
+          conversationId,
+          userId: user.id,
+          pdfFileId: insertedPdfId,
+        });
+      } catch (activePdfError) {
+        console.error(activePdfError);
 
-      return NextResponse.json(
-        {
-          error: "O PDF foi salvo, mas não foi possível defini-lo como ativo.",
-        },
-        { status: 500 }
-      );
+        return NextResponse.json(
+          {
+            error: "O PDF foi salvo, mas não foi possível defini-lo como ativo.",
+          },
+          { status: 500 }
+        );
+      }
     }
 
     await registerPdfUploadEvent({
-      supabase,
+      supabase: writeSupabase,
       userId: user.id,
       fileName,
       storagePath,
@@ -610,6 +735,7 @@ export async function POST(request: NextRequest) {
       pdfPeriod: planValidation.period,
       conversationId,
       productTier: planValidation.productTier,
+      isGovernanceUpload,
     });
 
     return NextResponse.json(

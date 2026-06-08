@@ -1,4 +1,3 @@
-// src/app/api/governance/conversations/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
@@ -56,20 +55,22 @@ export async function POST(request: Request) {
     const title =
       typeof body?.title === "string" && body.title.trim().length > 0
         ? body.title.trim()
-        : "Nova conversa institucional";
+        : "Nova conversa";
 
     const category =
       typeof body?.category === "string" && body.category.trim().length > 0
         ? body.category.trim()
         : null;
 
-    const responseMode =
-      typeof body?.responseMode === "string" && body.responseMode.trim()
-        ? body.responseMode.trim()
-        : "objective";
+    // Regra de UX do Governança:
+    // toda nova conversa deve iniciar no modo Padrão.
+    const responseMode = "objective";
 
-    const visibility =
-      body?.visibility === "organization" ? "organization" : "private";
+    // Blindagem P0:
+    // por padrão, toda conversa do Governança é privada do usuário logado.
+    // A visibilidade "organization" fica reservada para fluxo futuro com
+    // compartilhamento institucional explícito.
+    const visibility = "private";
 
     const { data, error } = await supabase.rpc(
       "create_governance_conversation",
@@ -91,8 +92,73 @@ export async function POST(request: Request) {
       );
     }
 
+    const conversation = Array.isArray(data) ? data[0] : data;
+
+    if (!conversation?.id) {
+      return NextResponse.json(
+        { error: "A conversa foi criada, mas a API não retornou o ID." },
+        { status: 500 },
+      );
+    }
+
+    // Garantia adicional: se a função SQL não preencher user_id, vinculamos
+    // a conversa ao usuário autenticado imediatamente.
+    if (!conversation.user_id || conversation.user_id !== user.id) {
+      const { data: fixedConversation, error: fixConversationError } =
+        await supabase
+          .from("governance_conversations")
+          .update({
+            user_id: user.id,
+            visibility: "private",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", conversation.id)
+          .eq("organization_id", context.organization.id)
+          .select(
+            `
+              id,
+              organization_id,
+              user_id,
+              title,
+              category,
+              response_mode,
+              visibility,
+              status,
+              is_pinned,
+              metadata,
+              created_at,
+              updated_at,
+              deleted_at
+            `,
+          )
+          .maybeSingle();
+
+      if (fixConversationError) {
+        console.error(
+          "[governance] Conversa criada, mas não foi possível vincular ao usuário:",
+          fixConversationError,
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "A conversa foi criada, mas não foi possível vincular ao usuário autenticado.",
+          },
+          { status: 500 },
+        );
+      }
+
+      return NextResponse.json({
+        conversation: fixedConversation ?? {
+          ...conversation,
+          user_id: user.id,
+          visibility: "private",
+        },
+      });
+    }
+
     return NextResponse.json({
-      conversation: data,
+      conversation,
     });
   } catch (error) {
     console.error("[governance] Erro inesperado ao criar conversa:", error);

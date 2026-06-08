@@ -1,4 +1,3 @@
-// src/app/governanca/conversas/[conversationId]/page.tsx
 import { notFound, redirect } from "next/navigation";
 
 import {
@@ -82,6 +81,8 @@ export default async function GovernanceConversationDetailPage({
     )
     .eq("id", conversationId)
     .eq("organization_id", context.organization.id)
+    .eq("user_id", user.id)
+    .eq("visibility", "private")
     .is("deleted_at", null)
     .neq("status", "deleted")
     .maybeSingle();

@@ -1,9 +1,13 @@
 // src/app/governanca/chat/GovernanceChatClient.tsx
 "use client";
 
+// FIX: rota de criação de conversa restaurada e sidebar sem fallback padrão
+// FIX: nova conversa seleciona ID real antes de enviar mensagem
+// FIX: sidebar conversa sem duplicar preview e sem fallback Nova conversa
 import Link from "next/link";
 import { Children, isValidElement, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -71,6 +75,40 @@ type LocalPdfAttachment = {
   name: string;
   size: number;
 };
+
+let browserSupabaseClient: SupabaseClient | null = null;
+
+const PDF_STORAGE_BUCKET =
+  process.env.NEXT_PUBLIC_SUPABASE_PDF_BUCKET ||
+  process.env.NEXT_PUBLIC_SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
+  "pdf-files";
+
+function getBrowserSupabaseClient() {
+  if (browserSupabaseClient) {
+    return browserSupabaseClient;
+  }
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Variáveis públicas do Supabase não configuradas.");
+  }
+
+  browserSupabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+
+  return browserSupabaseClient;
+}
+
+function sanitizeStorageFileName(fileName: string) {
+  return String(fileName || "arquivo.pdf")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
 
 const statusNavigationItems: StatusNavigationItem[] = [
   {
@@ -1096,13 +1134,6 @@ function improveListNestingAfterColon(markdown: string) {
     return trimmed.includes("|") && /^\|?.+\|.+\|?$/.test(trimmed);
   }
 
-  function pushBlankIfNeeded() {
-    if (output.length === 0) return;
-    if (output[output.length - 1]?.trim() === "") return;
-
-    output.push("");
-  }
-
   for (const originalLine of lines) {
     const trimmedLine = originalLine.trim();
 
@@ -1121,7 +1152,10 @@ function improveListNestingAfterColon(markdown: string) {
     const parsed = parseListLine(originalLine);
 
     if (!parsed) {
-      activeParentIndent = null;
+      if (trimmedLine.length > 0) {
+        activeParentIndent = null;
+      }
+
       output.push(originalLine);
       continue;
     }
@@ -1130,22 +1164,22 @@ function improveListNestingAfterColon(markdown: string) {
 
     if (currentEndsWithColon) {
       /*
-        Em respostas institucionais, itens como:
-        - A resposta pode ser:
-        - Fornecimento...
-        - Indicação...
+        Mantém o item principal com marcador e prepara os próximos itens
+        do mesmo nível para virarem sublista visual. Exemplo:
 
-        ficam mais profissionais como:
-        A resposta pode ser:
+        - destruir ou ocultar documentos; pode responder por:
 
-          - Fornecimento...
-          - Indicação...
+          - infração administrativa...
+          - improbidade administrativa...
 
-        A alteração é apenas visual: não muda a mensagem salva no banco.
+        A alteração é apenas de renderização: não muda a mensagem salva.
       */
-      pushBlankIfNeeded();
-      output.push(`${" ".repeat(parsed.indent)}${parsed.content}`);
-      output.push("");
+      output.push(originalLine);
+
+      if (output[output.length - 1]?.trim() !== "") {
+        output.push("");
+      }
+
       activeParentIndent = parsed.indent;
       continue;
     }
@@ -1227,7 +1261,7 @@ function getConversationPreview(messages: GovernanceMessage[]) {
     .find((message) => message.role === "user");
 
   if (!lastUserMessage) {
-    return "Nova conversa";
+    return "";
   }
 
   const preview = lastUserMessage.content.replace(/\s+/g, " ").trim();
@@ -1237,6 +1271,59 @@ function getConversationPreview(messages: GovernanceMessage[]) {
   }
 
   return `${preview.slice(0, 54)}...`;
+}
+
+function isDefaultConversationTitle(title: string | null | undefined) {
+  const normalized = String(title ?? "").trim().toLowerCase();
+
+  return (
+    normalized === "" ||
+    normalized === "nova conversa" ||
+    normalized === "nova conversa institucional"
+  );
+}
+
+function getConversationDisplayTitle(
+  conversation: GovernanceConversation,
+  conversationMessages: GovernanceMessage[],
+) {
+  if (!isDefaultConversationTitle(conversation.title)) {
+    return conversation.title;
+  }
+
+  return getConversationPreview(conversationMessages);
+}
+
+function normalizeConversationSearchText(value: string | null | undefined) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function getConversationSearchText(
+  conversation: GovernanceConversation,
+  conversationMessages: GovernanceMessage[],
+) {
+  const displayTitle = getConversationDisplayTitle(
+    conversation,
+    conversationMessages,
+  );
+
+  const searchableMessages = conversationMessages
+    .filter((message) => message.role === "user")
+    .map((message) => message.content)
+    .join(" ");
+
+  return normalizeConversationSearchText(
+    [
+      conversation.title,
+      displayTitle,
+      getConversationPreview(conversationMessages),
+      searchableMessages,
+    ].join(" "),
+  );
 }
 
 function buildMessageWithAttachments(
@@ -1254,10 +1341,10 @@ function buildMessageWithAttachments(
   return [
     content,
     "",
-    "PDFs anexados nesta conversa:",
+    "PDFs selecionados para esta pergunta:",
     attachmentList,
     "",
-    "Observação: nesta etapa os PDFs anexados são registrados na mensagem. A leitura semântica integrada à Base Institucional será conectada no módulo RAG Governança.",
+    "Instrução operacional: considere apenas os PDFs selecionados nesta pergunta. Não use PDFs de mensagens anteriores, salvo se o usuário pedir comparação ou histórico.",
   ].join("\n");
 }
 
@@ -1267,6 +1354,14 @@ function getLastUserMessage(messages: GovernanceMessage[]) {
 
 function getLastAssistantMessage(messages: GovernanceMessage[]) {
   return [...messages].reverse().find((message) => message.role === "assistant");
+}
+
+
+function isConversationPinned(conversation: GovernanceConversation) {
+  return (
+    (conversation as GovernanceConversation & { is_pinned?: boolean | null })
+      .is_pinned === true
+  );
 }
 
 export default function GovernanceChatClient({
@@ -1287,6 +1382,9 @@ export default function GovernanceChatClient({
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | null
   >(initialConversations[0]?.id ?? null);
+  const selectedConversationIdRef = useRef<string | null>(
+    initialConversations[0]?.id ?? null,
+  );
 
   const [messages, setMessages] =
     useState<GovernanceMessage[]>(initialMessages);
@@ -1304,14 +1402,15 @@ export default function GovernanceChatClient({
   const [pdfAttachments, setPdfAttachments] = useState<LocalPdfAttachment[]>([]);
   const [selectedPdfAttachmentIds, setSelectedPdfAttachmentIds] = useState<string[]>([]);
   const [isPdfActionsMenuOpen, setIsPdfActionsMenuOpen] = useState(false);
+  const [isUploadingPdf, setIsUploadingPdf] = useState(false);
   const [conversationSearch, setConversationSearch] = useState("");
-  const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>([]);
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
   const [selectedResponseMode, setSelectedResponseMode] = useState(
     initialConversations[0]?.response_mode ?? "objective",
   );
+  const [isResponseModeMenuOpen, setIsResponseModeMenuOpen] = useState(false);
 
   const [pendingAssistantConversationId, setPendingAssistantConversationId] =
     useState<string | null>(null);
@@ -1319,6 +1418,7 @@ export default function GovernanceChatClient({
     useState<string | null>(null);
   const [pendingUserMessageCreatedAt, setPendingUserMessageCreatedAt] =
     useState<string | null>(null);
+  const [streamingAssistantText, setStreamingAssistantText] = useState("");
 
   const [isCreatingConversation, startCreateConversationTransition] =
     useTransition();
@@ -1326,11 +1426,16 @@ export default function GovernanceChatClient({
 
   const { organization, membership } = context;
 
+  function setActiveConversationId(nextConversationId: string | null) {
+    selectedConversationIdRef.current = nextConversationId;
+    setSelectedConversationId(nextConversationId);
+  }
+
   const selectedConversation = useMemo(() => {
     return (
       conversations.find(
         (conversation) => conversation.id === selectedConversationId,
-      ) ?? conversations[0] ?? null
+      ) ?? null
     );
   }, [conversations, selectedConversationId]);
 
@@ -1364,23 +1469,23 @@ export default function GovernanceChatClient({
     pendingAssistantConversationId === selectedConversation?.id;
 
   const filteredConversations = useMemo(() => {
-    const q = conversationSearch.trim().toLowerCase();
+    const q = normalizeConversationSearchText(conversationSearch);
 
     const list = conversations.filter((conversation) => {
       if (!q) return true;
 
       const conversationMessages = messagesByConversationId.get(conversation.id) ?? [];
-      const preview = getConversationPreview(conversationMessages).toLowerCase();
-
-      return (
-        conversation.title.toLowerCase().includes(q) ||
-        preview.includes(q)
+      const searchableText = getConversationSearchText(
+        conversation,
+        conversationMessages,
       );
+
+      return searchableText.includes(q);
     });
 
     return [...list].sort((a, b) => {
-      const aPinned = pinnedConversationIds.includes(a.id);
-      const bPinned = pinnedConversationIds.includes(b.id);
+      const aPinned = isConversationPinned(a);
+      const bPinned = isConversationPinned(b);
 
       if (aPinned && !bPinned) return -1;
       if (!aPinned && bPinned) return 1;
@@ -1389,7 +1494,7 @@ export default function GovernanceChatClient({
         new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
       );
     });
-  }, [conversationSearch, conversations, messagesByConversationId, pinnedConversationIds]);
+  }, [conversationSearch, conversations, messagesByConversationId]);
 
   const selectedModeLabel = useMemo(() => {
     return (
@@ -1414,31 +1519,6 @@ export default function GovernanceChatClient({
       mergeMessages(currentMessages, initialMessages),
     );
   }, [initialMessages]);
-
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem("publia-governance-pinned-conversations");
-      if (!stored) return;
-
-      const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed)) {
-        setPinnedConversationIds(parsed.filter((id) => typeof id === "string"));
-      }
-    } catch {
-      setPinnedConversationIds([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        "publia-governance-pinned-conversations",
-        JSON.stringify(pinnedConversationIds),
-      );
-    } catch {
-      // localStorage indisponível; o chat continua funcionando normalmente.
-    }
-  }, [pinnedConversationIds]);
 
   useEffect(() => {
     if (selectedConversation?.response_mode) {
@@ -1475,14 +1555,14 @@ export default function GovernanceChatClient({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            title: "Nova conversa institucional",
+            title: "Nova conversa",
             category: null,
             responseMode: selectedResponseMode,
             visibility: "private",
           }),
         });
 
-        const payload = await response.json();
+        const payload = await response.json().catch(() => null);
 
         if (!response.ok) {
           throw new Error(
@@ -1490,8 +1570,16 @@ export default function GovernanceChatClient({
           );
         }
 
+        const createdConversationPayload = Array.isArray(payload?.conversation)
+          ? payload.conversation[0]
+          : payload?.conversation;
+
+        if (!createdConversationPayload?.id) {
+          throw new Error("A conversa foi criada, mas a API não retornou o ID.");
+        }
+
         const createdConversation =
-          payload.conversation as GovernanceConversation;
+          createdConversationPayload as GovernanceConversation;
 
         setConversations((currentConversations) => [
           createdConversation,
@@ -1499,13 +1587,17 @@ export default function GovernanceChatClient({
             (conversation) => conversation.id !== createdConversation.id,
           ),
         ]);
-        setSelectedConversationId(createdConversation.id);
+        setActiveConversationId(createdConversation.id);
         setMessageText("");
+        setErrorMessage(null);
+        setMessageError(null);
+        setPendingAssistantConversationId(null);
+        setPendingUserMessageContent(null);
+        setPendingUserMessageCreatedAt(null);
+        setStreamingAssistantText("");
         setPdfAttachments([]);
         setSelectedPdfAttachmentIds([]);
         setIsPdfActionsMenuOpen(false);
-
-        router.refresh();
       } catch (error) {
         const message =
           error instanceof Error
@@ -1513,14 +1605,24 @@ export default function GovernanceChatClient({
             : "Erro inesperado ao criar conversa.";
 
         setErrorMessage(message);
+        setMessageError(null);
       }
     });
   }
 
-  function sendContent(rawContent: string, options?: { keepInputOnError?: boolean }) {
+  function sendContent(
+    rawContent: string,
+    options?: {
+      keepInputOnError?: boolean;
+      attachmentsOverride?: LocalPdfAttachment[];
+    },
+  ) {
     const content = rawContent.trim();
 
-    if (!selectedConversation) {
+    const conversationId =
+      selectedConversationIdRef.current ?? selectedConversation?.id ?? "";
+
+    if (!conversationId) {
       setMessageError("Selecione ou crie uma conversa antes de enviar.");
       return;
     }
@@ -1529,22 +1631,21 @@ export default function GovernanceChatClient({
       setMessageError("Digite uma mensagem antes de enviar.");
       return;
     }
-
     const selectedPdfAttachments =
-      selectedPdfAttachmentIds.length > 0
+      options?.attachmentsOverride ??
+      (selectedPdfAttachmentIds.length > 0
         ? pdfAttachments.filter((file) => selectedPdfAttachmentIds.includes(file.id))
-        : [];
+        : []);
 
     const contentToSend = buildMessageWithAttachments(content, selectedPdfAttachments);
 
     setMessageError(null);
     setMessageText("");
-    setPdfAttachments([]);
-    setSelectedPdfAttachmentIds([]);
     setIsPdfActionsMenuOpen(false);
-    setPendingAssistantConversationId(selectedConversation.id);
+    setPendingAssistantConversationId(conversationId);
     setPendingUserMessageContent(content);
     setPendingUserMessageCreatedAt(new Date().toISOString());
+    setStreamingAssistantText("");
 
     startSendMessageTransition(async () => {
       try {
@@ -1552,38 +1653,136 @@ export default function GovernanceChatClient({
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            Accept: "text/event-stream",
           },
           body: JSON.stringify({
-            conversationId: selectedConversation.id,
+            conversationId,
             content: contentToSend,
             responseMode: selectedResponseMode,
+            selectedPdfFileIds: selectedPdfAttachments.map((file) => file.id),
+            selectedPdfAttachmentNames: selectedPdfAttachments.map((file) => file.name),
           }),
         });
 
-        const payload = await response.json();
-
         if (!response.ok) {
+          const payload = await response.json().catch(() => null);
           throw new Error(
             payload?.error ?? "Não foi possível gerar a resposta da IA.",
           );
         }
 
-        const newMessages = [
-          payload.userMessage as GovernanceMessage,
-          payload.assistantMessage as GovernanceMessage,
-        ].filter(Boolean);
+        const contentType = response.headers.get("content-type") ?? "";
 
-        setMessages((currentMessages) =>
-          mergeMessages(currentMessages, newMessages),
-        );
+        if (!response.body || !contentType.includes("text/event-stream")) {
+          const payload = await response.json();
 
-        setConversations((currentConversations) =>
-          currentConversations.map((conversation) =>
-            conversation.id === selectedConversation.id
-              ? { ...conversation, updated_at: new Date().toISOString() }
-              : conversation,
-          ),
-        );
+          const newMessages = [
+            payload.userMessage as GovernanceMessage,
+            payload.assistantMessage as GovernanceMessage,
+          ].filter(Boolean);
+
+          setMessages((currentMessages) =>
+            mergeMessages(currentMessages, newMessages),
+          );
+
+          setConversations((currentConversations) =>
+            currentConversations.map((conversation) =>
+              conversation.id === conversationId
+                ? { ...conversation, updated_at: new Date().toISOString() }
+                : conversation,
+            ),
+          );
+
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        function handleStreamEvent(rawEvent: string) {
+          const lines = rawEvent.split("\n");
+          const eventLine = lines.find((line) => line.startsWith("event:"));
+          const dataLines = lines.filter((line) => line.startsWith("data:"));
+
+          const eventName = eventLine?.replace(/^event:\s*/, "").trim() || "message";
+          const rawData = dataLines
+            .map((line) => line.replace(/^data:\s*/, ""))
+            .join("\n")
+            .trim();
+
+          if (!rawData) return;
+
+          const data = JSON.parse(rawData);
+
+          if (eventName === "userMessage" && data?.userMessage) {
+            setMessages((currentMessages) =>
+              mergeMessages(currentMessages, [data.userMessage as GovernanceMessage]),
+            );
+            setPendingUserMessageContent(null);
+            return;
+          }
+
+          if (eventName === "delta") {
+            const delta = typeof data?.delta === "string" ? data.delta : "";
+
+            if (delta) {
+              setStreamingAssistantText((current) => current + delta);
+            }
+
+            return;
+          }
+
+          if (eventName === "done") {
+            const newMessages = [
+              data.userMessage as GovernanceMessage,
+              data.assistantMessage as GovernanceMessage,
+            ].filter(Boolean);
+
+            setMessages((currentMessages) =>
+              mergeMessages(currentMessages, newMessages),
+            );
+
+            setConversations((currentConversations) =>
+              currentConversations.map((conversation) =>
+                conversation.id === conversationId
+                  ? { ...conversation, updated_at: new Date().toISOString() }
+                  : conversation,
+              ),
+            );
+
+            setStreamingAssistantText("");
+            return;
+          }
+
+          if (eventName === "error") {
+            throw new Error(
+              data?.error ?? "Erro ao gerar resposta da IA institucional.",
+            );
+          }
+        }
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const events = buffer.split("\n\n");
+          buffer = events.pop() ?? "";
+
+          for (const rawEvent of events) {
+            if (!rawEvent.trim()) continue;
+            handleStreamEvent(rawEvent);
+          }
+        }
+
+        buffer += decoder.decode();
+
+        if (buffer.trim()) {
+          handleStreamEvent(buffer);
+        }
       } catch (error) {
         const message =
           error instanceof Error
@@ -1599,18 +1798,69 @@ export default function GovernanceChatClient({
         setPendingAssistantConversationId(null);
         setPendingUserMessageContent(null);
         setPendingUserMessageCreatedAt(null);
+        setStreamingAssistantText("");
       }
     });
   }
 
+  async function togglePinnedConversation(conversationId: string) {
+    const targetConversation = conversations.find(
+      (conversation) => conversation.id === conversationId,
+    );
 
-  function togglePinnedConversation(conversationId: string) {
-    setPinnedConversationIds((current) =>
-      current.includes(conversationId)
-        ? current.filter((id) => id !== conversationId)
-        : [conversationId, ...current],
+    if (!targetConversation) return;
+
+    const nextPinnedValue = !(isConversationPinned(targetConversation));
+    const previousConversations = conversations;
+
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === conversationId
+          ? ({
+              ...conversation,
+              is_pinned: nextPinnedValue,
+              updated_at: new Date().toISOString(),
+            } as GovernanceConversation)
+          : conversation,
+      ),
     );
     setOpenConversationMenuId(null);
+    setActionFeedback(
+      nextPinnedValue ? "Conversa fixada." : "Conversa desfixada.",
+    );
+
+    try {
+      const response = await fetch(`/api/governance/conversations/${conversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_pinned: nextPinnedValue }),
+      });
+
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error ?? "Não foi possível atualizar a fixação da conversa.",
+        );
+      }
+
+      if (payload?.conversation?.id) {
+        setConversations((current) =>
+          current.map((conversation) =>
+            conversation.id === conversationId
+              ? { ...conversation, ...payload.conversation }
+              : conversation,
+          ),
+        );
+      }
+    } catch (error) {
+      setConversations(previousConversations);
+      setMessageError(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível persistir a fixação da conversa.",
+      );
+    }
   }
 
   async function handleRenameConversation(conversationId: string) {
@@ -1660,11 +1910,10 @@ export default function GovernanceChatClient({
     const remaining = conversations.filter((conversation) => conversation.id !== conversationId);
 
     setConversations(remaining);
-    setPinnedConversationIds((current) => current.filter((id) => id !== conversationId));
     setOpenConversationMenuId(null);
 
     if (selectedConversationId === conversationId) {
-      setSelectedConversationId(remaining[0]?.id ?? null);
+      setActiveConversationId(remaining[0]?.id ?? null);
     }
 
     setActionFeedback("Conversa removida da lista.");
@@ -1679,7 +1928,7 @@ export default function GovernanceChatClient({
       }
     } catch {
       setConversations(previousConversations);
-      setSelectedConversationId(previousSelectedId);
+      setActiveConversationId(previousSelectedId);
       setMessageError("Não foi possível persistir a exclusão. Crie a rota DELETE para remover no banco.");
     }
   }
@@ -1812,33 +2061,118 @@ export default function GovernanceChatClient({
     sendContent(prompt, { keepInputOnError: false });
   }
 
-  function handlePdfInputChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
+  async function handlePdfInputChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
     const pdfs = files.filter((file) => file.type === "application/pdf");
 
     if (pdfs.length === 0) {
       setMessageError("Selecione um arquivo PDF válido.");
-      event.target.value = "";
+      input.value = "";
       return;
     }
 
-    const nextAttachments = pdfs.map((file) => ({
-      id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
-      name: file.name,
-      size: file.size,
-    }));
-
-    setPdfAttachments((current) => [...current, ...nextAttachments]);
-    setSelectedPdfAttachmentIds((current) => [
-      ...current,
-      ...nextAttachments.map((file) => file.id),
-    ]);
-    setIsPdfActionsMenuOpen(false);
+    if (!selectedConversation) {
+      setMessageError("Crie ou selecione uma conversa antes de anexar PDFs.");
+      input.value = "";
+      return;
+    }
 
     setMessageError(null);
-    event.target.value = "";
-  }
+    setIsPdfActionsMenuOpen(false);
+    setIsUploadingPdf(true);
 
+    try {
+      const nextAttachments: LocalPdfAttachment[] = [];
+
+      for (const file of pdfs) {
+        const formData = new FormData();
+        formData.append("product", "governance");
+        formData.append("conversationId", selectedConversation.id);
+        formData.append("file", file, file.name);
+
+        const uploadResponse = await fetch("/api/upload-pdf", {
+          method: "POST",
+          body: formData,
+        });
+
+        const uploadPayload = await uploadResponse.json().catch(() => null);
+
+        if (!uploadResponse.ok) {
+          throw new Error(
+            uploadPayload?.error ??
+              `Não foi possível enviar o PDF ${file.name}.`,
+          );
+        }
+
+        const pdfFileId = String(
+          uploadPayload?.id ??
+            uploadPayload?.pdfFileId ??
+            uploadPayload?.activePdfFileId ??
+            "",
+        ).trim();
+
+        if (!pdfFileId) {
+          throw new Error(
+            `O upload do PDF ${file.name} não retornou o ID do arquivo.`,
+          );
+        }
+
+        const fileName =
+          typeof uploadPayload?.fileName === "string" && uploadPayload.fileName.trim()
+            ? uploadPayload.fileName.trim()
+            : file.name;
+
+        const fileSize =
+          typeof uploadPayload?.fileSize === "number" &&
+          Number.isFinite(uploadPayload.fileSize)
+            ? uploadPayload.fileSize
+            : file.size;
+
+        nextAttachments.push({
+          id: pdfFileId,
+          name: fileName,
+          size: fileSize,
+        });
+
+        const indexResponse = await fetch("/api/pdf/index", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            pdfFileId,
+          }),
+        });
+
+        const indexPayload = await indexResponse.json().catch(() => null);
+
+        if (!indexResponse.ok) {
+          throw new Error(
+            indexPayload?.error ??
+              `O PDF ${fileName} foi enviado, mas não pôde ser preparado para leitura.`,
+          );
+        }
+      }
+
+      setPdfAttachments((current) => [...current, ...nextAttachments]);
+      // Ao anexar novos PDFs em uma conversa já em andamento, eles passam a ser
+      // os PDFs selecionados para a próxima pergunta. Os PDFs anteriores continuam
+      // aparecendo na conversa, mas não ficam selecionados automaticamente para
+      // evitar que ações rápidas usem contexto antigo por engano.
+      setSelectedPdfAttachmentIds(nextAttachments.map((file) => file.id));
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao anexar PDF.";
+
+      setMessageError(message);
+    } finally {
+      setIsUploadingPdf(false);
+      input.value = "";
+    }
+  }
   function removePdfAttachment(id: string) {
     setPdfAttachments((current) => current.filter((file) => file.id !== id));
     setSelectedPdfAttachmentIds((current) =>
@@ -1856,10 +2190,33 @@ export default function GovernanceChatClient({
   }
 
   function applyPdfQuickAction(action: string) {
-    setMessageText((current) =>
-      current.trim() ? `${current}\n\n${action}` : action,
-    );
+    const selectedPdfAttachments =
+      selectedPdfAttachmentIds.length > 0
+        ? pdfAttachments.filter((file) => selectedPdfAttachmentIds.includes(file.id))
+        : [];
+
+    if (selectedPdfAttachments.length === 0) {
+      setMessageError("Selecione pelo menos um PDF para usar esta ação rápida.");
+      setIsPdfActionsMenuOpen(false);
+      return;
+    }
+
+    const selectedPdfNames = selectedPdfAttachments
+      .map((file) => file.name)
+      .join(", ");
+
+    const actionPrompt = [
+      action,
+      "",
+      `Considere os PDFs selecionados nesta mensagem: ${selectedPdfNames}.`,
+      "Não use PDFs anteriores da conversa, salvo se eu pedir comparação ou histórico.",
+    ].join("\n");
+
     setIsPdfActionsMenuOpen(false);
+    sendContent(actionPrompt, {
+      keepInputOnError: false,
+      attachmentsOverride: selectedPdfAttachments,
+    });
   }
 
   function renderAssistantContent(message: GovernanceMessage) {
@@ -1888,7 +2245,7 @@ export default function GovernanceChatClient({
       }
 
       return (
-        <div className="governance-answer prose prose-sm max-w-none prose-slate leading-7 prose-headings:font-bold prose-headings:text-slate-950 prose-p:my-3 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:pl-1 prose-hr:my-5 prose-hr:border-[#dedede]">
+        <div className="governance-answer prose max-w-none prose-slate text-[15px] leading-8 prose-headings:font-bold prose-headings:text-slate-950 prose-p:my-3 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:pl-1 prose-hr:my-5 prose-hr:border-[#dedede]">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -1915,13 +2272,13 @@ export default function GovernanceChatClient({
               h3: ({ node, ...props }) => (
                 <h3
                   {...props}
-                  className="mb-2 mt-6 border-l-4 border-[#0f3a4a] pl-3 text-sm font-black uppercase tracking-wide text-[#0f3a4a]"
+                  className="mb-2 mt-6 border-l-4 border-[#0f3a4a] pl-3 text-[15px] font-black uppercase tracking-wide text-[#0f3a4a]"
                 />
               ),
               h4: ({ node, ...props }) => (
                 <h4
                   {...props}
-                  className="mb-2 mt-5 text-sm font-bold text-slate-950"
+                  className="mb-2 mt-5 text-[15px] font-bold text-slate-950"
                 />
               ),
               p: ({ node, ...props }) => {
@@ -1933,20 +2290,20 @@ export default function GovernanceChatClient({
 
                 if (isHighlightedParagraph) {
                   return (
-                    <div className="my-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-7 text-amber-950">
+                    <div className="my-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[15px] leading-8 text-amber-950">
                       {props.children}
                     </div>
                   );
                 }
 
-                return <p {...props} className="my-3 leading-7 text-slate-800" />;
+                return <p {...props} className="my-3 text-[15px] leading-8 text-slate-800" />;
               },
               ul: ({ node, children, ...props }) => {
                 const items = getMarkdownListItems(children);
 
                 if (items.length === 1) {
                   return (
-                    <div className="my-3 rounded-2xl bg-slate-50 px-5 py-3 leading-7 text-slate-800">
+                    <div className="my-3 text-[15px] leading-8 text-slate-800">
                       {getSingleMarkdownListItemContent(children)}
                     </div>
                   );
@@ -1955,7 +2312,7 @@ export default function GovernanceChatClient({
                 return (
                   <ul
                     {...props}
-                    className="my-3 list-disc space-y-1.5 rounded-2xl bg-slate-50 px-5 py-3 pl-8"
+                    className="my-3 list-disc space-y-1.5 pl-6"
                   >
                     {children}
                   </ul>
@@ -1966,7 +2323,7 @@ export default function GovernanceChatClient({
 
                 if (items.length === 1) {
                   return (
-                    <div className="my-3 rounded-2xl bg-slate-50 px-5 py-3 leading-7 text-slate-800">
+                    <div className="my-3 text-[15px] leading-8 text-slate-800">
                       {getSingleMarkdownListItemContent(children)}
                     </div>
                   );
@@ -1975,19 +2332,19 @@ export default function GovernanceChatClient({
                 return (
                   <ol
                     {...props}
-                    className="my-3 list-decimal space-y-1.5 rounded-2xl bg-slate-50 px-5 py-3 pl-8"
+                    className="my-3 list-decimal space-y-1.5 pl-6"
                   >
                     {children}
                   </ol>
                 );
               },
               li: ({ node, ...props }) => (
-                <li {...props} className="pl-1 leading-7 text-slate-800" />
+                <li {...props} className="pl-1 text-[15px] leading-8 text-slate-800" />
               ),
               blockquote: ({ node, ...props }) => (
                 <blockquote
                   {...props}
-                  className="my-4 rounded-2xl border-l-4 border-[#0f3a4a] bg-[#eef5f7] px-4 py-3 text-sm font-medium leading-7 text-[#0f3a4a]"
+                  className="my-4 border-l-4 border-[#0f3a4a] pl-4 text-[15px] font-medium leading-8 text-[#0f3a4a]"
                 />
               ),
               hr: ({ node, ...props }) => (
@@ -2246,11 +2603,16 @@ export default function GovernanceChatClient({
                   const conversationMessages =
                     messagesByConversationId.get(conversation.id) ?? [];
 
+                  const conversationDisplayTitle = getConversationDisplayTitle(
+                    conversation,
+                    conversationMessages,
+                  );
+
                   return (
                     <div key={conversation.id} className="relative">
                       <button
                         type="button"
-                        onClick={() => setSelectedConversationId(conversation.id)}
+                        onClick={() => setActiveConversationId(conversation.id)}
                         className={[
                           "group w-full rounded-2xl px-3 py-3 pr-10 text-left transition",
                           isSelected
@@ -2259,7 +2621,7 @@ export default function GovernanceChatClient({
                         ].join(" ")}
                       >
                         <div className="flex items-start gap-2">
-                          {pinnedConversationIds.includes(conversation.id) ? (
+                          {isConversationPinned(conversation) ? (
                             <Pin
                               size={15}
                               className={[
@@ -2311,21 +2673,12 @@ export default function GovernanceChatClient({
                                 </span>
                               </div>
                             ) : (
-                              <p className="truncate text-sm font-semibold">
-                                {conversation.title}
-                              </p>
+                              conversationDisplayTitle && (
+                                <p className="line-clamp-2 break-words text-sm font-semibold leading-5">
+                                  {conversationDisplayTitle}
+                                </p>
+                              )
                             )}
-
-                            <p
-                              className={[
-                                "mt-1 line-clamp-2 text-xs leading-5",
-                                isSelected
-                                  ? "text-white/75"
-                                  : "text-slate-500",
-                              ].join(" ")}
-                            >
-                              {getConversationPreview(conversationMessages)}
-                            </p>
                           </div>
                         </div>
                       </button>
@@ -2353,15 +2706,18 @@ export default function GovernanceChatClient({
                         <div className="absolute right-2 top-12 z-20 w-44 rounded-2xl border border-[#dedede] bg-white p-1 text-xs text-slate-700 shadow-xl">
                           <button
                             type="button"
-                            onClick={() => togglePinnedConversation(conversation.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void togglePinnedConversation(conversation.id);
+                            }}
                             className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-semibold hover:bg-[#f5f5f5]"
                           >
-                            {pinnedConversationIds.includes(conversation.id) ? (
+                            {isConversationPinned(conversation) ? (
                               <PinOff size={14} />
                             ) : (
                               <Pin size={14} />
                             )}
-                            {pinnedConversationIds.includes(conversation.id)
+                            {isConversationPinned(conversation)
                               ? "Desfixar"
                               : "Fixar"}
                           </button>
@@ -2570,13 +2926,26 @@ export default function GovernanceChatClient({
                       {isWaitingForAssistant && (
                         <div className="flex justify-start">
                           <div className="max-w-[92%] rounded-3xl border border-[#dedede] bg-white px-5 py-4 text-sm leading-7 text-slate-700 shadow-sm">
-                            <div className="flex items-center gap-2">
-                              <Loader2
-                                size={16}
-                                className="animate-spin text-[#0f3a4a]"
-                              />
-                              <span>Elaborando resposta institucional...</span>
-                            </div>
+                            {streamingAssistantText.trim() ? (
+                              renderAssistantContent({
+                                id: "streaming-assistant",
+                                organization_id: organization.id,
+                                conversation_id: selectedConversation?.id ?? "",
+                                user_id: null,
+                                role: "assistant",
+                                content: streamingAssistantText,
+                                metadata: {},
+                                created_at: new Date().toISOString(),
+                              })
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <Loader2
+                                  size={16}
+                                  className="animate-spin text-[#0f3a4a]"
+                                />
+                                <span>Elaborando resposta institucional...</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
@@ -2615,7 +2984,7 @@ export default function GovernanceChatClient({
                           <button
                             type="button"
                             onClick={() => setIsPdfActionsMenuOpen((open) => !open)}
-                            disabled={isSendingMessage || selectedPdfAttachmentIds.length === 0}
+                            disabled={isSendingMessage || isUploadingPdf || selectedPdfAttachmentIds.length === 0}
                             className="inline-flex items-center gap-2 rounded-full border border-[#dedede] bg-white px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.08em] text-[#0f3a4a] transition hover:border-[#0f3a4a] hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Ações rápidas com PDFs
@@ -2636,7 +3005,7 @@ export default function GovernanceChatClient({
                                   key={action}
                                   type="button"
                                   onClick={() => applyPdfQuickAction(action)}
-                                  disabled={isSendingMessage || selectedPdfAttachmentIds.length === 0}
+                                  disabled={isSendingMessage || isUploadingPdf || selectedPdfAttachmentIds.length === 0}
                                   className="block w-full rounded-xl px-3 py-2 text-left text-xs font-semibold text-slate-700 transition hover:bg-[#f2f6f7] hover:text-[#0f3a4a] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                   {action}
@@ -2712,7 +3081,7 @@ export default function GovernanceChatClient({
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        disabled={isSendingMessage}
+                        disabled={isSendingMessage || isUploadingPdf}
                         className="mb-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#dedede] bg-white text-slate-600 transition hover:border-[#0f3a4a] hover:text-[#0f3a4a] disabled:cursor-not-allowed disabled:opacity-50"
                         aria-label="Anexar PDF"
                         title="Anexar PDF"
@@ -2724,12 +3093,14 @@ export default function GovernanceChatClient({
                         value={messageText}
                         onChange={(event) => setMessageText(event.target.value)}
                         onKeyDown={handleMessageKeyDown}
-                        disabled={isSendingMessage}
+                        disabled={isSendingMessage || isUploadingPdf}
                         rows={1}
                         placeholder={
-                          isSendingMessage
-                            ? "A Publ.IA Governança está respondendo..."
-                            : "Digite sua mensagem..."
+                          isUploadingPdf
+                            ? "Preparando PDF para leitura..."
+                            : isSendingMessage
+                              ? "A Publ.IA Governança está respondendo..."
+                              : "Digite sua mensagem..."
                         }
                         className="max-h-28 min-h-10 flex-1 resize-none bg-transparent py-2 outline-none placeholder:text-slate-400"
                       />
@@ -2749,20 +3120,69 @@ export default function GovernanceChatClient({
                       </button>
                     </div>
 
-                    <select
-                      value={selectedResponseMode}
-                      onChange={(event) =>
-                        setSelectedResponseMode(event.target.value as any)
-                      }
-                      className="h-[58px] shrink-0 rounded-3xl border border-[#dedede] bg-white px-4 text-xs font-semibold text-[#0f3a4a] outline-none transition hover:border-[#0f3a4a] focus:border-[#0f3a4a] lg:w-52"
-                      aria-label="Modo de resposta"
-                    >
-                      {responseModeOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="relative shrink-0 lg:w-52">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setIsResponseModeMenuOpen((current) => !current)
+                        }
+                        disabled={isSendingMessage}
+                        className="flex h-[58px] w-full items-center justify-between gap-3 rounded-3xl border border-[#dedede] bg-white px-4 text-left text-xs font-semibold text-[#0f3a4a] outline-none transition hover:border-[#0f3a4a] focus:border-[#0f3a4a] disabled:cursor-not-allowed disabled:opacity-70"
+                        aria-haspopup="listbox"
+                        aria-expanded={isResponseModeMenuOpen}
+                        aria-label="Modo de resposta"
+                      >
+                        <span>{selectedModeLabel}</span>
+                        <ChevronDown
+                          size={16}
+                          className={[
+                            "shrink-0 transition-transform",
+                            isResponseModeMenuOpen ? "rotate-180" : "",
+                          ].join(" ")}
+                        />
+                      </button>
+
+                      {isResponseModeMenuOpen && (
+                        <div
+                          className="absolute bottom-[68px] right-0 z-50 w-72 rounded-3xl border border-[#dedede] bg-white p-2 text-slate-700 shadow-xl"
+                          role="listbox"
+                          aria-label="Modo de resposta"
+                        >
+                          <div className="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-[0.12em] text-[#0f3a4a]">
+                            Modo de resposta
+                          </div>
+
+                          <div className="space-y-1">
+                            {responseModeOptions.map((option) => {
+                              const isSelected =
+                                option.value === selectedResponseMode;
+
+                              return (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={isSelected}
+                                  onClick={() => {
+                                    setSelectedResponseMode(option.value as any);
+                                    setIsResponseModeMenuOpen(false);
+                                  }}
+                                  className={[
+                                    "flex w-full items-center justify-between rounded-2xl px-3 py-3 text-left text-sm font-semibold transition",
+                                    isSelected
+                                      ? "bg-[#eef5f7] text-[#0f3a4a]"
+                                      : "text-slate-700 hover:bg-[#f5f5f5] hover:text-[#0f3a4a]",
+                                  ].join(" ")}
+                                >
+                                  <span>{option.label}</span>
+                                  {isSelected && <Check size={16} />}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   <p className="mt-2 text-center text-[11px] text-slate-400">

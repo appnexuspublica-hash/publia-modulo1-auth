@@ -1,4 +1,3 @@
-// src/app/governanca/fontes-oficiais/page.tsx
 import { redirect } from "next/navigation";
 
 import GovernanceHeader from "../components/GovernanceHeader";
@@ -13,6 +12,45 @@ import {
   getGovernanceTechnicalRoleLabel,
   getOrganizationStatusLabel,
 } from "@/types/governance";
+
+type ProfileRow = {
+  cpf_cnpj: string | null;
+};
+
+function formatCpf(value: string | null | undefined) {
+  if (!value) return "CPF não informado";
+
+  const digits = value.replace(/\D/g, "");
+
+  if (digits.length !== 11) {
+    return value;
+  }
+
+  return digits.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4");
+}
+
+async function getGovernanceUserLabel(params: {
+  supabase: ReturnType<typeof createReadonlySupabaseServerClient>;
+  userId: string;
+}) {
+  const { supabase, userId } = params;
+
+  try {
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("cpf_cnpj")
+      .eq("user_id", userId)
+      .maybeSingle<ProfileRow>();
+
+    if (!error && profile?.cpf_cnpj) {
+      return formatCpf(profile.cpf_cnpj);
+    }
+  } catch (error) {
+    console.error("[governance/fontes-oficiais] Erro ao buscar CPF:", error);
+  }
+
+  return "CPF não informado";
+}
 
 export default async function GovernanceOfficialSourcesPage() {
   const supabase = createReadonlySupabaseServerClient();
@@ -33,17 +71,16 @@ export default async function GovernanceOfficialSourcesPage() {
 
   const { organization, membership } = context;
 
-  const userLabel =
-    user.user_metadata?.full_name ||
-    user.user_metadata?.name ||
-    user.email ||
-    "Usuário Governança";
+  const userLabel = await getGovernanceUserLabel({
+    supabase,
+    userId: user.id,
+  });
 
   return (
     <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
       <GovernanceHeader
         userLabel={userLabel}
-        userEmail={user.email ?? null}
+        userEmail={null}
         organizationName={organization.name}
         organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
       />

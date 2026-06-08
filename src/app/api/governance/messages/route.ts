@@ -1,4 +1,3 @@
-// src/app/api/governance/messages/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
@@ -80,6 +79,7 @@ export async function POST(request: Request) {
       .select("id, organization_id, user_id, status, deleted_at")
       .eq("id", conversationId)
       .eq("organization_id", context.organization.id)
+      .eq("user_id", user.id)
       .is("deleted_at", null)
       .neq("status", "deleted")
       .maybeSingle();
@@ -98,7 +98,7 @@ export async function POST(request: Request) {
 
     if (!conversation) {
       return NextResponse.json(
-        { error: "Conversa institucional não encontrada para este órgão." },
+        { error: "Conversa institucional não encontrada para este usuário." },
         { status: 404 },
       );
     }
@@ -144,7 +144,8 @@ export async function POST(request: Request) {
         updated_at: new Date().toISOString(),
       })
       .eq("id", conversation.id)
-      .eq("organization_id", context.organization.id);
+      .eq("organization_id", context.organization.id)
+      .eq("user_id", user.id);
 
     if (updateConversationError) {
       console.warn(

@@ -1,3 +1,4 @@
+//src/lib/pdf/processForIndexing.ts
 import { extractText, getDocumentProxy } from "unpdf";
 
 export const DEFAULT_EXTRACT_TEXT_HARD_LIMIT = 250_000;

@@ -13,7 +13,6 @@ type GovernanceHeaderProps = {
 
 export default function GovernanceHeader({
   userLabel,
-  userEmail = null,
   organizationName,
   organizationStatusLabel,
 }: GovernanceHeaderProps) {
@@ -67,15 +66,11 @@ export default function GovernanceHeader({
           <span className="truncate font-semibold text-slate-900">
             {userLabel}
           </span>
-
-          {userEmail && (
-            <span className="truncate text-slate-500">{userEmail}</span>
-          )}
         </div>
 
         <Link
           href="/logout"
-          className="rounded-full border border-red-100 px-3 py-1.5 font-semibold text-red-600 transition hover:bg-red-50 hover:text-red-700"
+          className="rounded-full border border-[#0f8a5f] bg-[#0f8a5f] px-3 py-1.5 font-semibold text-white transition hover:border-[#0b6f4c] hover:bg-[#0b6f4c]"
         >
           SAIR
         </Link>

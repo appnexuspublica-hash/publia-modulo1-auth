@@ -285,3 +285,166 @@ export function getGovernanceVisibilityLabel(
 
   return labels[visibility] ?? "Privada";
 }
+
+/* ==========================================================
+   AUDITORIA
+========================================================== */
+
+export type GovernanceAuditLog = {
+  id: string;
+  organization_id: string;
+  actor_user_id: string | null;
+  action: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+/* ==========================================================
+   BASE INSTITUCIONAL
+========================================================== */
+
+export type GovernanceInstitutionalDocumentType =
+  | "lei"
+  | "decreto"
+  | "portaria"
+  | "parecer"
+  | "regulamento"
+  | "norma_interna"
+  | "manual"
+  | "outro";
+
+export type GovernanceInstitutionalDocumentReviewStatus =
+  | "pending"
+  | "approved"
+  | "rejected";
+
+export type GovernanceInstitutionalDocumentIndexingStatus =
+  | "pending"
+  | "processing"
+  | "indexed"
+  | "error";
+
+export type GovernanceInstitutionalDocument = {
+  id: string;
+  organization_id: string;
+  official_source_id: string | null;
+  uploaded_by: string | null;
+  reviewed_by: string | null;
+  title: string;
+  document_type: GovernanceInstitutionalDocumentType;
+  category: string | null;
+  source_name: string | null;
+  source_url: string | null;
+  valid_from: string | null;
+  valid_until: string | null;
+  storage_bucket: string | null;
+  storage_path: string | null;
+  file_name: string | null;
+  file_size: number | null;
+  mime_type: string | null;
+  extracted_text: string | null;
+  indexing_status: GovernanceInstitutionalDocumentIndexingStatus;
+  review_status: GovernanceInstitutionalDocumentReviewStatus;
+  metadata: Record<string, unknown> | null;
+  reviewed_at: string | null;
+  indexed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export function getGovernanceInstitutionalDocumentTypeLabel(
+  type: GovernanceInstitutionalDocumentType,
+): string {
+  const labels: Record<GovernanceInstitutionalDocumentType, string> = {
+    lei: "Lei",
+    decreto: "Decreto",
+    portaria: "Portaria",
+    parecer: "Parecer",
+    regulamento: "Regulamento",
+    norma_interna: "Norma interna",
+    manual: "Manual",
+    outro: "Outro",
+  };
+
+  return labels[type] ?? "Documento";
+}
+
+export function getGovernanceInstitutionalDocumentReviewStatusLabel(
+  status: GovernanceInstitutionalDocumentReviewStatus,
+): string {
+  const labels: Record<GovernanceInstitutionalDocumentReviewStatus, string> = {
+    pending: "Pendente",
+    approved: "Aprovado",
+    rejected: "Rejeitado",
+  };
+
+  return labels[status] ?? "Pendente";
+}
+
+export function getGovernanceInstitutionalDocumentIndexingStatusLabel(
+  status: GovernanceInstitutionalDocumentIndexingStatus,
+): string {
+  const labels: Record<GovernanceInstitutionalDocumentIndexingStatus, string> = {
+    pending: "Pendente",
+    processing: "Processando",
+    indexed: "Indexado",
+    error: "Erro",
+  };
+
+  return labels[status] ?? "Pendente";
+}
+
+/* ==========================================================
+   FONTES OFICIAIS
+========================================================== */
+
+export type GovernanceOfficialSourceType =
+  | "municipal_website"
+  | "official_gazette"
+  | "transparency_portal"
+  | "institutional_repository"
+  | "other";
+
+export type GovernanceOfficialSourceStatus =
+  | "active"
+  | "inactive";
+
+export type GovernanceOfficialSource = {
+  id: string;
+  organization_id: string;
+  name: string;
+  source_type: GovernanceOfficialSourceType;
+  url: string;
+  notes: string | null;
+  status: GovernanceOfficialSourceStatus;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export function getGovernanceOfficialSourceTypeLabel(
+  type: GovernanceOfficialSourceType,
+): string {
+  const labels: Record<GovernanceOfficialSourceType, string> = {
+    municipal_website: "Site municipal",
+    official_gazette: "Diário oficial",
+    transparency_portal: "Portal da transparência",
+    institutional_repository: "Repositório institucional",
+    other: "Outra fonte",
+  };
+
+  return labels[type] ?? "Fonte";
+}
+
+export function getGovernanceOfficialSourceStatusLabel(
+  status: GovernanceOfficialSourceStatus,
+): string {
+  const labels: Record<GovernanceOfficialSourceStatus, string> = {
+    active: "Ativa",
+    inactive: "Inativa",
+  };
+
+  return labels[status] ?? "Ativa";
+}
