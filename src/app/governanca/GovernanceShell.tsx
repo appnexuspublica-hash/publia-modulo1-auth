@@ -60,6 +60,14 @@ function formatCnpj(value: string) {
   );
 }
 
+function formatPopulation(value: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Não informado";
+  }
+
+  return `${new Intl.NumberFormat("pt-BR").format(value)} habitantes`;
+}
+
 function EmptyGovernanceAccess({ userLabel }: { userLabel: string }) {
   return (
     <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
@@ -141,7 +149,7 @@ export default function GovernanceShell({
       description: "Acesso operacional à IA institucional do órgão.",
       icon: MessageSquare,
       value: "Acessar chat",
-      href: "/governanca/conversas",
+      href: "/governanca/chat",
       enabled: true,
     },
     {
@@ -283,6 +291,24 @@ export default function GovernanceShell({
                     {getGovernanceMunicipalitySizeLabel(
                       organization.municipality_size,
                     )}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    População
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {formatPopulation(organization.population)}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Região
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organization.region || "Não informado"}
                   </strong>
                 </div>
               </div>

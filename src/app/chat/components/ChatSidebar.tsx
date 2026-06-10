@@ -1,4 +1,4 @@
-﻿//src/app/chat/components/ChatSidebar.tsx
+//src/app/chat/components/ChatSidebar.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -54,9 +54,9 @@ function hasActiveAccess(status: string | null | undefined): boolean {
   return status === "trial_active" || status === "subscription_active";
 }
 
-function formatUserLabel(value: string): { label: "UsuÃ¡rio"; value: string } {
+function formatUserLabel(value: string): { label: "Usuário"; value: string } {
   return {
-    label: "UsuÃ¡rio",
+    label: "Usuário",
     value: String(value ?? "").trim(),
   };
 }
@@ -121,14 +121,14 @@ function getCompactStatusBadge(access?: FrontendAccessSummary | null) {
 function getTierBadge(productTier?: ProductTier) {
   if (productTier === "strategic") {
     return {
-      label: "ESTRATÃ‰GICO",
+      label: "ESTRATÉGICO",
       className: "bg-[#dbeafe] text-[#1d4ed8]",
     };
   }
 
   if (productTier === "governance") {
     return {
-      label: "GOVERNANÃ‡A",
+      label: "GOVERNANÇA",
       className: "bg-[#ede9fe] text-[#6d28d9]",
     };
   }
@@ -301,21 +301,21 @@ export function ChatSidebar({
         productName: "Publ.IA Essencial",
         productLabel: "Publ.IA ESSENCIAL",
         versionLabel: "1.7",
-        vendorLabel: "Nexus PÃºblica",
+        vendorLabel: "Nexus Pública",
         accentVariant: "essential",
       },
       strategic: {
-        productName: "Publ.IA EstratÃ©gico",
-        productLabel: "Publ.IA ESTRATÃ‰GICO",
+        productName: "Publ.IA Estratégico",
+        productLabel: "Publ.IA ESTRATÉGICO",
         versionLabel: "2.01",
-        vendorLabel: "Nexus PÃºblica",
+        vendorLabel: "Nexus Pública",
         accentVariant: "strategic",
       },
       governance: {
-        productName: "Publ.IA GovernanÃ§a",
-        productLabel: "Publ.IA GOVERNANÃ‡A",
+        productName: "Publ.IA Governança",
+        productLabel: "Publ.IA GOVERNANÇA",
         versionLabel: "3.0",
-        vendorLabel: "Nexus PÃºblica",
+        vendorLabel: "Nexus Pública",
         accentVariant: "governance",
       },
     };
@@ -448,9 +448,9 @@ export function ChatSidebar({
   }, [sidebarCta, isBlocked, access?.access_status, access?.accessStatus]);
 
   const canShowUpgradeButton = useMemo(() => {
-    // Regra comercial atual: o upgrade para o EstratÃ©gico deve ser feito pelo
+    // Regra comercial atual: o upgrade para o Estratégico deve ser feito pelo
     // link de assinatura/upgrade do sidebarCta. O antigo teste de 7 dias fica
-    // neutralizado aqui para nÃ£o criar grants conflitantes.
+    // neutralizado aqui para não criar grants conflitantes.
     return false;
   }, []);
 
@@ -828,7 +828,7 @@ export function ChatSidebar({
                           {pdfPeriod === "account"
                             ? " na conta"
                             : pdfPeriod === "month"
-                              ? " no mÃªs"
+                              ? " no mês"
                               : ""}
                         </>
                       ) : (
@@ -864,7 +864,7 @@ export function ChatSidebar({
                   </div>
                   {typeof effectiveMaxPdfsPerConversation === "number" && (
                     <div className="mt-1 text-[11px] text-slate-500">
-                      AtÃ© {effectiveMaxPdfsPerConversation} PDFs por conversa
+                      Até {effectiveMaxPdfsPerConversation} PDFs por conversa
                     </div>
                   )}
                 </div>
@@ -889,13 +889,13 @@ export function ChatSidebar({
                       className="mt-2 flex w-full flex-col items-center justify-center rounded-full bg-[#f5a000] px-3 py-2 text-center text-[11px] font-semibold leading-tight text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60 whitespace-normal"
                     >
                       {upgradeLoading ? (
-                        "Ativando teste do EstratÃ©gico..."
+                        "Ativando teste do Estratégico..."
                       ) : (
                         <>
                           <span className="block">
-                            Testar Publ.IA EstratÃ©gico agora.
+                            Testar Publ.IA Estratégico agora.
                           </span>
-                          <span className="block">(7 dias grÃ¡tis)</span>
+                          <span className="block">(7 dias grátis)</span>
                         </>
                       )}
                     </button>
@@ -920,7 +920,7 @@ export function ChatSidebar({
         {isBlocked && blockedMessage && (
           <div className={blockedCardStyles.container}>
             <div className={blockedCardStyles.title}>
-              Acesso bloqueado para novas aÃ§Ãµes
+              Acesso bloqueado para novas ações
             </div>
             <div className={blockedCardStyles.text}>{blockedMessage}</div>
 
@@ -1032,7 +1032,7 @@ export function ChatSidebar({
             className="text-xs font-semibold tracking-wide"
             style={{ color: isStrategic ? "#ffffff" : "#334155" }}
           >
-            HISTÃ“RICO
+            HISTÓRICO
           </div>
         </div>
 
@@ -1044,7 +1044,7 @@ export function ChatSidebar({
             >
               {searchTerm.trim()
                 ? "Nenhuma conversa encontrada para a busca informada."
-                : "Nenhuma conversa ainda. Clique em NOVA CONVERSA para comeÃ§ar."}
+                : "Nenhuma conversa ainda. Clique em NOVA CONVERSA para começar."}
             </div>
           )}
 
@@ -1174,7 +1174,7 @@ export function ChatSidebar({
                               }}
                               title="Conversa fixada"
                             >
-                              â˜…
+                              ★
                             </span>
                           )}
 
@@ -1197,10 +1197,10 @@ export function ChatSidebar({
                             style={{
                               color: isActive ? "#ffffff" : "rgba(255,255,255,0.9)",
                             }}
-                            title="Mais opÃ§Ãµes"
-                            aria-label="Mais opÃ§Ãµes"
+                            title="Mais opções"
+                            aria-label="Mais opções"
                           >
-                            â€¦
+                            ⋮
                           </button>
 
                           {isMenuOpen && (
@@ -1275,7 +1275,7 @@ export function ChatSidebar({
                           title="Excluir conversa"
                           aria-label="Excluir conversa"
                         >
-                          {isDeleteHovered ? "Ã—" : "â€“"}
+                          {isDeleteHovered ? "×" : "–"}
                         </button>
                       )}
                     </div>

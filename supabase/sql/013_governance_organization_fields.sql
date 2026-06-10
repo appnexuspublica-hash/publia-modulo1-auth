@@ -1,3 +1,4 @@
+//supabase/sql/013_governance_organization_fields
 -- =========================================================
 -- 013_governance_organization_fields.sql
 -- Publ.IA Governança — Campos completos do cadastro do órgão

@@ -63,6 +63,39 @@ function formatDateTime(value: string) {
   }).format(date);
 }
 
+function formatDateGroupLabel(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Sem data";
+  }
+
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  const normalize = (currentDate: Date) =>
+    new Date(
+      currentDate.getFullYear(),
+      currentDate.getMonth(),
+      currentDate.getDate(),
+    ).getTime();
+
+  const dateTime = normalize(date);
+
+  if (dateTime === normalize(today)) {
+    return "Hoje";
+  }
+
+  if (dateTime === normalize(yesterday)) {
+    return "Ontem";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+  }).format(date);
+}
+
 function mergeMessages(
   currentMessages: GovernanceMessage[],
   newMessages: GovernanceMessage[],
@@ -424,67 +457,83 @@ export default function GovernanceConversationsClient({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {initialConversations.map((conversation) => {
+                  {initialConversations.map((conversation, index) => {
                     const isSelected =
                       conversation.id === selectedConversation?.id;
+                    const currentDateLabel = formatDateGroupLabel(
+                      conversation.updated_at,
+                    );
+                    const previousConversation = initialConversations[index - 1];
+                    const previousDateLabel = previousConversation
+                      ? formatDateGroupLabel(previousConversation.updated_at)
+                      : null;
+                    const shouldShowDateGroup =
+                      currentDateLabel !== previousDateLabel;
 
                     return (
-                      <button
-                        key={conversation.id}
-                        type="button"
-                        onClick={() =>
-                          setSelectedConversationId(conversation.id)
-                        }
-                        className={[
-                          "w-full rounded-2xl border p-4 text-left transition",
-                          isSelected
-                            ? "border-[#0f3a4a] bg-[#f8f8f8]"
-                            : "border-[#dedede] bg-white hover:bg-[#f8f8f8]",
-                        ].join(" ")}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <h2 className="line-clamp-2 text-sm font-bold text-slate-950">
-                              {conversation.title}
-                            </h2>
+                      <div key={conversation.id} className="space-y-2">
+                        {shouldShowDateGroup && (
+                          <div className="px-1 pt-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 first:pt-0">
+                            {currentDateLabel}
+                          </div>
+                        )}
 
-                            <p className="mt-1 text-xs text-slate-500">
-                              {conversation.category || "Sem categoria"}
-                            </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSelectedConversationId(conversation.id)
+                          }
+                          className={[
+                            "w-full rounded-2xl border p-4 text-left transition",
+                            isSelected
+                              ? "border-[#0f3a4a] bg-[#f8f8f8]"
+                              : "border-[#dedede] bg-white hover:bg-[#f8f8f8]",
+                          ].join(" ")}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <h2 className="line-clamp-2 text-sm font-bold text-slate-950">
+                                {conversation.title}
+                              </h2>
+
+                              <p className="mt-1 text-xs text-slate-500">
+                                {conversation.category || "Sem categoria"}
+                              </p>
+                            </div>
+
+                            {conversation.visibility === "private" ? (
+                              <Lock
+                                size={16}
+                                className="shrink-0 text-slate-500"
+                              />
+                            ) : (
+                              <Users
+                                size={16}
+                                className="shrink-0 text-slate-500"
+                              />
+                            )}
                           </div>
 
-                          {conversation.visibility === "private" ? (
-                            <Lock
-                              size={16}
-                              className="shrink-0 text-slate-500"
-                            />
-                          ) : (
-                            <Users
-                              size={16}
-                              className="shrink-0 text-slate-500"
-                            />
-                          )}
-                        </div>
+                          <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
+                            <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
+                              {getGovernanceResponseModeLabel(
+                                conversation.response_mode,
+                              )}
+                            </span>
 
-                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
-                          <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
-                            {getGovernanceResponseModeLabel(
-                              conversation.response_mode,
-                            )}
-                          </span>
+                            <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
+                              {getGovernanceVisibilityLabel(
+                                conversation.visibility,
+                              )}
+                            </span>
+                          </div>
 
-                          <span className="rounded-full bg-[#e6e6e6] px-2 py-1 text-slate-700">
-                            {getGovernanceVisibilityLabel(
-                              conversation.visibility,
-                            )}
-                          </span>
-                        </div>
-
-                        <div className="mt-3 flex items-center gap-1 text-[11px] text-slate-500">
-                          <Clock3 size={13} />
-                          {formatDateTime(conversation.updated_at)}
-                        </div>
-                      </button>
+                          <div className="mt-3 flex items-center gap-1 text-[11px] text-slate-500">
+                            <Clock3 size={13} />
+                            {formatDateTime(conversation.updated_at)}
+                          </div>
+                        </button>
+                      </div>
                     );
                   })}
                 </div>

@@ -86,7 +86,7 @@ export default function GovernanceLoginForm() {
         return;
       }
 
-      router.replace(data.redirectTo ?? "/governanca/chat");
+      router.replace(data.redirectTo ?? "/governanca");
       router.refresh();
     } catch (loginError) {
       console.error("[GovernanceLoginForm] login error:", loginError);

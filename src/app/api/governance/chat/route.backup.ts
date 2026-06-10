@@ -411,208 +411,6 @@ function mapMessagesToOpenAIInput(
 }
 
 
-type SuggestedNextQuestion = {
-  id: string;
-  label: string;
-  prompt: string;
-};
-
-function stripSuggestionMarkdown(value: string) {
-  return String(value ?? "")
-    .replace(/^[-*•\d.)\s]+/g, "")
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/__(.*?)__/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeSuggestionText(value: unknown) {
-  const text = stripSuggestionMarkdown(String(value ?? ""));
-
-  if (!text) {
-    return "";
-  }
-
-  return text.length > 140 ? `${text.slice(0, 137).trim()}...` : text;
-}
-
-function makeSuggestionId(value: string, index: number) {
-  const base = String(value ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 48);
-
-  return base ? `${base}-${index + 1}` : `suggestion-${index + 1}`;
-}
-
-function parseSuggestedNextQuestions(rawText: string): SuggestedNextQuestion[] {
-  const text = String(rawText ?? "").trim();
-
-  if (!text) {
-    return [];
-  }
-
-  const candidates: unknown[] = [];
-
-  try {
-    const parsed = JSON.parse(text);
-    const list = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.suggestions)
-        ? parsed.suggestions
-        : Array.isArray(parsed?.questions)
-          ? parsed.questions
-          : [];
-
-    candidates.push(...list);
-  } catch {
-    const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-
-    if (jsonMatch?.[0]) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const list = Array.isArray(parsed)
-          ? parsed
-          : Array.isArray(parsed?.suggestions)
-            ? parsed.suggestions
-            : Array.isArray(parsed?.questions)
-              ? parsed.questions
-              : [];
-
-        candidates.push(...list);
-      } catch {
-        // Fallback abaixo.
-      }
-    }
-  }
-
-  if (candidates.length === 0) {
-    const fallbackLines = text
-      .split("\n")
-      .map((line) => normalizeSuggestionText(line))
-      .filter(Boolean);
-
-    candidates.push(...fallbackLines);
-  }
-
-  const seen = new Set<string>();
-  const suggestions: SuggestedNextQuestion[] = [];
-
-  for (const candidate of candidates) {
-    const rawLabel =
-      typeof candidate === "string"
-        ? candidate
-        : (candidate as any)?.label ?? (candidate as any)?.question ?? (candidate as any)?.prompt;
-
-    const rawPrompt =
-      typeof candidate === "string"
-        ? candidate
-        : (candidate as any)?.prompt ?? (candidate as any)?.question ?? (candidate as any)?.label;
-
-    const label = normalizeSuggestionText(rawLabel);
-    const prompt = normalizeSuggestionText(rawPrompt);
-
-    if (!label || !prompt) {
-      continue;
-    }
-
-    const key = prompt.toLowerCase();
-
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    suggestions.push({
-      id: makeSuggestionId(prompt, suggestions.length),
-      label,
-      prompt,
-    });
-
-    if (suggestions.length >= 5) {
-      break;
-    }
-  }
-
-  return suggestions;
-}
-
-async function generateGovernanceFollowUpSuggestions(params: {
-  userContent: string;
-  assistantText: string;
-  responseMode: GovernanceResponseMode;
-  hasSelectedPdfAttachments: boolean;
-  selectedPdfAttachmentNames: string[];
-}): Promise<SuggestedNextQuestion[]> {
-  if (!openai) {
-    return [];
-  }
-
-  const assistantContext = clampText(params.assistantText, 7000);
-  const userContext = clampText(params.userContent, 1800);
-
-  if (!assistantContext) {
-    return [];
-  }
-
-  const pdfContext = params.hasSelectedPdfAttachments
-    ? [
-        "A pergunta envolveu PDFs selecionados.",
-        params.selectedPdfAttachmentNames.length > 0
-          ? `PDFs informados: ${params.selectedPdfAttachmentNames.join(", ")}.`
-          : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "A pergunta não usou PDFs selecionados.";
-
-  const suggestionInstructions = [
-    "Você gera sugestões inteligentes de próxima pergunta para o chat Publ.IA Governança.",
-    "Baseie-se exclusivamente na pergunta do usuário e na resposta da IA.",
-    "Crie perguntas realmente contextuais, específicas e úteis para continuidade da conversa.",
-    "Não use sugestões genéricas como 'Gerar resumo executivo', 'Pontos de atenção' ou 'Transformar em checklist', salvo se isso for claramente o próximo passo mais específico.",
-    "As perguntas devem ser em português do Brasil, curtas e acionáveis.",
-    "Retorne somente JSON válido, sem Markdown, sem comentários e sem texto antes ou depois.",
-    'Formato obrigatório: {"suggestions":[{"label":"...","prompt":"..."}]}',
-    "Gere entre 3 e 5 sugestões.",
-  ].join("\n");
-
-  const suggestionInput = [
-    {
-      role: "user" as const,
-      content: [
-        `Modo de resposta usado: ${params.responseMode}.`,
-        pdfContext,
-        "",
-        "Pergunta do usuário:",
-        userContext,
-        "",
-        "Resposta da IA:",
-        assistantContext,
-      ].join("\n"),
-    },
-  ];
-
-  try {
-    const response = await openai.responses.create({
-      model: OPENAI_MODEL_GOVERNANCE,
-      instructions: suggestionInstructions,
-      input: suggestionInput,
-      temperature: 0.2,
-      max_output_tokens: 700,
-    } as any);
-
-    return parseSuggestedNextQuestions(response.output_text ?? "");
-  } catch (error) {
-    console.error("[governance/chat] Erro ao gerar sugestões de próxima pergunta:", error);
-    return [];
-  }
-}
-
 type GovernancePdfContextResult = {
   selectedPdfFileIds: string[];
   pdfContextText: string;
@@ -1364,19 +1162,10 @@ export async function POST(request: Request) {
         );
       }
 
-      const suggestions = await generateGovernanceFollowUpSuggestions({
-        userContent: content,
-        assistantText,
-        responseMode: effectiveResponseMode,
-        hasSelectedPdfAttachments,
-        selectedPdfAttachmentNames,
-      });
-
       return NextResponse.json({
         userMessage,
         assistantMessage,
         conversationTitle,
-        suggestions,
       });
     }
 
@@ -1493,23 +1282,10 @@ export async function POST(request: Request) {
           );
         }
 
-        const suggestions = await generateGovernanceFollowUpSuggestions({
-          userContent: content,
-          assistantText,
-          responseMode: effectiveResponseMode,
-          hasSelectedPdfAttachments,
-          selectedPdfAttachmentNames,
-        });
-
-        if (suggestions.length > 0) {
-          send("suggestions", { suggestions });
-        }
-
         send("done", {
           userMessage,
           assistantMessage,
           conversationTitle,
-          suggestions,
         });
 
         controller.close();

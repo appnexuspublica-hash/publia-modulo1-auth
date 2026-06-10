@@ -4,7 +4,9 @@ import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type {
   GovernanceFunctionalRole,
+  GovernanceHistoryRetentionPolicy,
   GovernanceMemberStatus,
+  GovernanceMunicipalitySize,
   GovernanceOrganizationType,
   GovernanceTechnicalRole,
   OrganizationStatus,
@@ -23,7 +25,9 @@ type OrganizationRow = {
   municipality_name: string | null;
   state_uf: string | null;
   ibge_code: string | null;
-  municipality_size: "small" | "medium" | "large" | null;
+  municipality_size: GovernanceMunicipalitySize | null;
+  population: number | null;
+  region: string | null;
   product_tier: "governance";
   status: OrganizationStatus;
   primary_color: string;
@@ -32,7 +36,7 @@ type OrganizationRow = {
   contract_starts_at: string | null;
   contract_ends_at: string | null;
   seats_limit: number | null;
-  history_retention_policy: "contract_duration" | null;
+  history_retention_policy: GovernanceHistoryRetentionPolicy | null;
   created_at: string;
   updated_at: string;
 };
@@ -52,6 +56,13 @@ type CreateBody = {
     municipalityName?: string;
     stateUf?: string;
     ibgeCode?: string;
+    municipalitySize?: GovernanceMunicipalitySize;
+    population?: number | null;
+    region?: string;
+    contractReference?: string;
+    contractStartsAt?: string;
+    contractEndsAt?: string;
+    historyRetentionPolicy?: GovernanceHistoryRetentionPolicy;
     organizationType?: GovernanceOrganizationType;
     status?: OrganizationStatus;
     seatsLimit?: number | null;
@@ -74,6 +85,13 @@ type PatchBody = {
     municipalityName: string;
     stateUf: string;
     ibgeCode: string;
+    municipalitySize: GovernanceMunicipalitySize;
+    population: number | null;
+    region: string;
+    contractReference: string;
+    contractStartsAt: string;
+    contractEndsAt: string;
+    historyRetentionPolicy: GovernanceHistoryRetentionPolicy;
     organizationType: GovernanceOrganizationType;
     status: OrganizationStatus;
     seatsLimit: number | null;
@@ -93,6 +111,16 @@ const allowedOrganizationTypes: GovernanceOrganizationType[] = [
   "consorcio_publico",
   "instituto_previdencia",
   "outro",
+];
+
+const allowedMunicipalitySizes: GovernanceMunicipalitySize[] = [
+  "small",
+  "medium",
+  "large",
+];
+
+const allowedHistoryRetentionPolicies: GovernanceHistoryRetentionPolicy[] = [
+  "contract_duration",
 ];
 
 const allowedStatuses: OrganizationStatus[] = [
@@ -145,6 +173,44 @@ function isValidOrganizationType(
 
 function isValidStatus(value: string): value is OrganizationStatus {
   return allowedStatuses.includes(value as OrganizationStatus);
+}
+
+function isValidMunicipalitySize(
+  value: string,
+): value is GovernanceMunicipalitySize {
+  return allowedMunicipalitySizes.includes(value as GovernanceMunicipalitySize);
+}
+
+function isValidHistoryRetentionPolicy(
+  value: string,
+): value is GovernanceHistoryRetentionPolicy {
+  return allowedHistoryRetentionPolicies.includes(
+    value as GovernanceHistoryRetentionPolicy,
+  );
+}
+
+function normalizeDateValue(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function normalizePopulation(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const normalized = Math.floor(value);
+
+  return normalized > 0 ? normalized : null;
 }
 
 function isValidFunctionalRole(value: string): value is GovernanceFunctionalRole {
@@ -362,6 +428,8 @@ export async function GET(request: Request) {
           state_uf,
           ibge_code,
           municipality_size,
+          population,
+          region,
           product_tier,
           status,
           primary_color,
@@ -417,6 +485,22 @@ export async function POST(request: Request) {
     const municipalityName = normalizeText(organization?.municipalityName);
     const stateUf = normalizeText(organization?.stateUf).toUpperCase().slice(0, 2);
     const ibgeCode = onlyDigits(normalizeText(organization?.ibgeCode)) || null;
+    const municipalitySize =
+      typeof organization?.municipalitySize === "string" &&
+      isValidMunicipalitySize(organization.municipalitySize)
+        ? organization.municipalitySize
+        : "small";
+    const population = normalizePopulation(organization?.population);
+    const region = normalizeText(organization?.region) || null;
+    const contractReference =
+      normalizeText(organization?.contractReference) || null;
+    const contractStartsAt = normalizeDateValue(organization?.contractStartsAt);
+    const contractEndsAt = normalizeDateValue(organization?.contractEndsAt);
+    const historyRetentionPolicy =
+      typeof organization?.historyRetentionPolicy === "string" &&
+      isValidHistoryRetentionPolicy(organization.historyRetentionPolicy)
+        ? organization.historyRetentionPolicy
+        : "contract_duration";
     const organizationType =
       typeof organization?.organizationType === "string" &&
       isValidOrganizationType(organization.organizationType)
@@ -536,12 +620,17 @@ export async function POST(request: Request) {
           municipality_name: municipalityName,
           state_uf: stateUf,
           ibge_code: ibgeCode,
-          municipality_size: "small",
+          municipality_size: municipalitySize,
+          population,
+          region,
+          contract_reference: contractReference,
+          contract_starts_at: contractStartsAt,
+          contract_ends_at: contractEndsAt,
+          history_retention_policy: historyRetentionPolicy,
           product_tier: "governance",
           status,
           primary_color: "#0f3a4a",
           seats_limit: seatsLimit,
-          history_retention_policy: "contract_duration",
         })
         .select(
           `
@@ -555,6 +644,8 @@ export async function POST(request: Request) {
             state_uf,
             ibge_code,
             municipality_size,
+            population,
+            region,
             product_tier,
             status,
             primary_color,
@@ -917,6 +1008,49 @@ export async function PATCH(request: Request) {
 
     if (typeof organization?.ibgeCode === "string") {
       updates.ibge_code = onlyDigits(organization.ibgeCode) || null;
+    }
+
+    if (
+      typeof organization?.municipalitySize === "string" &&
+      isValidMunicipalitySize(organization.municipalitySize)
+    ) {
+      updates.municipality_size = organization.municipalitySize;
+    }
+
+    if (organization?.population === null) {
+      updates.population = null;
+    }
+
+    if (
+      typeof organization?.population === "number" &&
+      Number.isFinite(organization.population)
+    ) {
+      updates.population = normalizePopulation(organization.population);
+    }
+
+    if (typeof organization?.region === "string") {
+      updates.region = organization.region.trim() || null;
+    }
+
+    if (typeof organization?.contractReference === "string") {
+      updates.contract_reference = organization.contractReference.trim() || null;
+    }
+
+    if (typeof organization?.contractStartsAt === "string") {
+      updates.contract_starts_at = normalizeDateValue(
+        organization.contractStartsAt,
+      );
+    }
+
+    if (typeof organization?.contractEndsAt === "string") {
+      updates.contract_ends_at = normalizeDateValue(organization.contractEndsAt);
+    }
+
+    if (
+      typeof organization?.historyRetentionPolicy === "string" &&
+      isValidHistoryRetentionPolicy(organization.historyRetentionPolicy)
+    ) {
+      updates.history_retention_policy = organization.historyRetentionPolicy;
     }
 
     if (

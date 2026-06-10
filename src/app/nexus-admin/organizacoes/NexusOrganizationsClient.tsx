@@ -18,9 +18,13 @@ import {
 } from "lucide-react";
 
 import {
+  getGovernanceHistoryRetentionPolicyLabel,
+  getGovernanceMunicipalitySizeLabel,
   getGovernanceOrganizationTypeLabel,
   getOrganizationStatusLabel,
   type GovernanceFunctionalRole,
+  type GovernanceHistoryRetentionPolicy,
+  type GovernanceMunicipalitySize,
   type GovernanceOrganizationType,
   type OrganizationStatus,
 } from "@/types/governance";
@@ -35,7 +39,9 @@ type OrganizationRow = {
   municipality_name: string | null;
   state_uf: string | null;
   ibge_code: string | null;
-  municipality_size: "small" | "medium" | "large" | null;
+  municipality_size: GovernanceMunicipalitySize | null;
+  population: number | null;
+  region: string | null;
   product_tier: "governance";
   status: OrganizationStatus;
   primary_color: string;
@@ -44,7 +50,7 @@ type OrganizationRow = {
   contract_starts_at: string | null;
   contract_ends_at: string | null;
   seats_limit: number | null;
-  history_retention_policy: "contract_duration" | null;
+  history_retention_policy: GovernanceHistoryRetentionPolicy | null;
   created_at: string;
   updated_at: string;
 };
@@ -62,6 +68,25 @@ const organizationTypeOptions: Array<{
   { value: "consorcio_publico", label: "Consórcio Público" },
   { value: "instituto_previdencia", label: "Instituto/Previdência" },
   { value: "outro", label: "Outro" },
+];
+
+const municipalitySizeOptions: Array<{
+  value: GovernanceMunicipalitySize;
+  label: string;
+}> = [
+  { value: "small", label: "Pequeno — até 50 mil habitantes" },
+  { value: "medium", label: "Médio — de 50 mil até 200 mil habitantes" },
+  { value: "large", label: "Grande — acima de 200 mil habitantes" },
+];
+
+const historyRetentionPolicyOptions: Array<{
+  value: GovernanceHistoryRetentionPolicy;
+  label: string;
+}> = [
+  {
+    value: "contract_duration",
+    label: getGovernanceHistoryRetentionPolicyLabel("contract_duration"),
+  },
 ];
 
 const statusOptions: Array<{
@@ -97,6 +122,13 @@ const initialCreateForm = {
   municipalityName: "",
   stateUf: "",
   ibgeCode: "",
+  municipalitySize: "small" as GovernanceMunicipalitySize,
+  population: "",
+  region: "",
+  contractReference: "",
+  contractStartsAt: "",
+  contractEndsAt: "",
+  historyRetentionPolicy: "contract_duration" as GovernanceHistoryRetentionPolicy,
   organizationType: "prefeitura" as GovernanceOrganizationType,
   status: "implementation" as OrganizationStatus,
   seatsLimit: "10",
@@ -114,6 +146,13 @@ const initialEditForm = {
   municipalityName: "",
   stateUf: "",
   ibgeCode: "",
+  municipalitySize: "small" as GovernanceMunicipalitySize,
+  population: "",
+  region: "",
+  contractReference: "",
+  contractStartsAt: "",
+  contractEndsAt: "",
+  historyRetentionPolicy: "contract_duration" as GovernanceHistoryRetentionPolicy,
   organizationType: "prefeitura" as GovernanceOrganizationType,
   status: "implementation" as OrganizationStatus,
   seatsLimit: "",
@@ -161,6 +200,14 @@ function formatCpfInput(value: string) {
 
 function formatCnpj(value: string) {
   return formatCnpjInput(value);
+}
+
+function formatPopulation(value: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Não informado";
+  }
+
+  return new Intl.NumberFormat("pt-BR").format(value);
 }
 
 function getStatusBadgeClass(status: OrganizationStatus) {
@@ -334,6 +381,15 @@ export default function NexusOrganizationsClient() {
               municipalityName: createForm.municipalityName,
               stateUf: createForm.stateUf,
               ibgeCode: onlyDigits(createForm.ibgeCode),
+              municipalitySize: createForm.municipalitySize,
+              population: createForm.population
+                ? Number(onlyDigits(createForm.population))
+                : null,
+              region: createForm.region,
+              contractReference: createForm.contractReference,
+              contractStartsAt: createForm.contractStartsAt,
+              contractEndsAt: createForm.contractEndsAt,
+              historyRetentionPolicy: createForm.historyRetentionPolicy,
               organizationType: createForm.organizationType,
               status: createForm.status,
               seatsLimit: createForm.seatsLimit
@@ -382,6 +438,19 @@ export default function NexusOrganizationsClient() {
       municipalityName: organization.municipality_name ?? "",
       stateUf: organization.state_uf ?? "",
       ibgeCode: organization.ibge_code ?? "",
+      municipalitySize: organization.municipality_size ?? "small",
+      population:
+        organization.population === null ? "" : String(organization.population),
+      region: organization.region ?? "",
+      contractReference: organization.contract_reference ?? "",
+      contractStartsAt: organization.contract_starts_at
+        ? organization.contract_starts_at.slice(0, 10)
+        : "",
+      contractEndsAt: organization.contract_ends_at
+        ? organization.contract_ends_at.slice(0, 10)
+        : "",
+      historyRetentionPolicy:
+        organization.history_retention_policy ?? "contract_duration",
       organizationType: organization.organization_type ?? "prefeitura",
       status: organization.status,
       seatsLimit:
@@ -416,6 +485,15 @@ export default function NexusOrganizationsClient() {
               municipalityName: editForm.municipalityName,
               stateUf: editForm.stateUf,
               ibgeCode: onlyDigits(editForm.ibgeCode),
+              municipalitySize: editForm.municipalitySize,
+              population: editForm.population
+                ? Number(onlyDigits(editForm.population))
+                : null,
+              region: editForm.region,
+              contractReference: editForm.contractReference,
+              contractStartsAt: editForm.contractStartsAt,
+              contractEndsAt: editForm.contractEndsAt,
+              historyRetentionPolicy: editForm.historyRetentionPolicy,
               organizationType: editForm.organizationType,
               status: editForm.status,
               seatsLimit: editForm.seatsLimit ? Number(editForm.seatsLimit) : null,
@@ -814,6 +892,66 @@ export default function NexusOrganizationsClient() {
 
               <div>
                 <label className="text-xs font-semibold text-slate-700">
+                  Porte
+                </label>
+                <select
+                  value={createForm.municipalitySize}
+                  onChange={(event) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      municipalitySize: event.target
+                        .value as GovernanceMunicipalitySize,
+                    }))
+                  }
+                  className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                >
+                  {municipalitySizeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700">
+                  População
+                </label>
+                <input
+                  inputMode="numeric"
+                  value={createForm.population}
+                  onChange={(event) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      population: onlyDigits(event.target.value),
+                    }))
+                  }
+                  placeholder="Ex.: 50000"
+                  className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-700">
+                  Região
+                </label>
+                <input
+                  value={createForm.region}
+                  onChange={(event) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      region: event.target.value,
+                    }))
+                  }
+                  placeholder="Ex.: Norte Pioneiro"
+                  className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700">
                   Status
                 </label>
                 <select
@@ -850,6 +988,90 @@ export default function NexusOrganizationsClient() {
                   }
                   className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
                 />
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-[#dedede] bg-[#f8f8f8] p-4">
+              <h3 className="mb-3 text-sm font-bold text-slate-950">
+                Contrato e retenção
+              </h3>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Contrato / Referência
+                  </label>
+                  <input
+                    value={createForm.contractReference}
+                    onChange={(event) =>
+                      setCreateForm((current) => ({
+                        ...current,
+                        contractReference: event.target.value,
+                      }))
+                    }
+                    placeholder="Ex.: Contrato 001/2026"
+                    className="mt-1 w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                  />
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700">
+                      Início do contrato
+                    </label>
+                    <input
+                      type="date"
+                      value={createForm.contractStartsAt}
+                      onChange={(event) =>
+                        setCreateForm((current) => ({
+                          ...current,
+                          contractStartsAt: event.target.value,
+                        }))
+                      }
+                      className="mt-1 w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700">
+                      Fim do contrato
+                    </label>
+                    <input
+                      type="date"
+                      value={createForm.contractEndsAt}
+                      onChange={(event) =>
+                        setCreateForm((current) => ({
+                          ...current,
+                          contractEndsAt: event.target.value,
+                        }))
+                      }
+                      className="mt-1 w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Retenção do histórico
+                  </label>
+                  <select
+                    value={createForm.historyRetentionPolicy}
+                    onChange={(event) =>
+                      setCreateForm((current) => ({
+                        ...current,
+                        historyRetentionPolicy: event.target
+                          .value as GovernanceHistoryRetentionPolicy,
+                      }))
+                    }
+                    className="mt-1 w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                  >
+                    {historyRetentionPolicyOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -1078,6 +1300,49 @@ export default function NexusOrganizationsClient() {
                 />
 
                 <select
+                  value={editForm.municipalitySize}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      municipalitySize: event.target
+                        .value as GovernanceMunicipalitySize,
+                    }))
+                  }
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                >
+                  {municipalitySizeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+
+                <input
+                  inputMode="numeric"
+                  value={editForm.population}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      population: onlyDigits(event.target.value),
+                    }))
+                  }
+                  placeholder="População"
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+
+                <input
+                  value={editForm.region}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      region: event.target.value,
+                    }))
+                  }
+                  placeholder="Região"
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+
+                <select
                   value={editForm.organizationType}
                   onChange={(event) =>
                     setEditForm((current) => ({
@@ -1125,6 +1390,60 @@ export default function NexusOrganizationsClient() {
                   placeholder="Assentos"
                   className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
                 />
+
+                <input
+                  value={editForm.contractReference}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      contractReference: event.target.value,
+                    }))
+                  }
+                  placeholder="Contrato / Referência"
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+
+                <input
+                  type="date"
+                  value={editForm.contractStartsAt}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      contractStartsAt: event.target.value,
+                    }))
+                  }
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+
+                <input
+                  type="date"
+                  value={editForm.contractEndsAt}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      contractEndsAt: event.target.value,
+                    }))
+                  }
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                />
+
+                <select
+                  value={editForm.historyRetentionPolicy}
+                  onChange={(event) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      historyRetentionPolicy: event.target
+                        .value as GovernanceHistoryRetentionPolicy,
+                    }))
+                  }
+                  className="rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none focus:border-[#0f3a4a]"
+                >
+                  {historyRetentionPolicyOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="mt-4 flex flex-wrap gap-3">
@@ -1156,7 +1475,7 @@ export default function NexusOrganizationsClient() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
                 <thead className="bg-[#f8f8f8] text-xs uppercase text-slate-500">
                   <tr>
                     <th className="border-b border-[#dedede] px-5 py-3">
@@ -1167,6 +1486,9 @@ export default function NexusOrganizationsClient() {
                     </th>
                     <th className="border-b border-[#dedede] px-5 py-3">
                       Município/UF
+                    </th>
+                    <th className="border-b border-[#dedede] px-5 py-3">
+                      Perfil municipal
                     </th>
                     <th className="border-b border-[#dedede] px-5 py-3">
                       Tipo
@@ -1199,6 +1521,9 @@ export default function NexusOrganizationsClient() {
                         <span className="mt-1 block text-xs text-slate-400">
                           slug: {organization.slug}
                         </span>
+                        <span className="mt-1 block text-xs text-slate-500">
+                          Contrato: {organization.contract_reference || "Não informado"}
+                        </span>
                       </td>
 
                       <td className="px-5 py-4 text-slate-700">
@@ -1213,6 +1538,20 @@ export default function NexusOrganizationsClient() {
                             IBGE: {organization.ibge_code}
                           </span>
                         )}
+                      </td>
+
+                      <td className="px-5 py-4 text-slate-700">
+                        <span className="block">
+                          {getGovernanceMunicipalitySizeLabel(
+                            organization.municipality_size ?? "small",
+                          )}
+                        </span>
+                        <span className="mt-1 block text-xs text-slate-500">
+                          População: {formatPopulation(organization.population)}
+                        </span>
+                        <span className="mt-1 block text-xs text-slate-500">
+                          Região: {organization.region || "Não informada"}
+                        </span>
                       </td>
 
                       <td className="px-5 py-4 text-slate-700">

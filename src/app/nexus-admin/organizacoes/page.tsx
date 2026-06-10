@@ -1,3 +1,4 @@
+//src/app/nexus-admin/organizacoes/page.tsx
 import NexusOrganizationsClient from "./NexusOrganizationsClient";
 
 export const dynamic = "force-dynamic";

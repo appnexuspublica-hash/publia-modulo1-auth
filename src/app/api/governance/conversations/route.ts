@@ -3,6 +3,10 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
+import type {
+  GovernanceConversationVisibility,
+  GovernanceResponseMode,
+} from "@/types/governance";
 
 function createWritableSupabaseRouteClient() {
   const cookieStore = cookies();
@@ -23,6 +27,32 @@ function createWritableSupabaseRouteClient() {
       },
     },
   });
+}
+
+const allowedResponseModes: GovernanceResponseMode[] = [
+  "objective",
+  "summary",
+  "checklist",
+  "technical_opinion",
+  "risk_analysis",
+  "attention_points",
+  "action_plan",
+  "draft",
+  "comparison",
+  "manager_guidance",
+];
+
+function isValidGovernanceResponseMode(
+  value: unknown,
+): value is GovernanceResponseMode {
+  return (
+    typeof value === "string" &&
+    allowedResponseModes.includes(value as GovernanceResponseMode)
+  );
+}
+
+function normalizeResponseMode(value: unknown): GovernanceResponseMode {
+  return isValidGovernanceResponseMode(value) ? value : "objective";
 }
 
 export async function POST(request: Request) {
@@ -62,15 +92,13 @@ export async function POST(request: Request) {
         ? body.category.trim()
         : null;
 
-    // Regra de UX do Governança:
-    // toda nova conversa deve iniciar no modo Padrão.
-    const responseMode = "objective";
+    const responseMode = normalizeResponseMode(body?.responseMode);
 
     // Blindagem P0:
     // por padrão, toda conversa do Governança é privada do usuário logado.
     // A visibilidade "organization" fica reservada para fluxo futuro com
     // compartilhamento institucional explícito.
-    const visibility = "private";
+    const visibility: GovernanceConversationVisibility = "private";
 
     const { data, error } = await supabase.rpc(
       "create_governance_conversation",
@@ -110,6 +138,7 @@ export async function POST(request: Request) {
           .update({
             user_id: user.id,
             visibility: "private",
+            response_mode: responseMode,
             updated_at: new Date().toISOString(),
           })
           .eq("id", conversation.id)
@@ -152,7 +181,60 @@ export async function POST(request: Request) {
         conversation: fixedConversation ?? {
           ...conversation,
           user_id: user.id,
+          response_mode: responseMode,
           visibility: "private",
+        },
+      });
+    }
+
+    if (conversation.response_mode !== responseMode) {
+      const { data: fixedResponseModeConversation, error: fixResponseModeError } =
+        await supabase
+          .from("governance_conversations")
+          .update({
+            response_mode: responseMode,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", conversation.id)
+          .eq("organization_id", context.organization.id)
+          .select(
+            `
+              id,
+              organization_id,
+              user_id,
+              title,
+              category,
+              response_mode,
+              visibility,
+              status,
+              is_pinned,
+              metadata,
+              created_at,
+              updated_at,
+              deleted_at
+            `,
+          )
+          .maybeSingle();
+
+      if (fixResponseModeError) {
+        console.error(
+          "[governance] Conversa criada, mas não foi possível ajustar o modo de resposta:",
+          fixResponseModeError,
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "A conversa foi criada, mas não foi possível ajustar o modo de resposta.",
+          },
+          { status: 500 },
+        );
+      }
+
+      return NextResponse.json({
+        conversation: fixedResponseModeConversation ?? {
+          ...conversation,
+          response_mode: responseMode,
         },
       });
     }

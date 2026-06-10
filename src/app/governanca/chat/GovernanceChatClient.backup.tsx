@@ -197,34 +197,6 @@ function normalizeSuggestedNextQuestions(input: unknown): SuggestedNextQuestion[
 }
 
 
-const GOVERNANCE_STARTER_SUGGESTIONS: SuggestedNextQuestion[] = [
-  {
-    id: "starter-summary",
-    label: "Gerar resumo executivo",
-    prompt:
-      "Gere um resumo executivo objetivo sobre o tema que eu enviar, destacando os pontos essenciais para decisão administrativa.",
-  },
-  {
-    id: "starter-technical-opinion",
-    label: "Criar parecer técnico",
-    prompt:
-      "Elabore um parecer técnico institucional sobre o tema que eu enviar, com assunto, relatório, fundamentação, análise, conclusão e recomendação técnica.",
-  },
-  {
-    id: "starter-checklist",
-    label: "Transformar em checklist",
-    prompt:
-      "Transforme o tema ou documento que eu enviar em um checklist prático de conferência para a Administração Pública Municipal.",
-  },
-  {
-    id: "starter-manager-guidance",
-    label: "Orientar gestor",
-    prompt:
-      "Explique o tema que eu enviar em linguagem de orientação ao gestor público, com cuidados, providências e próximo passo recomendado.",
-  },
-];
-
-
 const responseModeOptions = [
   { value: "objective", label: "Padrão" },
   { value: "summary", label: "Resumo" },
@@ -2991,18 +2963,20 @@ export default function GovernanceChatClient({
                           Como posso ajudar você?
                         </h2>
 
-                        <div className="mt-5 flex flex-wrap justify-center gap-2">
-                          {GOVERNANCE_STARTER_SUGGESTIONS.map((suggestion) => (
-                            <button
-                              key={suggestion.id}
-                              type="button"
-                              onClick={() => handleFillInputSuggestion(suggestion.prompt)}
-                              className="rounded-full border border-[#dedede] bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:border-[#0f3a4a] hover:text-[#0f3a4a]"
-                            >
-                              {suggestion.label}
-                            </button>
-                          ))}
-                        </div>
+                        {governanceSuggestions.length > 0 && (
+                          <div className="mt-5 flex flex-wrap justify-center gap-2">
+                            {governanceSuggestions.map((suggestion) => (
+                              <button
+                                key={suggestion.id}
+                                type="button"
+                                onClick={() => handleFillInputSuggestion(suggestion.prompt)}
+                                className="rounded-full border border-[#dedede] bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:border-[#0f3a4a] hover:text-[#0f3a4a]"
+                              >
+                                {suggestion.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ) : (

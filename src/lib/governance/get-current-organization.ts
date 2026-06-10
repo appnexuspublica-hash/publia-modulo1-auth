@@ -77,6 +77,8 @@ export async function getCurrentGovernanceOrganization(
           state_uf,
           ibge_code,
           municipality_size,
+          population,
+          region,
           product_tier,
           status,
           primary_color,

@@ -75,6 +75,8 @@ export type GovernanceOrganization = {
   state_uf: string | null;
   ibge_code: string | null;
   municipality_size: GovernanceMunicipalitySize;
+  population: number | null;
+  region: string | null;
   product_tier: GovernanceProductTier;
   status: OrganizationStatus;
   primary_color: string;
@@ -126,7 +128,6 @@ export type GovernanceMessage = {
   metadata: Record<string, unknown>;
   created_at: string;
 };
-
 
 export type GovernanceIndicators = {
   organization: {
