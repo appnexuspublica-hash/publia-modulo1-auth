@@ -6,6 +6,8 @@ import OpenAI from "openai";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 import { buildProductScopedPrompt } from "@/lib/publiaPrompt";
+import { buildGovernanceLegalGuardrails, findGovernanceCriticalKnowledge } from "@/lib/governanceLegalGuardrails";
+import { shouldForceWebFirst } from "@/lib/webFirstDetector";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import type {
   GovernanceMessage,
@@ -316,7 +318,11 @@ function buildConversationContext(params: {
   ].join("\n");
 }
 
-function buildGovernanceConsultantStyleInstruction(mode: GovernanceResponseMode): string {
+function buildGovernanceConsultantStyleInstruction(
+  mode: GovernanceResponseMode,
+  userText = "",
+  relation: ConversationRelation = "INICIAL",
+): string {
   if (mode !== "objective") {
     return [
       "REGRA DE PRIORIDADE DO MODO DE RESPOSTA",
@@ -328,6 +334,40 @@ function buildGovernanceConsultantStyleInstruction(mode: GovernanceResponseMode)
       "Se o modo for minuta, entregue minuta.",
       "Se o modo for comparativo, use comparação clara.",
       "Mantenha clareza e segurança técnica, mas preserve a estrutura específica do modo selecionado.",
+    ].join("\n");
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      "ESTILO ESPECIAL PARA FOLLOW-UP EXECUTIVO",
+      "A pergunta atual foi classificada como continuidade complementar.",
+      "Neste caso, NÃO abra uma nova consultoria completa.",
+      "Responda como fechamento executivo de uma conversa já em andamento.",
+      "Comece diretamente pelo ponto solicitado pelo usuário.",
+      "Não faça introdução longa.",
+      "Não redefina conceitos já explicados.",
+      "Não reapresente o contexto anterior.",
+      "Não repita listas gerais já apresentadas.",
+      "Não produza análise extensa.",
+      "Não inclua seção de base legal, salvo se o usuário pedir expressamente ou se houver risco jurídico direto.",
+      "Limite a resposta a no máximo 180 palavras, salvo pedido expresso de detalhamento.",
+      "Use somente lista curta, tabela simples ou roteiro objetivo.",
+      "Quando a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente.",
+      "Finalize com uma orientação prática curta para o gestor.",
+    ].join("\n");
+  }
+
+  if (isObjectiveAdministrativeQuestion(userText)) {
+    return [
+      "REGRA PRIORITÁRIA DE ESTILO PARA PERGUNTA OBJETIVA",
+      "A pergunta atual pede dado objetivo ligado à Administração Pública.",
+      "Neste caso, a utilidade administrativa tem prioridade sobre o estilo consultivo longo.",
+      "Comece pela resposta direta, sem introdução conceitual.",
+      "É permitido iniciar com lista curta, tabela simples, valor, percentual, prazo ou frase objetiva.",
+      "Não aplique a regra de 'explicar a lógica antes de responder'.",
+      "Não transforme a resposta em mini parecer quando a pergunta pedir apenas limite, valor, prazo ou percentual.",
+      "Depois da resposta direta, acrescente fundamento legal e cautelas práticas em blocos curtos.",
+      "A resposta deve ser escaneável: o gestor precisa encontrar o dado principal nos primeiros segundos.",
     ].join("\n");
   }
 
@@ -346,7 +386,10 @@ function buildGovernanceConsultantStyleInstruction(mode: GovernanceResponseMode)
   ].join("\n");
 }
 
-function buildFinalConsultativeOverride(mode: GovernanceResponseMode): string {
+function buildFinalConsultativeOverride(
+  mode: GovernanceResponseMode,
+  relation: ConversationRelation = "INICIAL",
+): string {
   if (mode === "technical_opinion") {
     return [
       "REGRA FINAL OBRIGATÓRIA PARA PARECER TÉCNICO",
@@ -365,6 +408,38 @@ function buildFinalConsultativeOverride(mode: GovernanceResponseMode): string {
       "Não comece com a mesma introdução genérica usada no modo Padrão.",
       "Não entregue uma orientação consultiva genérica se o modo exigir outro formato.",
       "Siga rigorosamente a estrutura indicada para o modo selecionado.",
+    ].join("\n");
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      "REGRA FINAL OBRIGATÓRIA PARA FOLLOW-UP EXECUTIVO",
+      "A pergunta atual é complementar ao tema anterior.",
+      "A resposta NÃO deve seguir o formato longo do modo Padrão.",
+      "Não comece com contextualização ampla.",
+      "Não explique novamente a lógica administrativa já apresentada.",
+      "Não use estrutura de artigo, parecer, relatório ou mini consultoria.",
+      "Não inclua Base legal ou Referências oficiais, salvo pedido expresso ou risco jurídico direto.",
+      "FORMATO EXATO OBRIGATÓRIO:",
+      "Resposta direta:",
+      "Uma frase curta respondendo ao ponto perguntado.",
+      "",
+      "Indicadores/Métricas principais:",
+      "- item 1",
+      "- item 2",
+      "- item 3",
+      "- item 4",
+      "- item 5",
+      "",
+      "Como acompanhar:",
+      "- item 1",
+      "- item 2",
+      "",
+      "REGRAS DE TAMANHO:",
+      "- Máximo de 180 palavras.",
+      "- Máximo de 6 indicadores/métricas.",
+      "- Máximo de 2 itens em Como acompanhar.",
+      "- Fechamento prático em uma única frase.",
     ].join("\n");
   }
 
@@ -392,13 +467,24 @@ function mapMessagesToOpenAIInput(
     : messages;
 
   const relevantMessages = sourceMessages.filter((message) => {
-    return message.role === "user" || message.role === "system";
+    return (
+      message.role === "user" ||
+      message.role === "assistant" ||
+      message.role === "system"
+    );
   });
 
   return relevantMessages.map((message) => {
     if (message.role === "system") {
       return {
         role: "system",
+        content: message.content,
+      };
+    }
+
+    if (message.role === "assistant") {
+      return {
+        role: "assistant",
         content: message.content,
       };
     }
@@ -908,6 +994,291 @@ function normalizeContent(content: string) {
 }
 
 
+function normalizeAdministrativeText(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function isObjectiveAdministrativeQuestion(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  if (!q.trim()) {
+    return false;
+  }
+
+  const asksObjectiveData =
+    /\b(qual|quais|quanto|quantos|quando|prazo|valor|limite|teto|percentual|porcentagem|requisito|documento|documentos|competencia|competência)\b/.test(q);
+
+  const hasAdministrativeTheme =
+    /\b(dispensa|licitacao|licitação|contrato|contratacao|contratação|ata|carona|reajuste|repactuacao|repactuação|sancao|sanção|lrf|prudencial|pessoal|irrf|tributo|tributario|tributário|contabil|contábil|orcamentaria|orçamentária|estagio|estágio|diaria|diária|empenho|liquidacao|liquidação|pagamento|lei|decreto|portaria|municipio|município|executivo|legislativo)\b/.test(q);
+
+  return asksObjectiveData && hasAdministrativeTheme;
+}
+
+
+type ConversationRelation =
+  | "INICIAL"
+  | "CONTINUA"
+  | "CONTINUA_COMPLEMENTAR"
+  | "RELACIONA"
+  | "ROMPE";
+
+const GOVERNANCE_CONTEXT_DOMAINS: Record<string, RegExp> = {
+  fiscal_arrecadacao:
+    /\b(arrecadacao|arrecadação|receita|tributo|tributario|tributária|imposto|iptu|iss|itbi|taxa|taxas|divida ativa|dívida ativa|contribuinte|cadastro imobiliario|cadastro imobiliário|cadastro mobiliario|cadastro mobiliário|cobranca|cobrança|inadimplencia|inadimplência|refis|pgv|planta generica|planta genérica|inteligencia de dados|inteligência de dados|dados fiscais|gestao fiscal|gestão fiscal)\b/,
+  transparencia:
+    /\b(transparencia|transparência|portal da transparencia|portal da transparência|lai|lei de acesso|acesso a informacao|acesso à informação|contas publicas|contas públicas|sic|e-sic|controle social|audiencia publica|audiência pública|dados abertos)\b/,
+  contratacoes:
+    /\b(licitacao|licitação|licitacoes|licitações|contratacao|contratação|contratacoes|contratações|contrato|contratos|pca|plano de contratacoes|plano de contratações|etp|estudo tecnico preliminar|estudo técnico preliminar|termo de referencia|termo de referência|tr|matriz de riscos|dispensa|inexigibilidade|pregao|pregão|ata de registro|carona|reajuste|repactuacao|repactuação)\b/,
+  pessoal_rh:
+    /\b(servidor|servidores|ferias|férias|decimo terceiro|décimo terceiro|13o|13º|folha|remuneracao|remuneração|vencimento|cargo|concurso|admissao|admissão|contratacao temporaria|contratação temporária|estatutario|estatutário|rh|recursos humanos)\b/,
+  lrf_pessoal:
+    /\b(lrf|lei de responsabilidade fiscal|limite prudencial|limite maximo|limite máximo|despesa com pessoal|rcl|receita corrente liquida|receita corrente líquida|gasto com pessoal)\b/,
+  contabilidade:
+    /\b(contabilidade|contabil|contábil|orcamento|orçamento|orcamentaria|orçamentária|empenho|liquidacao|liquidação|pagamento|dotacao|dotação|gnd|elemento de despesa|restos a pagar|balanco|balanço)\b/,
+  controle_interno:
+    /\b(controle interno|auditoria|conformidade|governanca|governança|risco|riscos|responsabilizacao|responsabilização|tce|tribunal de contas|ministerio publico|ministério público)\b/,
+  urbanismo:
+    /\b(plano diretor|zoneamento|uso do solo|parcelamento do solo|mobilidade urbana|cidade|urbanismo|habite-se|alvara de construcao|alvará de construção|obra particular)\b/,
+  lgpd:
+    /\b(lgpd|dados pessoais|proteção de dados|protecao de dados|encarregado de dados|dpo|privacidade)\b/,
+};
+
+const RELATED_CONTEXT_DOMAIN_PAIRS = new Set([
+  "fiscal_arrecadacao::transparencia",
+  "transparencia::fiscal_arrecadacao",
+  "fiscal_arrecadacao::contabilidade",
+  "contabilidade::fiscal_arrecadacao",
+  "fiscal_arrecadacao::controle_interno",
+  "controle_interno::fiscal_arrecadacao",
+  "transparencia::controle_interno",
+  "controle_interno::transparencia",
+  "transparencia::contratacoes",
+  "contratacoes::transparencia",
+  "contratacoes::controle_interno",
+  "controle_interno::contratacoes",
+  "contratacoes::contabilidade",
+  "contabilidade::contratacoes",
+  "pessoal_rh::lrf_pessoal",
+  "lrf_pessoal::pessoal_rh",
+  "lrf_pessoal::contabilidade",
+  "contabilidade::lrf_pessoal",
+]);
+
+function detectGovernanceContextDomains(text: string) {
+  const normalized = normalizeAdministrativeText(text);
+  const domains: string[] = [];
+
+  for (const [domain, pattern] of Object.entries(GOVERNANCE_CONTEXT_DOMAINS)) {
+    if (pattern.test(normalized)) {
+      domains.push(domain);
+    }
+  }
+
+  return domains;
+}
+
+function hasExplicitContinuationCue(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  return /\b(para isso|sobre isso|nesse caso|neste caso|nesse contexto|neste contexto|com base nisso|diante disso|a partir disso|essas medidas|essas acoes|essas ações|isso|esse tema|essa situacao|essa situação|e como|e quais|e qual|qual a diferenca|qual a diferença|quais medidas|proximo passo|próximo passo|como mensurar|como acompanhar|como implementar)\b/.test(q);
+}
+
+function isComplementaryContinuationQuestion(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  if (!q.trim()) {
+    return false;
+  }
+
+  const asksMeasurementOrFollowUp =
+    /\b(como medir|como mensurar|como acompanhar|como monitorar|como avaliar|como verificar|como controlar|como saber se|como demonstrar|como comprovar|quais indicadores|quais metricas|quais métricas|quais kpis|indicadores|metricas|métricas|resultados|metas|painel|dashboard|relatorio|relatório)\b/.test(q);
+
+  const refersToPreviousActions =
+    /\b(essas medidas|essas acoes|essas ações|esses pontos|essas providencias|essas providências|isso|desse plano|deste plano|da estrategia|da estratégia|do que foi dito|do que foi discutido|na pratica|na prática)\b/.test(q);
+
+  return asksMeasurementOrFollowUp || refersToPreviousActions;
+}
+
+function classifyConversationRelation(params: {
+  previousUserQuestion: string;
+  currentUserQuestion: string;
+}): ConversationRelation {
+  const previous = params.previousUserQuestion.trim();
+  const current = params.currentUserQuestion.trim();
+
+  if (!previous) {
+    return "INICIAL";
+  }
+
+  const isComplementary = isComplementaryContinuationQuestion(current);
+
+  if (hasExplicitContinuationCue(current)) {
+    return isComplementary ? "CONTINUA_COMPLEMENTAR" : "CONTINUA";
+  }
+
+  const previousDomains = detectGovernanceContextDomains(previous);
+  const currentDomains = detectGovernanceContextDomains(current);
+
+  if (previousDomains.length === 0 || currentDomains.length === 0) {
+    return "ROMPE";
+  }
+
+  const previousDomainSet = new Set(previousDomains);
+
+  if (currentDomains.some((domain) => previousDomainSet.has(domain))) {
+    return isComplementary ? "CONTINUA_COMPLEMENTAR" : "CONTINUA";
+  }
+
+  const hasRelatedDomain = previousDomains.some((previousDomain) =>
+    currentDomains.some((currentDomain) =>
+      RELATED_CONTEXT_DOMAIN_PAIRS.has(`${previousDomain}::${currentDomain}`),
+    ),
+  );
+
+  return hasRelatedDomain ? "RELACIONA" : "ROMPE";
+}
+
+function getPreviousUserQuestion(
+  history: GovernanceMessage[],
+  currentUserMessageId: string,
+) {
+  return [...history]
+    .reverse()
+    .find(
+      (message) =>
+        message.role === "user" &&
+        message.id !== currentUserMessageId &&
+        String(message.content ?? "").trim().length > 0,
+    )?.content ?? "";
+}
+
+function buildConversationRelationInstruction(params: {
+  relation: ConversationRelation;
+  previousUserQuestion: string;
+  currentUserQuestion: string;
+}) {
+  const previousQuestion = clampText(params.previousUserQuestion, 600);
+  const currentQuestion = clampText(params.currentUserQuestion, 600);
+
+  const base = [
+    "CLASSIFICAÇÃO DA RELAÇÃO ENTRE PERGUNTAS",
+    "",
+    `Resultado: ${params.relation}.`,
+    previousQuestion ? `Pergunta anterior do usuário: ${previousQuestion}` : "Pergunta anterior do usuário: não identificada.",
+    `Pergunta atual do usuário: ${currentQuestion}`,
+    "",
+    "A pergunta atual continua sendo a prioridade absoluta da resposta.",
+    "Use esta classificação para controlar continuidade, repetição e tamanho da resposta.",
+    "",
+  ];
+
+  if (params.relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      ...base,
+      "REGRA PARA CONTINUIDADE COMPLEMENTAR",
+      "- A pergunta atual é um complemento do tema anterior, geralmente pedindo medição, acompanhamento, indicadores, metas, verificação ou próximos controles.",
+      "- Responda apenas ao aspecto específico perguntado agora.",
+      "- Não redefina conceitos já explicados.",
+      "- Não reapresente contexto amplo.",
+      "- Não recrie listas gerais já apresentadas em respostas anteriores.",
+      "- Não escreva uma nova consultoria completa.",
+      "- Comece diretamente com a resposta prática.",
+      "- A resposta deve ser muito mais curta que a resposta principal do tema.",
+      "- Não ultrapasse 180 palavras, salvo pedido expresso do usuário.",
+      "- Use no máximo 6 itens principais.",
+      "- Se a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente no início.",
+      "- Não inclua Base legal ou Referências oficiais nesse tipo de follow-up, salvo pedido expresso ou risco jurídico direto.",
+      "- Feche com uma orientação prática de aplicação para o gestor em uma única frase.",
+    ].join("\n");
+  }
+
+  if (params.relation === "CONTINUA") {
+    return [
+      ...base,
+      "REGRA PARA CONTINUIDADE FORTE",
+      "- A pergunta atual aprofunda ou desdobra o tema anterior.",
+      "- Não redefina conceitos já explicados, salvo se for indispensável em uma frase curta.",
+      "- Não repita listas gerais, fundamentos amplos ou blocos já apresentados.",
+      "- Comece conectando em no máximo 1 frase e avance para o próximo passo prático.",
+      "- A resposta deve ser mais complementar e mais enxuta que uma resposta inicial.",
+      "- Foque no novo recorte pedido pelo usuário.",
+    ].join("\n");
+  }
+
+  if (params.relation === "RELACIONA") {
+    return [
+      ...base,
+      "REGRA PARA TEMA RELACIONADO",
+      "- A pergunta atual tem relação com a trajetória da conversa, mas não é o mesmo tema.",
+      "- Faça uma ponte curta, de no máximo 1 frase, se isso ajudar.",
+      "- Depois responda o novo foco normalmente.",
+      "- Não recapitule os temas anteriores.",
+      "- Não transforme a resposta em plano integrado salvo pedido expresso do usuário.",
+    ].join("\n");
+  }
+
+  if (params.relation === "ROMPE") {
+    return [
+      ...base,
+      "REGRA PARA RUPTURA DE TEMA",
+      "- A pergunta atual iniciou um novo assunto.",
+      "- Não mencione, não recapitule e não responda temas anteriores.",
+      "- Ignore a trajetória anterior, salvo se o usuário pedir comparação ou relação expressamente.",
+      "- Responda exclusivamente ao novo assunto.",
+    ].join("\n");
+  }
+
+  return [
+    ...base,
+    "REGRA PARA PRIMEIRA PERGUNTA OU CONTEXTO INICIAL",
+    "- Responda normalmente, sem tentar conectar com histórico inexistente.",
+  ].join("\n");
+}
+
+function buildForcedExecutiveFollowUpInstruction(params: {
+  relation: ConversationRelation;
+  mode: GovernanceResponseMode;
+}) {
+  if (params.mode !== "objective" || params.relation !== "CONTINUA_COMPLEMENTAR") {
+    return "";
+  }
+
+  return [
+    "PRIORIDADE MÁXIMA — FOLLOW-UP EXECUTIVO",
+    "",
+    "Esta instrução prevalece sobre o estilo consultivo padrão do Governança.",
+    "A pergunta atual é complementar. Portanto, responda como acompanhamento executivo, não como nova explicação completa.",
+    "",
+    "FORMATO OBRIGATÓRIO DA RESPOSTA:",
+    "",
+    "Resposta direta:",
+    "[uma frase curta]",
+    "",
+    "Indicadores/Métricas principais:",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "",
+    "Como acompanhar:",
+    "- [ação objetiva]",
+    "- [ação objetiva]",
+    "",
+    "PROIBIDO NESTE CASO:",
+    "- abrir com contextualização ampla;",
+    "- repetir conceitos já explicados;",
+    "- criar seções novas além das três acima;",
+    "- escrever como artigo, parecer, plano completo ou mini consultoria;",
+    "- incluir Base legal ou Referências oficiais, salvo pedido expresso ou risco jurídico direto;",
+    "- ultrapassar 180 palavras.",
+  ].join("\n");
+}
+
+
 function isDefaultConversationTitle(title: string | null | undefined) {
   const normalized = String(title ?? "").trim().toLowerCase();
 
@@ -947,7 +1318,33 @@ async function updateConversationTitleFromMessage(params: {
     return conversation.title;
   }
 
-  const nextTitle = buildConversationTitleFromMessage(content);
+  // O título da conversa deve nascer da PRIMEIRA mensagem do usuário.
+  // Mesmo que a conversa ainda esteja com título padrão após várias mensagens,
+  // evitamos usar a pergunta atual, pois isso faria o histórico mudar para a última.
+  const { data: firstUserMessage, error: firstUserMessageError } = await supabase
+    .from("governance_messages")
+    .select("content")
+    .eq("conversation_id", conversation.id)
+    .eq("organization_id", organizationId)
+    .eq("role", "user")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle<{ content: string | null }>();
+
+  if (firstUserMessageError) {
+    console.warn(
+      "[governance/chat] Não foi possível buscar a primeira mensagem para compor o título:",
+      firstUserMessageError,
+    );
+  }
+
+  const titleSource =
+    typeof firstUserMessage?.content === "string" &&
+    firstUserMessage.content.trim().length > 0
+      ? firstUserMessage.content
+      : content;
+
+  const nextTitle = buildConversationTitleFromMessage(titleSource);
 
   const { error } = await supabase
     .from("governance_conversations")
@@ -1116,6 +1513,30 @@ export async function POST(request: Request) {
       conversation.response_mode,
     );
 
+    const forceWebFirst = shouldForceWebFirst(content);
+
+    const criticalKnowledge =
+      findGovernanceCriticalKnowledge(content);
+
+    const legalGuardrails = buildGovernanceLegalGuardrails(content);
+    const hasLegalGuardrails = legalGuardrails.trim().length > 0;
+
+    const criticalKnowledgeInstruction =
+      criticalKnowledge.length > 0
+        ? [
+            "BASE NORMATIVA OFICIAL DO PUBL.IA",
+            "",
+            "Os entendimentos abaixo são institucionais e devem prevalecer sobre interpretações alternativas.",
+            "Não apresente conclusão incompatível com essas teses.",
+            "",
+            ...criticalKnowledge.map(
+              (item) => `TEMA: ${item.title}\n\n${item.rule}`,
+            ),
+          ].join("\n")
+        : "";
+    const currentQuestionOnly =
+      hasSelectedPdfAttachments || hasLegalGuardrails;
+
     if (effectiveResponseMode !== conversation.response_mode) {
       const { error: updateResponseModeError } = await supabase
         .from("governance_conversations")
@@ -1225,6 +1646,15 @@ export async function POST(request: Request) {
 
     const history = ((recentHistoryData ?? []) as GovernanceMessage[]).reverse();
 
+    const previousUserQuestion = getPreviousUserQuestion(history, userMessage.id);
+    const conversationRelation = classifyConversationRelation({
+      previousUserQuestion,
+      currentUserQuestion: content,
+    });
+
+    console.log("[GOVERNANCA] Relation:", conversationRelation);
+    console.log("[GOVERNANCA] Mode:", effectiveResponseMode);
+
     const scopedPrompt = buildProductScopedPrompt({
       productTier: "governance",
       responseMode: mapGovernanceModeToPromptMode(effectiveResponseMode),
@@ -1233,17 +1663,44 @@ export async function POST(request: Request) {
     const instructions = [
       scopedPrompt,
       "",
+      criticalKnowledgeInstruction,
+      "",
       buildConversationContext({
         organizationName: context.organization.name,
         organizationId: context.organization.id,
         conversation,
       }),
       "",
+      buildConversationRelationInstruction({
+        relation: conversationRelation,
+        previousUserQuestion,
+        currentUserQuestion: content,
+      }),
+      "",
       buildGovernanceModeInstruction(effectiveResponseMode),
       "",
-      buildGovernanceConsultantStyleInstruction(effectiveResponseMode),
+      buildGovernanceConsultantStyleInstruction(
+        effectiveResponseMode,
+        content,
+        conversationRelation,
+      ),
       "",
-      buildFinalConsultativeOverride(effectiveResponseMode),
+      buildFinalConsultativeOverride(effectiveResponseMode, conversationRelation),
+      "",
+      buildForcedExecutiveFollowUpInstruction({
+        relation: conversationRelation,
+        mode: effectiveResponseMode,
+      }),
+      "",
+      forceWebFirst
+        ? [
+            "ALERTA INTERNO WEB-FIRST / VALIDAÇÃO NORMATIVA",
+            "A pergunta atual envolve prazo, valor, limite, percentual, dispositivo legal, licitação, contrato, sanção ou tema normativo sensível.",
+            "Não responda por memória quando houver dado legal específico, volátil ou dependente de fonte oficial.",
+            "Se não houver ferramenta de consulta oficial disponível neste fluxo, preserve o tom consultivo, mas indique a necessidade de validação em fonte oficial antes de decisão administrativa.",
+          ].join("\n")
+        : "",
+      legalGuardrails,
       hasSelectedPdfAttachments
         ? [
             "REGRA PONTUAL PARA PDFS SELECIONADOS NESTA PERGUNTA:",
@@ -1281,7 +1738,7 @@ export async function POST(request: Request) {
         const response = await openai!.responses.create({
           model: OPENAI_MODEL_GOVERNANCE,
           instructions,
-          input: mapMessagesToOpenAIInput(history, { currentMessageOnly: hasSelectedPdfAttachments }),
+          input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
           temperature: 0.3,
         } as any);
 
@@ -1316,10 +1773,13 @@ export async function POST(request: Request) {
               product_tier: "governance",
               model: OPENAI_MODEL_GOVERNANCE,
               response_mode: effectiveResponseMode,
-              history_messages_used: hasSelectedPdfAttachments ? 1 : history.length,
+              history_messages_used: currentQuestionOnly ? 1 : history.length,
               selected_pdf_attachment_names: selectedPdfAttachmentNames,
-          selected_pdf_file_ids: selectedPdfFileIds,
+              selected_pdf_file_ids: selectedPdfFileIds,
               current_message_only_for_pdf: hasSelectedPdfAttachments,
+              current_message_only_for_legal_guardrails: hasLegalGuardrails,
+              conversation_relation: conversationRelation,
+              previous_user_question: previousUserQuestion || null,
               streaming: false,
             },
           })
@@ -1396,7 +1856,7 @@ export async function POST(request: Request) {
           const openaiStream = await openai!.responses.create({
             model: OPENAI_MODEL_GOVERNANCE,
             instructions,
-            input: mapMessagesToOpenAIInput(history, { currentMessageOnly: hasSelectedPdfAttachments }),
+            input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
             temperature: 0.3,
             stream: true,
           } as any);
@@ -1444,10 +1904,13 @@ export async function POST(request: Request) {
                 product_tier: "governance",
                 model: OPENAI_MODEL_GOVERNANCE,
                 response_mode: effectiveResponseMode,
-                history_messages_used: hasSelectedPdfAttachments ? 1 : history.length,
+                history_messages_used: currentQuestionOnly ? 1 : history.length,
                 selected_pdf_attachment_names: selectedPdfAttachmentNames,
-          selected_pdf_file_ids: selectedPdfFileIds,
+                selected_pdf_file_ids: selectedPdfFileIds,
                 current_message_only_for_pdf: hasSelectedPdfAttachments,
+                current_message_only_for_legal_guardrails: hasLegalGuardrails,
+                conversation_relation: conversationRelation,
+                previous_user_question: previousUserQuestion || null,
                 streaming: true,
               },
             })

@@ -1345,15 +1345,15 @@ function mergeMessages(
 }
 
 function getConversationPreview(messages: GovernanceMessage[]) {
-  const lastUserMessage = [...messages]
-    .reverse()
-    .find((message) => message.role === "user");
+  // O histórico deve identificar a conversa pela PRIMEIRA pergunta do usuário,
+  // não pela última interação.
+  const firstUserMessage = messages.find((message) => message.role === "user");
 
-  if (!lastUserMessage) {
+  if (!firstUserMessage) {
     return "";
   }
 
-  const preview = lastUserMessage.content.replace(/\s+/g, " ").trim();
+  const preview = firstUserMessage.content.replace(/\s+/g, " ").trim();
 
   if (preview.length <= 54) {
     return preview;
@@ -1798,11 +1798,24 @@ export default function GovernanceChatClient({
           );
 
           setConversations((currentConversations) =>
-            currentConversations.map((conversation) =>
-              conversation.id === conversationId
-                ? { ...conversation, updated_at: new Date().toISOString() }
-                : conversation,
-            ),
+            currentConversations.map((conversation) => {
+              if (conversation.id !== conversationId) {
+                return conversation;
+              }
+
+              const nextTitle =
+                isDefaultConversationTitle(conversation.title) &&
+                typeof payload?.conversationTitle === "string" &&
+                payload.conversationTitle.trim().length > 0
+                  ? payload.conversationTitle.trim()
+                  : conversation.title;
+
+              return {
+                ...conversation,
+                title: nextTitle,
+                updated_at: new Date().toISOString(),
+              };
+            }),
           );
 
           const suggestions = normalizeSuggestedNextQuestions(payload?.suggestions);
@@ -1873,11 +1886,24 @@ export default function GovernanceChatClient({
             );
 
             setConversations((currentConversations) =>
-              currentConversations.map((conversation) =>
-                conversation.id === conversationId
-                  ? { ...conversation, updated_at: new Date().toISOString() }
-                  : conversation,
-              ),
+              currentConversations.map((conversation) => {
+                if (conversation.id !== conversationId) {
+                  return conversation;
+                }
+
+                const nextTitle =
+                  isDefaultConversationTitle(conversation.title) &&
+                  typeof data?.conversationTitle === "string" &&
+                  data.conversationTitle.trim().length > 0
+                    ? data.conversationTitle.trim()
+                    : conversation.title;
+
+                return {
+                  ...conversation,
+                  title: nextTitle,
+                  updated_at: new Date().toISOString(),
+                };
+              }),
             );
 
             if (Array.isArray(data?.suggestions)) {
