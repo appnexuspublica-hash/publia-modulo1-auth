@@ -568,6 +568,226 @@ function getSharePageScript() {
   `;
 }
 
+
+function SharedMessageCard({ message }: { message: SharedMessage }) {
+  if (message.role === "user") {
+    return (
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[#0f3a4a]">
+            <span className="text-xs font-black">?</span>
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
+              Pergunta
+            </p>
+            <p className="mt-0.5 text-[11px] font-semibold text-slate-400">
+              {formatDate(message.created_at)}
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm font-semibold leading-6 text-slate-900">
+          {message.content}
+        </div>
+      </section>
+    );
+  }
+
+  const csvDownloads = extractCsvDownloads(message.content, message.id);
+  const cleanCopyText = stripMarkdownForCopy(message.content);
+
+  return (
+    <article
+      className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[#0f3a4a]">
+            <span className="text-xs font-black">IA</span>
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
+              Resposta da Publ.IA
+            </p>
+            <p className="mt-0.5 text-[11px] font-semibold text-slate-400">
+              {formatDate(message.created_at)}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            data-copy-answer={cleanCopyText}
+            data-label="Copiar"
+            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-[#0f3a4a] shadow-sm transition hover:bg-slate-50"
+          >
+            Copiar
+          </button>
+
+          <button
+            type="button"
+            data-copy-share-link="true"
+            data-label="Compartilhar link"
+            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-[#0f3a4a] shadow-sm transition hover:bg-slate-50"
+          >
+            Compartilhar link
+          </button>
+        </div>
+      </div>
+
+      <div className="px-4 py-4">
+        <div className="prose prose-slate max-w-none text-[13px] leading-6 prose-headings:font-bold prose-headings:text-[#0f3a4a] prose-h1:text-xl prose-h2:mt-6 prose-h2:border-t prose-h2:border-slate-200 prose-h2:pt-4 prose-h2:text-base prose-h3:mt-5 prose-h3:text-sm prose-h4:mt-4 prose-h4:text-sm prose-p:my-2.5 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:font-semibold prose-a:text-[#0f3a4a] prose-a:underline prose-a:underline-offset-2 prose-hr:my-5 prose-hr:border-slate-200">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: ({ href, children }) => (
+                <a
+                  href={href || "#"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
+                >
+                  {children}
+                </a>
+              ),
+              h2: ({ children }) => (
+                <h2 className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base font-black leading-6 text-[#0f3a4a]">
+                  {children}
+                </h2>
+              ),
+              h3: ({ children }) => (
+                <h3 className="mt-5 rounded-xl bg-slate-50 px-4 py-2 text-sm font-black uppercase tracking-wide text-[#0f3a4a]">
+                  {children}
+                </h3>
+              ),
+              h4: ({ children }) => (
+                <h4 className="mt-4 text-sm font-black text-slate-950">
+                  {children}
+                </h4>
+              ),
+              p: ({ children }) => {
+                const text = extractTextFromNode(children);
+                if (isCsvHeading(text)) return null;
+
+                if (isInstitutionalHighlight(text)) {
+                  return (
+                    <p className="my-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[13px] font-semibold leading-6 text-slate-800">
+                      {children}
+                    </p>
+                  );
+                }
+
+                return (
+                  <p className="my-3 text-[13px] leading-7 text-slate-800">
+                    {children}
+                  </p>
+                );
+              },
+              ul: ({ children }) => {
+                const items = Children.toArray(children).filter((child) => {
+                  return !(typeof child === "string" && child.trim().length === 0);
+                });
+
+                if (items.length === 1) {
+                  return <SingleListItemBlock>{children}</SingleListItemBlock>;
+                }
+
+                return (
+                  <ul className="my-4 list-disc space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
+                    {children}
+                  </ul>
+                );
+              },
+              ol: ({ children }) => (
+                <ol className="my-4 list-decimal space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
+                  {children}
+                </ol>
+              ),
+              li: ({ children }) => (
+                <li className="pl-1 leading-7 marker:text-slate-700">
+                  {children}
+                </li>
+              ),
+              blockquote: ({ children }) => (
+                <blockquote className="my-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[13px] font-semibold leading-6 text-slate-800">
+                  {children}
+                </blockquote>
+              ),
+              code: ({ inline, className, children, ...props }: any) => {
+                const language = /language-(\w+)/.exec(className ?? "")?.[1]?.toLowerCase();
+                const text = String(children ?? "");
+
+                if (!inline && (language === "csv" || language === "tsv" || looksLikeCsv(text))) {
+                  return null;
+                }
+
+                return (
+                  <code
+                    {...props}
+                    className="rounded bg-slate-100 px-1 py-0.5 text-[12px] text-[#0f3a4a]"
+                  >
+                    {children}
+                  </code>
+                );
+              },
+              pre: ({ children }: any) => {
+                const text = extractTextFromNode(children);
+
+                if (looksLikeCsv(text)) return null;
+
+                return (
+                  <pre className="my-4 overflow-x-auto rounded-2xl bg-slate-950 p-4 text-xs text-slate-50">
+                    {children}
+                  </pre>
+                );
+              },
+              table: ({ children }) => (
+                <div className="my-4 overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="m-0 w-full min-w-[760px] border-collapse text-[12px]">
+                    {children}
+                  </table>
+                </div>
+              ),
+              th: ({ children }) => (
+                <th className="border-b border-r border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold leading-5 text-[#0f3a4a] last:border-r-0">
+                  {children}
+                </th>
+              ),
+              td: ({ children }) => (
+                <td className="border-b border-r border-slate-100 px-3 py-2 align-top text-[12px] leading-5 text-slate-700 last:border-r-0">
+                  {children}
+                </td>
+              ),
+              hr: () => <hr className="my-5 border-slate-200" />,
+            }}
+          >
+            {renderMarkdownLikeChat(message.content)}
+          </ReactMarkdown>
+        </div>
+
+        {csvDownloads.length > 0 && (
+          <div className="mt-4 flex flex-wrap justify-start gap-2 border-t border-slate-100 pt-4">
+            {csvDownloads.map((download) => (
+              <a
+                key={`${message.id}-${download.filename}`}
+                href={`data:text/csv;charset=utf-8,${encodeURIComponent(`\ufeff${normalizeCsvText(download.csv)}`)}`}
+                download={download.filename}
+                className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-[#0f3a4a] shadow-sm transition hover:border-[#0f3a4a] hover:bg-slate-50"
+              >
+                {download.label}
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export default async function GovernanceSharedConversationPage({
   params,
   searchParams,
@@ -740,18 +960,21 @@ export default async function GovernanceSharedConversationPage({
       : null;
 
   const {
-    question,
-    assistantMessages,
-    lastAssistantMessage,
-    selectionError,
-  } = directMessageSelectionError
-    ? {
-        question: null,
-        assistantMessages: [],
-        lastAssistantMessage: null,
-        selectionError: directMessageSelectionError,
-      }
-    : directSelection ?? selectSharedInteraction(safeMessages, selectedMessageId);
+  question,
+  assistantMessages,
+  selectionError,
+} = directMessageSelectionError
+  ? {
+      question: null,
+      assistantMessages: [],
+      selectionError: directMessageSelectionError,
+    }
+  : directSelection ?? selectSharedInteraction(safeMessages, selectedMessageId);
+
+  const sharedMessagesForDisplay =
+    selectedMessageId && isUuid(selectedMessageId)
+      ? ([question, ...assistantMessages].filter(Boolean) as SharedMessage[])
+      : sortMessagesForSharing(safeMessages);
 
   return (
     <main className="min-h-screen bg-[#e7e7e7] text-slate-900">
@@ -802,223 +1025,9 @@ export default async function GovernanceSharedConversationPage({
           </div>
         ) : (
           <>
-            {question && (
-              <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-start gap-3">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[#0f3a4a]">
-                    <span className="text-xs font-black">?</span>
-                  </div>
-
-                  <div className="min-w-0">
-                    <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
-                      Pergunta
-                    </p>
-                    <p className="mt-0.5 text-[11px] font-semibold text-slate-400">
-                      {formatDate(question.created_at)}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm font-semibold leading-6 text-slate-900">
-                  {question.content}
-                </div>
-              </section>
-            )}
-
-            {assistantMessages.map((message) => {
-              const csvDownloads = extractCsvDownloads(message.content, message.id);
-              const cleanCopyText = stripMarkdownForCopy(message.content);
-
-              return (
-                <article
-                  key={message.id}
-                  className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[#0f3a4a]">
-                        <span className="text-xs font-black">IA</span>
-                      </div>
-
-                      <div className="min-w-0">
-                        <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
-                          Resposta da Publ.IA
-                        </p>
-                        <p className="mt-0.5 text-[11px] font-semibold text-slate-400">
-                          {formatDate(message.created_at)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        data-copy-answer={cleanCopyText}
-                        data-label="Copiar"
-                        className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-[#0f3a4a] shadow-sm transition hover:bg-slate-50"
-                      >
-                        Copiar
-                      </button>
-
-                      <button
-                        type="button"
-                        data-copy-share-link="true"
-                        data-label="Compartilhar link"
-                        className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-[#0f3a4a] shadow-sm transition hover:bg-slate-50"
-                      >
-                        Compartilhar link
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="px-4 py-4">
-                    <div className="prose prose-slate max-w-none text-[13px] leading-6 prose-headings:font-bold prose-headings:text-[#0f3a4a] prose-h1:text-xl prose-h2:mt-6 prose-h2:border-t prose-h2:border-slate-200 prose-h2:pt-4 prose-h2:text-base prose-h3:mt-5 prose-h3:text-sm prose-h4:mt-4 prose-h4:text-sm prose-p:my-2.5 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:font-semibold prose-a:text-[#0f3a4a] prose-a:underline prose-a:underline-offset-2 prose-hr:my-5 prose-hr:border-slate-200">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          a: ({ href, children }) => (
-                            <a
-                              href={href || "#"}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
-                            >
-                              {children}
-                            </a>
-                          ),
-                          h2: ({ children }) => (
-                            <h2 className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base font-black leading-6 text-[#0f3a4a]">
-                              {children}
-                            </h2>
-                          ),
-                          h3: ({ children }) => (
-                            <h3 className="mt-5 rounded-xl bg-slate-50 px-4 py-2 text-sm font-black uppercase tracking-wide text-[#0f3a4a]">
-                              {children}
-                            </h3>
-                          ),
-                          h4: ({ children }) => (
-                            <h4 className="mt-4 text-sm font-black text-slate-950">
-                              {children}
-                            </h4>
-                          ),
-                          p: ({ children }) => {
-                            const text = extractTextFromNode(children);
-                            if (isCsvHeading(text)) return null;
-
-                            if (isInstitutionalHighlight(text)) {
-                              return (
-                                <p className="my-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[13px] font-semibold leading-6 text-slate-800">
-                                  {children}
-                                </p>
-                              );
-                            }
-
-                            return (
-                              <p className="my-3 text-[13px] leading-7 text-slate-800">
-                                {children}
-                              </p>
-                            );
-                          },
-                          ul: ({ children }) => {
-                            const items = Children.toArray(children).filter((child) => {
-                              return !(typeof child === "string" && child.trim().length === 0);
-                            });
-
-                            if (items.length === 1) {
-                              return <SingleListItemBlock>{children}</SingleListItemBlock>;
-                            }
-
-                            return (
-                              <ul className="my-4 list-disc space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
-                                {children}
-                              </ul>
-                            );
-                          },
-                          ol: ({ children }) => (
-                            <ol className="my-4 list-decimal space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
-                              {children}
-                            </ol>
-                          ),
-                          li: ({ children }) => (
-                            <li className="pl-1 leading-7 marker:text-slate-700">
-                              {children}
-                            </li>
-                          ),
-                          blockquote: ({ children }) => (
-                            <blockquote className="my-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[13px] font-semibold leading-6 text-slate-800">
-                              {children}
-                            </blockquote>
-                          ),
-                          code: ({ inline, className, children, ...props }: any) => {
-                            const language = /language-(\w+)/.exec(className ?? "")?.[1]?.toLowerCase();
-                            const text = String(children ?? "");
-
-                            if (!inline && (language === "csv" || language === "tsv" || looksLikeCsv(text))) {
-                              return null;
-                            }
-
-                            return (
-                              <code
-                                {...props}
-                                className="rounded bg-slate-100 px-1 py-0.5 text-[12px] text-[#0f3a4a]"
-                              >
-                                {children}
-                              </code>
-                            );
-                          },
-                          pre: ({ children }: any) => {
-                            const text = extractTextFromNode(children);
-
-                            if (looksLikeCsv(text)) return null;
-
-                            return (
-                              <pre className="my-4 overflow-x-auto rounded-2xl bg-slate-950 p-4 text-xs text-slate-50">
-                                {children}
-                              </pre>
-                            );
-                          },
-                          table: ({ children }) => (
-                            <div className="my-4 overflow-x-auto rounded-xl border border-slate-200">
-                              <table className="m-0 w-full min-w-[760px] border-collapse text-[12px]">
-                                {children}
-                              </table>
-                            </div>
-                          ),
-                          th: ({ children }) => (
-                            <th className="border-b border-r border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold leading-5 text-[#0f3a4a] last:border-r-0">
-                              {children}
-                            </th>
-                          ),
-                          td: ({ children }) => (
-                            <td className="border-b border-r border-slate-100 px-3 py-2 align-top text-[12px] leading-5 text-slate-700 last:border-r-0">
-                              {children}
-                            </td>
-                          ),
-                          hr: () => <hr className="my-5 border-slate-200" />,
-                        }}
-                      >
-                        {renderMarkdownLikeChat(message.content)}
-                      </ReactMarkdown>
-                    </div>
-
-                    {csvDownloads.length > 0 && (
-                      <div className="mt-4 flex flex-wrap justify-start gap-2 border-t border-slate-100 pt-4">
-                        {csvDownloads.map((download) => (
-                          <a
-                            key={`${message.id}-${download.filename}`}
-                            href={`data:text/csv;charset=utf-8,${encodeURIComponent(`\ufeff${normalizeCsvText(download.csv)}`)}`}
-                            download={download.filename}
-                            className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-[#0f3a4a] shadow-sm transition hover:border-[#0f3a4a] hover:bg-slate-50"
-                          >
-                            {download.label}
-                          </a>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
+            {sharedMessagesForDisplay.map((message) => (
+              <SharedMessageCard key={message.id} message={message} />
+            ))}
           </>
         )}
       </section>

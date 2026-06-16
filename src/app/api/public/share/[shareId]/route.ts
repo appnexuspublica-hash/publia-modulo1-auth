@@ -5,20 +5,112 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type ShareProduct = "standard" | "governance";
+
+type PublicConversation = {
+  id: string;
+  title: string | null;
+  created_at: string;
+};
+
+type PublicMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string;
+};
+
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
-export async function GET(req: Request, { params }: { params: { shareId: string } }) {
+function normalizePublicMessages(messages: any[]): PublicMessage[] {
+  return (messages ?? [])
+    .map((m: any) => ({
+      id: String(m.id ?? ""),
+      role: m.role as "user" | "assistant" | "system",
+      content: String(m.content ?? ""),
+      created_at: String(m.created_at ?? ""),
+    }))
+    .filter((m) => {
+      return (
+        isUuid(m.id) &&
+        Boolean(m.content.trim()) &&
+        (m.role === "user" || m.role === "assistant" || m.role === "system")
+      );
+    });
+}
+
+async function findSharedConversation(admin: any, shareId: string) {
+  const governanceResult = await admin
+    .from("governance_conversations")
+    .select("id, title, created_at")
+    .eq("share_id", shareId)
+    .eq("is_shared", true)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (governanceResult.error) {
+    const schemaMissing = /governance_conversations|is_shared|share_id|deleted_at/i.test(
+      governanceResult.error.message ?? "",
+    );
+
+    if (!schemaMissing) {
+      return { error: governanceResult.error.message, status: 500 };
+    }
+  }
+
+  if (governanceResult.data?.id) {
+    return {
+      product: "governance" as ShareProduct,
+      conversationsTable: "governance_conversations",
+      messagesTable: "governance_messages",
+      conversation: governanceResult.data as PublicConversation,
+    };
+  }
+
+  const standardResult = await admin
+    .from("conversations")
+    .select("id, title, created_at")
+    .eq("share_id", shareId)
+    .eq("is_shared", true)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (standardResult.error) {
+    return { error: standardResult.error.message, status: 500 };
+  }
+
+  if (!standardResult.data?.id) {
+    return { error: "Link público não encontrado.", status: 404 };
+  }
+
+  return {
+    product: "standard" as ShareProduct,
+    conversationsTable: "conversations",
+    messagesTable: "messages",
+    conversation: standardResult.data as PublicConversation,
+  };
+}
+
+export async function GET(
+  req: Request,
+  { params }: { params: { shareId: string } },
+) {
   try {
     const shareId = String(params?.shareId ?? "").trim();
+
     if (!shareId || !isUuid(shareId)) {
       return NextResponse.json({ error: "shareId inválido." }, { status: 400 });
     }
 
-    // ✅ recorte por mensagem
     const url = new URL(req.url);
-    const messageId = String(url.searchParams.get("m") ?? "").trim() || null;
+
+    const messageId =
+      String(url.searchParams.get("messageId") ?? "").trim() ||
+      String(url.searchParams.get("m") ?? "").trim() ||
+      null;
+
     if (messageId && !isUuid(messageId)) {
       return NextResponse.json({ error: "messageId inválido." }, { status: 400 });
     }
@@ -27,124 +119,123 @@ export async function GET(req: Request, { params }: { params: { shareId: string 
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl) {
-      return NextResponse.json({ error: "Env NEXT_PUBLIC_SUPABASE_URL ausente." }, { status: 500 });
-    }
-    if (!serviceRoleKey) {
       return NextResponse.json(
-        { error: "Env SUPABASE_SERVICE_ROLE_KEY ausente." },
-        { status: 500 }
+        { error: "Env NEXT_PUBLIC_SUPABASE_URL ausente." },
+        { status: 500 },
       );
     }
 
-    // Admin (service role) para permitir leitura pública SEM abrir RLS
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { error: "Env SUPABASE_SERVICE_ROLE_KEY ausente." },
+        { status: 500 },
+      );
+    }
+
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
 
-    // shareId -> conversa compartilhada
-    const { data: conv, error: convErr } = await admin
-      .from("conversations")
-      .select("id, title, created_at")
-      .eq("share_id", shareId)
-      .eq("is_shared", true)
-      .is("deleted_at", null)
-      .maybeSingle<{ id: string; title: string | null; created_at: string }>();
+    const resolved = await findSharedConversation(admin, shareId);
 
-    if (convErr) return NextResponse.json({ error: convErr.message }, { status: 500 });
-    if (!conv?.id)
-      return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
+    if ("error" in resolved) {
+      return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+    }
 
-    const conversationId = String(conv.id).trim();
+    const { product, messagesTable, conversation } = resolved;
+    const conversationId = String(conversation.id).trim();
 
-    // ✅ Se tem messageId: retorna só recorte
     if (messageId) {
       const { data: target, error: targetErr } = await admin
-        .from("messages")
+        .from(messagesTable)
         .select("id, role, content, created_at")
         .eq("conversation_id", conversationId)
         .eq("id", messageId)
-        .maybeSingle<{
-          id: string;
-          role: "user" | "assistant";
-          content: string;
-          created_at: string;
-        }>();
+        .maybeSingle();
 
-      if (targetErr) return NextResponse.json({ error: targetErr.message }, { status: 500 });
-      if (!target)
-        return NextResponse.json({ error: "Link público não encontrado." }, { status: 404 });
+      if (targetErr) {
+        return NextResponse.json({ error: targetErr.message }, { status: 500 });
+      }
 
-      // pega a pergunta imediatamente anterior (se existir)
+      if (!target) {
+        return NextResponse.json(
+          { error: "Link público não encontrado." },
+          { status: 404 },
+        );
+      }
+
+      const publicTarget = target as PublicMessage;
+
       const { data: prevUser, error: prevErr } = await admin
-        .from("messages")
+        .from(messagesTable)
         .select("id, role, content, created_at")
         .eq("conversation_id", conversationId)
         .eq("role", "user")
-        .lt("created_at", target.created_at)
+        .lt("created_at", publicTarget.created_at)
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle<{ id: string; role: "user"; content: string; created_at: string }>();
+        .maybeSingle();
 
-      if (prevErr) return NextResponse.json({ error: prevErr.message }, { status: 500 });
+      if (prevErr) {
+        return NextResponse.json({ error: prevErr.message }, { status: 500 });
+      }
 
-      const messages = [
+      const messages = normalizePublicMessages([
         ...(prevUser ? [prevUser] : []),
-        {
-          id: String(target.id),
-          role: target.role,
-          content: String(target.content ?? ""),
-          created_at: target.created_at,
-        },
-      ];
+        publicTarget,
+      ]);
 
       return NextResponse.json(
         {
-          conversation: conv,
+          product,
+          conversation,
           conversationId,
           messages,
           __debug: {
-            version: "share-message-slice-v2",
+            version: "public-share-message-slice-governance-aware-v3",
+            product,
             shareId,
             conversationId,
             messageId,
             returnedCount: messages.length,
           },
         },
-        { status: 200 }
+        { status: 200 },
       );
     }
 
-    // ✅ Sem messageId: retorna conversa inteira (comportamento padrão)
     const { data: msgs, error: msgErr } = await admin
-      .from("messages")
+      .from(messagesTable)
       .select("id, role, content, created_at")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true });
 
-    if (msgErr) return NextResponse.json({ error: msgErr.message }, { status: 500 });
+    if (msgErr) {
+      return NextResponse.json({ error: msgErr.message }, { status: 500 });
+    }
 
-    const messages = (msgs ?? []).map((m: any) => ({
-      id: String(m.id),
-      role: m.role as "user" | "assistant",
-      content: String(m.content ?? ""),
-      created_at: m.created_at as string,
-    }));
+    const messages = normalizePublicMessages(msgs ?? []);
 
     return NextResponse.json(
       {
-        conversation: conv,
+        product,
+        conversation,
         conversationId,
         messages,
         __debug: {
-          version: "share-full-v2",
+          version: "public-share-full-governance-aware-v3",
+          product,
           shareId,
           conversationId,
           returnedCount: messages.length,
         },
       },
-      { status: 200 }
+      { status: 200 },
     );
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "Erro inesperado." }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message ?? "Erro inesperado." },
+      { status: 500 },
+    );
   }
 }

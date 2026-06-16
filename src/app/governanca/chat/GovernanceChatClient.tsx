@@ -2146,6 +2146,180 @@ export default function GovernanceChatClient({
     }
   }
 
+  function compactConversationCopyText(value: string) {
+    return String(value ?? "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
+      .replace(/\n{2,}/g, "\n")
+      .replace(/^\s*[-•]\s+/gm, "• ")
+      .replace(/^\s*(\d+)[.)]\s+/gm, "$1. ")
+      .trim();
+  }
+
+  function sortConversationMessagesForCopy(
+    conversationMessages: GovernanceMessage[],
+  ) {
+    return [...conversationMessages].sort((a, b) => {
+      const aTime = new Date(a.created_at ?? "").getTime();
+      const bTime = new Date(b.created_at ?? "").getTime();
+
+      if (Number.isNaN(aTime) && Number.isNaN(bTime)) return 0;
+      if (Number.isNaN(aTime)) return 1;
+      if (Number.isNaN(bTime)) return -1;
+
+      return aTime - bTime;
+    });
+  }
+
+  async function getConversationMessagesForAction(conversationId: string) {
+    const localMessages = messagesByConversationId.get(conversationId) ?? [];
+
+    try {
+      const supabase = getBrowserSupabaseClient();
+
+      const { data, error } = await supabase
+        .from("governance_messages")
+        .select("id, conversation_id, role, content, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        console.warn("[governance] Não foi possível carregar mensagens completas para ação:", error);
+        return sortConversationMessagesForCopy(localMessages);
+      }
+
+      const remoteMessages = (data ?? []) as GovernanceMessage[];
+
+      if (remoteMessages.length >= localMessages.length) {
+        return sortConversationMessagesForCopy(remoteMessages);
+      }
+
+      return sortConversationMessagesForCopy(localMessages);
+    } catch (error) {
+      console.warn("[governance] Falha ao preparar mensagens da conversa:", error);
+      return sortConversationMessagesForCopy(localMessages);
+    }
+  }
+
+  function formatConversationForCopy(
+    conversation: GovernanceConversation,
+    conversationMessages: GovernanceMessage[],
+  ) {
+    const title = String(conversation.title ?? "Conversa").trim() || "Conversa";
+
+    let questionNumber = 0;
+    let answerNumber = 0;
+
+    const body = sortConversationMessagesForCopy(conversationMessages)
+      .map((message) => {
+        const content = compactConversationCopyText(
+          stripMarkdownForCopy(message.content),
+        );
+
+        if (!content) {
+          return "";
+        }
+
+        if (message.role === "user") {
+          questionNumber += 1;
+          return [`PERGUNTA ${questionNumber}`, content].join("\n");
+        }
+
+        if (message.role === "assistant") {
+          answerNumber += 1;
+          return [`RESPOSTA ${answerNumber}`, content].join("\n");
+        }
+
+        return ["SISTEMA", content].join("\n");
+      })
+      .filter(Boolean)
+      .join("\n\n");
+
+    return [
+      "PUBL.IA GOVERNANÇA",
+      `CONVERSA: ${title}`,
+      "",
+      body,
+    ]
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  async function handleCopyConversation(conversation: GovernanceConversation) {
+    try {
+      const conversationMessages = await getConversationMessagesForAction(
+        conversation.id,
+      );
+
+      if (conversationMessages.length === 0) {
+        throw new Error("Esta conversa ainda não possui mensagens para copiar.");
+      }
+
+      await navigator.clipboard.writeText(
+        formatConversationForCopy(conversation, conversationMessages),
+      );
+
+      setOpenConversationMenuId(null);
+      setActionFeedback("Conversa copiada.");
+    } catch (error) {
+      setMessageError(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível copiar a conversa.",
+      );
+    }
+  }
+
+  async function handleShareConversation(conversation: GovernanceConversation) {
+    try {
+      setOpenConversationMenuId(null);
+      setActionFeedback("Gerando link de compartilhamento...");
+
+      const response = await fetch("/api/public/share/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          product: "governance",
+          conversationId: conversation.id,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error ?? "Não foi possível gerar o link de compartilhamento.",
+        );
+      }
+
+      const shareUrl =
+        typeof payload?.shareUrl === "string" && payload.shareUrl.trim()
+          ? payload.shareUrl.trim()
+          : payload?.shareId
+            ? `${window.location.origin}/governanca/share/${payload.shareId}`
+            : "";
+
+      if (!shareUrl) {
+        throw new Error("A API não retornou o link de compartilhamento.");
+      }
+
+      await navigator.clipboard.writeText(shareUrl);
+      setActionFeedback("Link de compartilhamento copiado.");
+    } catch (error) {
+      setMessageError(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível gerar o link de compartilhamento.",
+      );
+    }
+  }
+
   function startRenameConversation(conversation: GovernanceConversation) {
     setRenamingConversationId(conversation.id);
     setRenameTitle(conversation.title);
@@ -2166,10 +2340,107 @@ export default function GovernanceChatClient({
 
   async function handleCopyMessage(message: GovernanceMessage) {
     try {
-      await writeRichAnswerToClipboard(message.content);
+      const normalizeMessageCopyText = (value: string) =>
+        stripMarkdownForCopy(value)
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n")
+          .split("\n")
+          .map((line) => line.replace(/[ \t]+/g, " ").trim())
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+
+      const renderClipboardParagraphs = (value: string) =>
+        normalizeMessageCopyText(value)
+          .split(/\n{2,}/)
+          .map((paragraph) =>
+            paragraph
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .join("<br />"),
+          )
+          .filter(Boolean)
+          .map(
+            (paragraph) =>
+              `<p style="margin:0 0 10px 0;padding:0;font-size:16px;line-height:1.5;color:#111827;">${escapeHtml(
+                paragraph,
+              ).replace(/&lt;br \/&gt;/g, "<br />")}</p>`,
+          )
+          .join("");
+
+      const renderBalancedClipboardHtml = (params: {
+        questionText: string;
+        answerText: string;
+      }) => {
+        const questionBlock = params.questionText
+          ? `
+            <div style="margin:0 0 14px 0;padding:0;">
+              <div style="margin:0 0 6px 0;padding:0;font-size:13px;line-height:1.3;font-weight:700;letter-spacing:0.04em;color:#0f3a4a;">PERGUNTA</div>
+              ${renderClipboardParagraphs(params.questionText)}
+            </div>
+          `
+          : "";
+
+        return `<!doctype html>
+<html>
+  <body>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#111827;margin:0;padding:0;">
+      ${questionBlock}
+      <div style="margin:0 0 6px 0;padding:0;font-size:13px;line-height:1.3;font-weight:700;letter-spacing:0.04em;color:#0f3a4a;">RESPOSTA</div>
+      ${renderClipboardParagraphs(params.answerText)}
+    </div>
+  </body>
+</html>`;
+      };
+
+      const conversationMessages = sortConversationMessagesForCopy(
+        messagesByConversationId.get(message.conversation_id) ?? selectedMessages,
+      );
+
+      const messageIndex = conversationMessages.findIndex(
+        (item) => item.id === message.id,
+      );
+
+      const previousQuestion =
+        messageIndex > -1
+          ? [...conversationMessages]
+              .slice(0, messageIndex)
+              .reverse()
+              .find((item) => item.role === "user")
+          : null;
+
+      const questionText = previousQuestion?.content
+        ? normalizeMessageCopyText(previousQuestion.content)
+        : "";
+
+      const answerText = normalizeMessageCopyText(message.content);
+
+      const contentToCopy = questionText
+        ? ["PERGUNTA", "", questionText, "", "RESPOSTA", "", answerText].join("\n")
+        : ["RESPOSTA", "", answerText].join("\n");
+
+      const ClipboardItemCtor = (window as any).ClipboardItem;
+
+      if (ClipboardItemCtor && navigator.clipboard?.write) {
+        const html = renderBalancedClipboardHtml({
+          questionText,
+          answerText,
+        });
+
+        await navigator.clipboard.write([
+          new ClipboardItemCtor({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([contentToCopy], { type: "text/plain" }),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(contentToCopy);
+      }
+
       setMessageActionFeedback({
         messageId: message.id,
-        message: "Resposta copiada.",
+        message: questionText ? "Pergunta e resposta copiadas." : "Resposta copiada.",
         tone: "success",
       });
     } catch {
@@ -2971,7 +3242,10 @@ export default function GovernanceChatClient({
 
                           <button
                             type="button"
-                            onClick={() => startRenameConversation(conversation)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              startRenameConversation(conversation);
+                            }}
                             className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-semibold hover:bg-[#f5f5f5]"
                           >
                             <Edit3 size={14} />
@@ -2980,7 +3254,34 @@ export default function GovernanceChatClient({
 
                           <button
                             type="button"
-                            onClick={() => void handleDeleteConversation(conversation.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleCopyConversation(conversation);
+                            }}
+                            className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-semibold hover:bg-[#f5f5f5]"
+                          >
+                            <Copy size={14} />
+                            Copiar
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleShareConversation(conversation);
+                            }}
+                            className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-semibold hover:bg-[#f5f5f5]"
+                          >
+                            <Share2 size={14} />
+                            Compartilhar
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleDeleteConversation(conversation.id);
+                            }}
                             className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-semibold text-red-600 hover:bg-red-50"
                           >
                             <Trash2 size={14} />
