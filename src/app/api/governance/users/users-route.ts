@@ -17,7 +17,6 @@ export const dynamic = "force-dynamic";
 type CreateGovernanceUserBody = {
   cpf?: string;
   nome?: string;
-  email?: string;
   password?: string;
   functionalRole?: GovernanceFunctionalRole;
   technicalRole?: GovernanceTechnicalRole;
@@ -123,20 +122,6 @@ function makeTechnicalEmailFromCpf(cpf: string) {
   return `cpf.${cpf}@governanca.publia.local`.toLowerCase();
 }
 
-function normalizeEmail(value: string) {
-  return value.trim().toLowerCase();
-}
-
-function isValidEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
-function isTechnicalGovernanceEmail(value: string | null | undefined) {
-  return Boolean(
-    value?.toLowerCase().endsWith("@governanca.publia.local"),
-  );
-}
-
 function canManageUsers(technicalRole: GovernanceTechnicalRole) {
   return ["owner", "admin"].includes(technicalRole);
 }
@@ -206,10 +191,10 @@ async function ensureProfile(params: {
   userId: string;
   cpf: string;
   nome: string;
-  email: string;
+  technicalEmail: string;
   cidadeUf: string | null;
 }) {
-  const { admin, userId, cpf, nome, email, cidadeUf } = params;
+  const { admin, userId, cpf, nome, technicalEmail, cidadeUf } = params;
 
   const { data: existingProfile, error: existingProfileError } = await admin
     .from("profiles")
@@ -232,10 +217,7 @@ async function ensureProfile(params: {
       .update({
         cpf_cnpj: existingProfile.cpf_cnpj || cpf,
         nome: existingProfile.nome || nome,
-        email:
-          !existingProfile.email || isTechnicalGovernanceEmail(existingProfile.email)
-            ? email
-            : existingProfile.email,
+        email: existingProfile.email || technicalEmail,
         cidade_uf: cidadeUf,
         updated_at: new Date().toISOString(),
       })
@@ -257,7 +239,7 @@ async function ensureProfile(params: {
     user_id: userId,
     cpf_cnpj: cpf,
     nome,
-    email,
+    email: technicalEmail,
     telefone: "",
     cidade_uf: cidadeUf,
   });
@@ -452,8 +434,6 @@ export async function POST(request: Request) {
 
     const cpf = onlyDigits(body?.cpf ?? "");
     const nome = typeof body?.nome === "string" ? body.nome.trim() : "";
-    const email =
-      typeof body?.email === "string" ? normalizeEmail(body.email) : "";
     const password =
       typeof body?.password === "string" ? body.password.trim() : "";
 
@@ -490,13 +470,6 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!email || !isValidEmail(email)) {
-      return NextResponse.json(
-        { error: "Informe um e-mail válido." },
-        { status: 400 },
-      );
-    }
-
     if (password.length < 6) {
       return NextResponse.json(
         { error: "A senha inicial deve ter pelo menos 6 caracteres." },
@@ -517,7 +490,7 @@ export async function POST(request: Request) {
       return seatErrorResponse;
     }
 
-    const fallbackTechnicalEmail = makeTechnicalEmailFromCpf(cpf);
+    const technicalEmail = makeTechnicalEmailFromCpf(cpf);
 
     const { data: existingProfileByCpf, error: existingProfileByCpfError } =
       await admin
@@ -545,7 +518,7 @@ export async function POST(request: Request) {
     } else {
       const existingAuthUserId = await findAuthUserIdByEmail({
         admin,
-        email,
+        email: technicalEmail,
       });
 
       if (existingAuthUserId) {
@@ -553,7 +526,7 @@ export async function POST(request: Request) {
       } else {
         const { data: createdAuthUser, error: createAuthUserError } =
           await admin.auth.admin.createUser({
-            email,
+            email: technicalEmail,
             password,
             email_confirm: true,
             user_metadata: {
@@ -596,7 +569,7 @@ export async function POST(request: Request) {
         userId: targetUserId,
         cpf,
         nome,
-        email,
+        technicalEmail,
         cidadeUf,
       });
     } catch (profileError) {
@@ -696,7 +669,7 @@ export async function POST(request: Request) {
         nome,
         functional_role: functionalRole,
         technical_role: technicalRole,
-        email,
+        email: technicalEmail,
       },
     });
 

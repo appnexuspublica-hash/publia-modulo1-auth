@@ -33,6 +33,14 @@ type GovernanceShellProps = {
   context: GovernanceContext | null;
 };
 
+type GovernanceOrganizationWithDetails = GovernanceContext["organization"] & {
+  authority_name?: string | null;
+  authority_position?: string | null;
+  address_logradouro?: string | null;
+  address_bairro?: string | null;
+  address_cep?: string | null;
+};
+
 function formatDate(value: string | null) {
   if (!value) return "Não informado";
 
@@ -112,6 +120,7 @@ export default function GovernanceShell({
   }
 
   const { organization, membership } = context;
+  const organizationDetails = organization as GovernanceOrganizationWithDetails;
 
   const isAdminAreaEnabled = ["owner", "admin", "manager"].includes(
     membership.technical_role,
@@ -261,6 +270,24 @@ export default function GovernanceShell({
                     {getGovernanceOrganizationTypeLabel(
                       organization.organization_type,
                     )}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Nome da autoridade
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organizationDetails.authority_name || "Não informado"}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Cargo da autoridade
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organizationDetails.authority_position || "Não informado"}
                   </strong>
                 </div>
 

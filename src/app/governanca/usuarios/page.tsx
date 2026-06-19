@@ -174,7 +174,8 @@ export default async function GovernanceUsersPage() {
     console.error("[governance/users] Erro ao listar membros:", membersError);
   }
 
-  const members = (membersData ?? []) as OrganizationMemberRow[];
+  const allMembers = (membersData ?? []) as OrganizationMemberRow[];
+  const members = allMembers.filter((member) => member.status !== "removed");
   const memberUserIds = members.map((member) => member.user_id);
 
   let profilesByUserId = new Map<string, ProfileRow>();
@@ -365,9 +366,9 @@ export default async function GovernanceUsersPage() {
               </h2>
 
               <p className="mt-1 text-sm text-slate-600">
-                Esta lista mostra os usuários vinculados ao órgão atual. O CPF
-                vem de profiles; a permissão e o papel vêm de
-                organization_members.
+                Esta lista mostra os usuários ativos, convidados ou suspensos
+                vinculados ao órgão atual. Usuários removidos não aparecem na
+                lista principal.
               </p>
             </div>
 
@@ -422,6 +423,9 @@ export default async function GovernanceUsersPage() {
                                 {profile?.nome || "Nome não informado"}
                               </strong>
                               <span className="mt-1 block break-all text-xs text-slate-500">
+                                {profile?.email || "E-mail não informado"}
+                              </span>
+                              <span className="mt-1 block break-all text-[11px] text-slate-400">
                                 user_id: {member.user_id}
                               </span>
                             </div>

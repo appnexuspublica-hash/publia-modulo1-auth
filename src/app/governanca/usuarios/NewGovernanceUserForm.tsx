@@ -63,6 +63,7 @@ export default function NewGovernanceUserForm() {
 
   const [cpf, setCpf] = useState("");
   const [nome, setNome] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [functionalRole, setFunctionalRole] =
     useState<GovernanceFunctionalRole>("servidor");
@@ -91,6 +92,13 @@ export default function NewGovernanceUserForm() {
       return;
     }
 
+    const emailValue = email.trim().toLowerCase();
+
+    if (!emailValue || !emailValue.includes("@")) {
+      setErrorMessage("Informe um e-mail válido.");
+      return;
+    }
+
     if (password.trim().length < 6) {
       setErrorMessage("A senha inicial deve ter pelo menos 6 caracteres.");
       return;
@@ -106,6 +114,7 @@ export default function NewGovernanceUserForm() {
           body: JSON.stringify({
             cpf: cpfDigits,
             nome: nome.trim(),
+            email: emailValue,
             password: password.trim(),
             functionalRole,
             technicalRole,
@@ -121,6 +130,7 @@ export default function NewGovernanceUserForm() {
         setSuccessMessage("Usuário cadastrado e vinculado ao órgão.");
         setCpf("");
         setNome("");
+        setEmail("");
         setPassword("");
         setFunctionalRole("servidor");
         setTechnicalRole("member");
@@ -151,14 +161,14 @@ export default function NewGovernanceUserForm() {
           </h2>
 
           <p className="mt-1 text-sm leading-6 text-slate-600">
-            Informe CPF, nome, senha inicial, papel funcional e permissão
-            técnica. O acesso institucional será feito pelo CPF dentro do CNPJ
-            do órgão.
+            Informe CPF, nome, e-mail, senha inicial, papel funcional e
+            permissão técnica. O acesso institucional será feito pelo CPF dentro
+            do CNPJ do órgão, mantendo o e-mail real no cadastro.
           </p>
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="grid gap-4 xl:grid-cols-5">
+      <form onSubmit={handleSubmit} className="grid gap-4 xl:grid-cols-6">
         <div className="xl:col-span-1">
           <label
             htmlFor="governance-user-cpf"
@@ -189,6 +199,24 @@ export default function NewGovernanceUserForm() {
             value={nome}
             onChange={(event) => setNome(event.target.value)}
             placeholder="Nome do usuário"
+            className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+          />
+        </div>
+
+        <div className="xl:col-span-1">
+          <label
+            htmlFor="governance-user-email"
+            className="text-xs font-semibold text-slate-700"
+          >
+            E-mail
+          </label>
+
+          <input
+            id="governance-user-email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="email@orgao.gov.br"
             className="mt-1 w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
           />
         </div>
@@ -259,7 +287,7 @@ export default function NewGovernanceUserForm() {
           </select>
         </div>
 
-        <div className="xl:col-span-5">
+        <div className="xl:col-span-6">
           {errorMessage && (
             <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {errorMessage}
