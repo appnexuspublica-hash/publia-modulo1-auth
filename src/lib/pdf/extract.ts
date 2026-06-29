@@ -15,6 +15,11 @@ type ExtractPdfTextOptions = {
   fileSizeBytes?: number | null;
   maxBytes?: number | null;
   maxMbLabel?: number | null;
+  /**
+   * Quando true, tenta OCR mesmo se a extração nativa já retornou texto.
+   * Útil para Diários Oficiais com páginas mistas: texto selecionável + páginas escaneadas/imagem.
+   */
+  preferOcr?: boolean;
 };
 
 const OCR_ENABLED = String(process.env.PDF_OCR_ENABLED ?? "true").toLowerCase() !== "false";
@@ -275,10 +280,6 @@ export async function extractPdfTextFromBuffer(
       preview: pageText.slice(0, 200),
     });
 
-    if (pageText.length >= OCR_MIN_TEXT_LENGTH) {
-      return { kind: "ready", text: pageText };
-    }
-
     // Tentativa 2: fallback do próprio unpdf
     const fallbackRaw = await extractByUnpdfText(pdf);
     const fallbackText = sanitizeExtractedText(fallbackRaw, hardLimit);
@@ -289,11 +290,46 @@ export async function extractPdfTextFromBuffer(
       preview: fallbackText.slice(0, 200),
     });
 
-    if (fallbackText.length >= OCR_MIN_TEXT_LENGTH) {
-      return { kind: "ready", text: fallbackText };
+    const bestNativeText = pageText.length >= fallbackText.length ? pageText : fallbackText;
+
+    if (options.preferOcr && bestNativeText.length >= OCR_MIN_TEXT_LENGTH) {
+      const ocrDecision = shouldAttemptOcr(buf);
+
+      if (!ocrDecision.allowed) {
+        console.log("[extractPdfTextFromBuffer] preferred OCR skipped", {
+          reason: ocrDecision.reason,
+        });
+
+        return { kind: "ready", text: bestNativeText };
+      }
+
+      try {
+        console.log("[extractPdfTextFromBuffer] preferred OCR start", {
+          model: OCR_MODEL,
+          fileSizeMb: getBufferSizeMb(buf).toFixed(2),
+          nativeTextLength: bestNativeText.length,
+        });
+
+        const ocrText = await extractByOpenAiOcr(buf, hardLimit);
+
+        console.log("[extractPdfTextFromBuffer] preferred OCR result", {
+          finalLength: ocrText.length,
+          preview: ocrText.slice(0, 200),
+        });
+
+        if (ocrText.trim() && ocrText.length >= Math.floor(bestNativeText.length * 0.6)) {
+          return { kind: "ready", text: ocrText };
+        }
+      } catch (ocrError: any) {
+        console.error("[extractPdfTextFromBuffer] preferred OCR technical_error", ocrError);
+      }
+
+      return { kind: "ready", text: bestNativeText };
     }
 
-    const bestNativeText = pageText.length >= fallbackText.length ? pageText : fallbackText;
+    if (bestNativeText.length >= OCR_MIN_TEXT_LENGTH) {
+      return { kind: "ready", text: bestNativeText };
+    }
 
     if (bestNativeText.trim().length > 0) {
       console.log("[extractPdfTextFromBuffer] weak native text, trying OCR", {

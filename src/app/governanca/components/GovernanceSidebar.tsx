@@ -7,6 +7,7 @@ import {
   BarChart3,
   BookOpen,
   FileSearch,
+  FileText,
   Landmark,
   MessageSquare,
   Settings,
@@ -49,9 +50,16 @@ const navigationItems = [
   {
     label: "Fontes oficiais",
     icon: FileSearch,
+  FileText,
     href: "/governanca/fontes-oficiais",
     enabled: true,
   },
+    {
+      label: "Diário Oficial",
+      icon: FileText,
+      href: "/governanca/diario-oficial",
+      enabled: true,
+    },
   {
     label: "Auditoria",
     icon: ShieldCheck,

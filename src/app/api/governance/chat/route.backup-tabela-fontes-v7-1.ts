@@ -768,7 +768,7 @@ async function loadActiveOfficialSourcesForChat(params: {
   const { client, organizationId, question } = params;
 
   const { data, error } = await client
-    .from("official_sources")
+    .from("governance_official_sources")
     .select(
       `
         id,

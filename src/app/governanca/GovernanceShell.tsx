@@ -68,6 +68,16 @@ function formatCnpj(value: string) {
   );
 }
 
+function formatCep(value: string | null | undefined) {
+  const digits = (value ?? "").replace(/\D/g, "");
+
+  if (digits.length !== 8) {
+    return value || "Não informado";
+  }
+
+  return digits.replace(/^(\d{5})(\d{3})$/, "$1-$2");
+}
+
 function formatPopulation(value: number | null) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "Não informado";
@@ -234,7 +244,7 @@ export default function GovernanceShell({
             </div>
           </section>
 
-          <section className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+          <section className="grid gap-5">
             <article className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
               <div className="mb-5 flex items-center gap-3">
                 <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
@@ -252,13 +262,31 @@ export default function GovernanceShell({
                 </div>
               </div>
 
-              <div className="grid gap-3 text-sm md:grid-cols-2">
+              <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Nome
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organization.name || "Não informado"}
+                  </strong>
+                </div>
+
                 <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
                   <span className="block text-xs font-semibold uppercase text-slate-500">
                     Nome jurídico
                   </span>
                   <strong className="mt-1 block text-slate-950">
                     {organization.legal_name || "Não informado"}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    CNPJ
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {formatCnpj(organization.cnpj)}
                   </strong>
                 </div>
 
@@ -293,11 +321,19 @@ export default function GovernanceShell({
 
                 <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
                   <span className="block text-xs font-semibold uppercase text-slate-500">
-                    Município / UF
+                    Município
                   </span>
                   <strong className="mt-1 block text-slate-950">
                     {organization.municipality_name || "Não informado"}
-                    {organization.state_uf ? `/${organization.state_uf}` : ""}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    UF
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organization.state_uf || "Não informado"}
                   </strong>
                 </div>
 
@@ -310,7 +346,43 @@ export default function GovernanceShell({
                   </strong>
                 </div>
 
-                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4 md:col-span-2">
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Logradouro
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organizationDetails.address_logradouro || "Não informado"}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Bairro
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organizationDetails.address_bairro || "Não informado"}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    CEP
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {formatCep(organizationDetails.address_cep)}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Região
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organization.region || "Não informado"}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
                   <span className="block text-xs font-semibold uppercase text-slate-500">
                     Porte do município
                   </span>
@@ -327,15 +399,6 @@ export default function GovernanceShell({
                   </span>
                   <strong className="mt-1 block text-slate-950">
                     {formatPopulation(organization.population)}
-                  </strong>
-                </div>
-
-                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
-                  <span className="block text-xs font-semibold uppercase text-slate-500">
-                    Região
-                  </span>
-                  <strong className="mt-1 block text-slate-950">
-                    {organization.region || "Não informado"}
                   </strong>
                 </div>
               </div>
@@ -357,7 +420,7 @@ export default function GovernanceShell({
                 </div>
               </div>
 
-              <div className="space-y-3 text-sm">
+              <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
                   <span className="block text-xs font-semibold uppercase text-slate-500">
                     Contrato
@@ -367,24 +430,22 @@ export default function GovernanceShell({
                   </strong>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
-                    <span className="block text-xs font-semibold uppercase text-slate-500">
-                      Início
-                    </span>
-                    <strong className="mt-1 block text-slate-950">
-                      {formatDate(organization.contract_starts_at)}
-                    </strong>
-                  </div>
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Início
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {formatDate(organization.contract_starts_at)}
+                  </strong>
+                </div>
 
-                  <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
-                    <span className="block text-xs font-semibold uppercase text-slate-500">
-                      Fim
-                    </span>
-                    <strong className="mt-1 block text-slate-950">
-                      {formatDate(organization.contract_ends_at)}
-                    </strong>
-                  </div>
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Fim
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {formatDate(organization.contract_ends_at)}
+                  </strong>
                 </div>
 
                 <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
@@ -395,6 +456,24 @@ export default function GovernanceShell({
                     {getGovernanceHistoryRetentionPolicyLabel(
                       organization.history_retention_policy,
                     )}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Status
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {getOrganizationStatusLabel(organization.status)}
+                  </strong>
+                </div>
+
+                <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4">
+                  <span className="block text-xs font-semibold uppercase text-slate-500">
+                    Limite de usuários
+                  </span>
+                  <strong className="mt-1 block text-slate-950">
+                    {organization.seats_limit ?? "Sem limite"}
                   </strong>
                 </div>
               </div>

@@ -1047,7 +1047,7 @@ function buildOfficialLegalUrl(reference: string) {
 
   const numberYear = normalized.match(/([\d.]+)\/(\d{4})/);
   if (!numberYear) {
-    return `https://www.planalto.gov.br/ccivil_03/`;
+    return null;
   }
 
   const rawNumber = numberYear[1].replace(/\D/g, "");
@@ -1059,6 +1059,12 @@ function buildOfficialLegalUrl(reference: string) {
   }
 
   if (/Lei/i.test(normalized)) {
+    const looksLikeFederalOrdinaryLaw = rawNumber.length >= 4 || numberYear[1].includes(".");
+
+    if (!looksLikeFederalOrdinaryLaw) {
+      return null;
+    }
+
     if (periodPath) {
       return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/lei/l${rawNumber}.htm`;
     }
@@ -1067,6 +1073,12 @@ function buildOfficialLegalUrl(reference: string) {
   }
 
   if (/Decreto/i.test(normalized)) {
+    const looksLikeFederalDecree = rawNumber.length >= 4 || numberYear[1].includes(".");
+
+    if (!looksLikeFederalDecree) {
+      return null;
+    }
+
     if (periodPath) {
       return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/decreto/d${rawNumber}.htm`;
     }
@@ -1078,7 +1090,7 @@ function buildOfficialLegalUrl(reference: string) {
     return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/mpv/mpv${rawNumber}.htm`;
   }
 
-  return `https://www.planalto.gov.br/ccivil_03/`;
+  return null;
 }
 
 function linkifyLegalReferences(content: string) {
@@ -1093,7 +1105,13 @@ function linkifyLegalReferences(content: string) {
       return reference;
     }
 
-    return `[${reference}](${buildOfficialLegalUrl(reference)})`;
+    const officialUrl = buildOfficialLegalUrl(reference);
+
+    if (!officialUrl) {
+      return reference;
+    }
+
+    return `[${reference}](${officialUrl})`;
   });
 }
 
