@@ -225,6 +225,25 @@ function getSubscriptionNextPayment(payload: unknown): string | null {
   return parseIsoDate(raw);
 }
 
+
+function getCustomerAccessUntil(payload: unknown): string | null {
+  const root = getOrderRoot(payload);
+
+  const raw = getFirstAvailable(root, [
+    ["Subscription", "customer_access", "access_until"],
+    ["subscription", "customer_access", "access_until"],
+    ["customer_access", "access_until"],
+  ]);
+
+  return parseIsoDate(raw);
+}
+
+function isDateAfter(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+
+  return new Date(a).getTime() > new Date(b).getTime();
+}
+
 function getSubscriptionId(payload: unknown): string | null {
   const root = getOrderRoot(payload);
 
@@ -1310,6 +1329,39 @@ export async function POST(request: NextRequest) {
           200,
           {
             reason: "product_tier_not_mapped_for_negative_event",
+            userId: profile.user_id,
+          }
+        );
+      }
+
+      const negativeAccessUntil =
+        getCustomerAccessUntil(payload) ?? getSubscriptionNextPayment(payload);
+
+      const hasNewerActiveSubscription =
+        existingAccess?.access_status === "subscription_active" &&
+        existingAccess.product_tier === productTier &&
+        isDateAfter(existingAccess.subscription_ends_at, negativeAccessUntil);
+
+      if (hasNewerActiveSubscription) {
+        return finish(
+          "ignored",
+          {
+            ok: true,
+            ignored: true,
+            reason: "stale_negative_event_older_than_active_subscription",
+            userId: profile.user_id,
+            cpfCnpj,
+            productTier,
+            eventType,
+            orderStatus,
+            subscriptionId,
+            orderId,
+            currentSubscriptionEndsAt: existingAccess.subscription_ends_at,
+            negativeAccessUntil,
+          },
+          200,
+          {
+            reason: "stale_negative_event_older_than_active_subscription",
             userId: profile.user_id,
           }
         );

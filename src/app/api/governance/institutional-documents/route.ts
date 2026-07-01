@@ -4,8 +4,39 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
+import { extractPdfTextFromBuffer, sanitizeExtractedText } from "@/lib/pdf/extract";
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 const DEFAULT_BUCKET = "governance-documents";
+
+const DOCUMENT_SELECT = `
+  id,
+  organization_id,
+  official_source_id,
+  uploaded_by,
+  reviewed_by,
+  title,
+  document_type,
+  category,
+  source_name,
+  source_url,
+  valid_from,
+  valid_until,
+  storage_bucket,
+  storage_path,
+  file_name,
+  file_size,
+  mime_type,
+  extracted_text,
+  indexing_status,
+  review_status,
+  metadata,
+  reviewed_at,
+  indexed_at,
+  created_at,
+  updated_at
+`;
 
 const allowedDocumentTypes = new Set([
   "lei",
@@ -22,8 +53,28 @@ const allowedDocumentTypes = new Set([
 ]);
 
 const documentTypeAliases: Record<string, string> = {
+  codigo: "lei",
+  decreto_consolidado: "decreto",
+  estatuto: "regulamento",
+  lei_organica: "lei",
+  organograma: "outro",
   parecer: "parecer_modelo",
+  plano: "outro",
   norma_interna: "instrucao_normativa",
+};
+
+const allowedReviewStatuses = new Set([
+  "draft",
+  "pending_review",
+  "approved",
+  "rejected",
+  "archived",
+]);
+
+type AuthenticatedContext = {
+  supabase: ReturnType<typeof createWritableSupabaseRouteClient>;
+  userId: string;
+  organizationId: string;
 };
 
 function createWritableSupabaseRouteClient() {
@@ -67,6 +118,12 @@ function normalizeDocumentType(value: string) {
   return allowedDocumentTypes.has(normalizedValue) ? normalizedValue : "outro";
 }
 
+function normalizeNullableDate(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function sanitizeFileName(fileName: string) {
   return fileName
     .normalize("NFD")
@@ -87,63 +144,211 @@ function getMaxUploadBytes() {
   return maxUploadMb * 1024 * 1024;
 }
 
-export async function GET() {
-  try {
-    const supabase = createWritableSupabaseRouteClient();
+type InstitutionalExtractionResult = {
+  text: string | null;
+  indexingStatus: "indexed" | "pending" | "failed";
+  message: string;
+};
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
+async function extractInstitutionalDocumentText(options: {
+  buffer: Buffer;
+  fileName?: string | null;
+  mimeType?: string | null;
+}): Promise<InstitutionalExtractionResult> {
+  const fileName = String(options.fileName ?? "").toLowerCase();
+  const mimeType = String(options.mimeType ?? "").toLowerCase();
 
-    if (userError || !user) {
-      return NextResponse.json(
+  const isPdf =
+    mimeType.includes("pdf") ||
+    fileName.endsWith(".pdf");
+
+  const isText =
+    mimeType.startsWith("text/") ||
+    mimeType.includes("markdown") ||
+    fileName.endsWith(".txt") ||
+    fileName.endsWith(".md") ||
+    fileName.endsWith(".markdown");
+
+  if (isPdf) {
+    const result = await extractPdfTextFromBuffer(options.buffer, {
+      preferOcr: false,
+      fileSizeBytes: options.buffer.length,
+    });
+
+    if (result.kind === "ready") {
+      return {
+        text: result.text,
+        indexingStatus: "indexed",
+        message: "Documento indexado e disponível para consulta no Chat.",
+      };
+    }
+
+    if (result.kind === "no_text") {
+      return {
+        text: null,
+        indexingStatus: "pending",
+        message: "PDF sem texto detectável. Use Reprocessar para nova tentativa.",
+      };
+    }
+
+    return {
+      text: null,
+      indexingStatus: "failed",
+      message: result.error,
+    };
+  }
+
+  if (isText) {
+    const text = sanitizeExtractedText(options.buffer.toString("utf8"));
+
+    return {
+      text: text || null,
+      indexingStatus: text ? "indexed" : "pending",
+      message: text
+        ? "Documento indexado e disponível para consulta no Chat."
+        : "Arquivo de texto sem conteúdo detectável.",
+    };
+  }
+
+  return {
+    text: null,
+    indexingStatus: "pending",
+    message: "Tipo de arquivo cadastrado. Extração automática ainda não disponível para este formato.",
+  };
+}
+
+async function getAuthorizedManagerContext(): Promise<
+  | { ok: true; context: AuthenticatedContext }
+  | { ok: false; response: NextResponse }
+> {
+  const supabase = createWritableSupabaseRouteClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return {
+      ok: false,
+      response: NextResponse.json(
         { error: "Usuário não autenticado." },
         { status: 401 },
-      );
-    }
+      ),
+    };
+  }
 
-    const context = await getCurrentGovernanceOrganization(user.id);
+  const context = await getCurrentGovernanceOrganization(user.id);
 
-    if (!context) {
-      return NextResponse.json(
+  if (!context) {
+    return {
+      ok: false,
+      response: NextResponse.json(
         { error: "Usuário não vinculado a uma organização ativa." },
         { status: 403 },
-      );
+      ),
+    };
+  }
+
+  const allowedTechnicalRoles = ["owner", "admin", "manager"];
+
+  if (!allowedTechnicalRoles.includes(context.membership.technical_role)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Seu perfil não pode gerenciar a Base Institucional." },
+        { status: 403 },
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    context: {
+      supabase,
+      userId: user.id,
+      organizationId: context.organization.id,
+    },
+  };
+}
+
+async function getAuthenticatedReadContext(): Promise<
+  | {
+      ok: true;
+      context: {
+        supabase: ReturnType<typeof createWritableSupabaseRouteClient>;
+        userId: string;
+        organizationId: string;
+      };
     }
+  | { ok: false; response: NextResponse }
+> {
+  const supabase = createWritableSupabaseRouteClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Usuário não autenticado." },
+        { status: 401 },
+      ),
+    };
+  }
+
+  const context = await getCurrentGovernanceOrganization(user.id);
+
+  if (!context) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Usuário não vinculado a uma organização ativa." },
+        { status: 403 },
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    context: {
+      supabase,
+      userId: user.id,
+      organizationId: context.organization.id,
+    },
+  };
+}
+
+async function fetchInstitutionalDocument(
+  supabase: ReturnType<typeof createWritableSupabaseRouteClient>,
+  organizationId: string,
+  documentId: string,
+) {
+  return supabase
+    .from("institutional_documents")
+    .select(DOCUMENT_SELECT)
+    .eq("organization_id", organizationId)
+    .eq("id", documentId)
+    .single();
+}
+
+export async function GET() {
+  try {
+    const auth = await getAuthenticatedReadContext();
+
+    if (!auth.ok) {
+      return auth.response;
+    }
+
+    const { supabase, organizationId } = auth.context;
 
     const { data, error } = await supabase
       .from("institutional_documents")
-      .select(
-        `
-          id,
-          organization_id,
-          official_source_id,
-          uploaded_by,
-          reviewed_by,
-          title,
-          document_type,
-          category,
-          source_name,
-          source_url,
-          valid_from,
-          valid_until,
-          storage_bucket,
-          storage_path,
-          file_name,
-          file_size,
-          mime_type,
-          extracted_text,
-          indexing_status,
-          review_status,
-          metadata,
-          reviewed_at,
-          indexed_at,
-          created_at,
-          updated_at
-        `,
-      )
-      .eq("organization_id", context.organization.id)
+      .select(DOCUMENT_SELECT)
+      .eq("organization_id", organizationId)
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -176,38 +381,13 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const supabase = createWritableSupabaseRouteClient();
+    const auth = await getAuthorizedManagerContext();
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
-
-    if (userError || !user) {
-      return NextResponse.json(
-        { error: "Usuário não autenticado." },
-        { status: 401 },
-      );
+    if (!auth.ok) {
+      return auth.response;
     }
 
-    const context = await getCurrentGovernanceOrganization(user.id);
-
-    if (!context) {
-      return NextResponse.json(
-        { error: "Usuário não vinculado a uma organização ativa." },
-        { status: 403 },
-      );
-    }
-
-    const allowedTechnicalRoles = ["owner", "admin", "manager"];
-
-    if (!allowedTechnicalRoles.includes(context.membership.technical_role)) {
-      return NextResponse.json(
-        { error: "Seu perfil não pode gerenciar a Base Institucional." },
-        { status: 403 },
-      );
-    }
-
+    const { supabase, userId, organizationId } = auth.context;
     const formData = await request.formData();
 
     const title = getTextField(formData, "title");
@@ -256,11 +436,12 @@ export async function POST(request: Request) {
 
     const safeFileName = sanitizeFileName(file.name || "documento");
     const timestamp = Date.now();
-    const storagePath = `${context.organization.id}/institutional/${timestamp}-${safeFileName}`;
+    const storagePath = `${organizationId}/institutional/${timestamp}-${safeFileName}`;
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
 
     const { error: uploadError } = await supabase.storage
       .from(bucket)
-      .upload(storagePath, file, {
+      .upload(storagePath, fileBuffer, {
         contentType: file.type || "application/octet-stream",
         upsert: false,
       });
@@ -277,11 +458,17 @@ export async function POST(request: Request) {
       );
     }
 
+    const extraction = await extractInstitutionalDocumentText({
+      buffer: fileBuffer,
+      fileName: file.name,
+      mimeType: file.type || null,
+    });
+
     const { data: document, error: insertError } = await supabase
       .from("institutional_documents")
       .insert({
-        organization_id: context.organization.id,
-        uploaded_by: user.id,
+        organization_id: organizationId,
+        uploaded_by: userId,
         title,
         document_type: documentType,
         category,
@@ -294,43 +481,21 @@ export async function POST(request: Request) {
         file_name: file.name,
         file_size: file.size,
         mime_type: file.type || null,
-        extracted_text: null,
-        indexing_status: "pending",
+        extracted_text: extraction.text,
+        indexing_status: extraction.indexingStatus,
         review_status: "pending_review",
+        indexed_at:
+          extraction.indexingStatus === "indexed"
+            ? new Date().toISOString()
+            : null,
         metadata: {
           original_file_name: file.name,
           uploaded_from: "governance_base_institucional",
+          extraction_message: extraction.message,
+          extraction_mode: "institutional_base_v1_auto_index",
         },
       })
-      .select(
-        `
-          id,
-          organization_id,
-          official_source_id,
-          uploaded_by,
-          reviewed_by,
-          title,
-          document_type,
-          category,
-          source_name,
-          source_url,
-          valid_from,
-          valid_until,
-          storage_bucket,
-          storage_path,
-          file_name,
-          file_size,
-          mime_type,
-          extracted_text,
-          indexing_status,
-          review_status,
-          metadata,
-          reviewed_at,
-          indexed_at,
-          created_at,
-          updated_at
-        `,
-      )
+      .select(DOCUMENT_SELECT)
       .single();
 
     if (insertError) {
@@ -362,3 +527,305 @@ export async function POST(request: Request) {
     );
   }
 }
+
+export async function PATCH(request: Request) {
+  try {
+    const auth = await getAuthorizedManagerContext();
+
+    if (!auth.ok) {
+      return auth.response;
+    }
+
+    const { supabase, userId, organizationId } = auth.context;
+    const payload = await request.json().catch(() => null);
+
+    const documentId =
+      typeof payload?.id === "string" ? payload.id.trim() : "";
+    const action =
+      typeof payload?.action === "string" ? payload.action.trim() : "update";
+
+    if (!documentId) {
+      return NextResponse.json(
+        { error: "Documento não informado." },
+        { status: 400 },
+      );
+    }
+
+    const { data: currentDocument, error: currentError } =
+      await fetchInstitutionalDocument(supabase, organizationId, documentId);
+
+    if (currentError || !currentDocument) {
+      return NextResponse.json(
+        { error: "Documento institucional não encontrado." },
+        { status: 404 },
+      );
+    }
+
+    if (action === "reprocess") {
+      const bucket = currentDocument.storage_bucket || DEFAULT_BUCKET;
+      const storagePath = currentDocument.storage_path;
+
+      if (!storagePath) {
+        return NextResponse.json(
+          { error: "Documento sem caminho de arquivo no Storage." },
+          { status: 400 },
+        );
+      }
+
+      await supabase
+        .from("institutional_documents")
+        .update({
+          indexing_status: "processing",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("organization_id", organizationId)
+        .eq("id", documentId);
+
+      const { data: fileData, error: downloadError } = await supabase.storage
+        .from(bucket)
+        .download(storagePath);
+
+      if (downloadError || !fileData) {
+        console.error(
+          "[governance] Erro ao baixar documento institucional para reprocessamento:",
+          downloadError,
+        );
+
+        await supabase
+          .from("institutional_documents")
+          .update({
+            indexing_status: "failed",
+            metadata: {
+              ...(currentDocument.metadata ?? {}),
+              extraction_message:
+                "Não foi possível baixar o arquivo para reprocessamento.",
+              reprocessed_at: new Date().toISOString(),
+            },
+          })
+          .eq("organization_id", organizationId)
+          .eq("id", documentId);
+
+        return NextResponse.json(
+          { error: "Não foi possível baixar o arquivo para reprocessamento." },
+          { status: 500 },
+        );
+      }
+
+      const fileBuffer = Buffer.from(await fileData.arrayBuffer());
+
+      const extraction = await extractInstitutionalDocumentText({
+        buffer: fileBuffer,
+        fileName: currentDocument.file_name,
+        mimeType: currentDocument.mime_type,
+      });
+
+      const { data: document, error: updateError } = await supabase
+        .from("institutional_documents")
+        .update({
+          extracted_text: extraction.text,
+          indexing_status: extraction.indexingStatus,
+          indexed_at:
+            extraction.indexingStatus === "indexed"
+              ? new Date().toISOString()
+              : currentDocument.indexed_at,
+          metadata: {
+            ...(currentDocument.metadata ?? {}),
+            extraction_message: extraction.message,
+            extraction_mode: "institutional_base_v1",
+            reprocessed_at: new Date().toISOString(),
+            reprocessed_by: userId,
+          },
+        })
+        .eq("organization_id", organizationId)
+        .eq("id", documentId)
+        .select(DOCUMENT_SELECT)
+        .single();
+
+      if (updateError) {
+        console.error(
+          "[governance] Erro ao atualizar reprocessamento institucional:",
+          updateError,
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível concluir o reprocessamento." },
+          { status: 500 },
+        );
+      }
+
+      return NextResponse.json({ document });
+    }
+
+    const updateData: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (action === "approve") {
+      updateData.review_status = "approved";
+      updateData.reviewed_by = userId;
+      updateData.reviewed_at = new Date().toISOString();
+    } else if (action === "archive") {
+      updateData.review_status = "archived";
+    } else if (action === "restore") {
+      updateData.review_status = "pending_review";
+    } else {
+      if (typeof payload?.title === "string") {
+        const title = payload.title.trim();
+
+        if (!title) {
+          return NextResponse.json(
+            { error: "Informe o título do documento." },
+            { status: 400 },
+          );
+        }
+
+        updateData.title = title;
+      }
+
+      if (typeof payload?.documentType === "string") {
+        updateData.document_type = normalizeDocumentType(payload.documentType);
+      }
+
+      if (typeof payload?.category === "string") {
+        updateData.category = payload.category.trim() || null;
+      }
+
+      if (typeof payload?.sourceName === "string") {
+        updateData.source_name = payload.sourceName.trim() || null;
+      }
+
+      if (typeof payload?.sourceUrl === "string") {
+        updateData.source_url = payload.sourceUrl.trim() || null;
+      }
+
+      if ("validFrom" in payload) {
+        updateData.valid_from = normalizeNullableDate(payload.validFrom);
+      }
+
+      if ("validUntil" in payload) {
+        updateData.valid_until = normalizeNullableDate(payload.validUntil);
+      }
+
+      if (typeof payload?.reviewStatus === "string") {
+        const reviewStatus = payload.reviewStatus.trim();
+
+        if (allowedReviewStatuses.has(reviewStatus)) {
+          updateData.review_status = reviewStatus;
+        }
+      }
+    }
+
+    const { data: document, error: updateError } = await supabase
+      .from("institutional_documents")
+      .update(updateData)
+      .eq("organization_id", organizationId)
+      .eq("id", documentId)
+      .select(DOCUMENT_SELECT)
+      .single();
+
+    if (updateError) {
+      console.error(
+        "[governance] Erro ao atualizar documento institucional:",
+        updateError,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível atualizar o documento institucional." },
+        { status: 500 },
+      );
+    }
+
+    return NextResponse.json({ document });
+  } catch (error) {
+    console.error(
+      "[governance] Erro inesperado ao atualizar documento institucional:",
+      error,
+    );
+
+    return NextResponse.json(
+      { error: "Erro inesperado ao atualizar documento institucional." },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const auth = await getAuthorizedManagerContext();
+
+    if (!auth.ok) {
+      return auth.response;
+    }
+
+    const { supabase, organizationId } = auth.context;
+    const url = new URL(request.url);
+    const documentId = url.searchParams.get("id")?.trim();
+
+    if (!documentId) {
+      return NextResponse.json(
+        { error: "Documento não informado." },
+        { status: 400 },
+      );
+    }
+
+    const { data: currentDocument, error: currentError } =
+      await fetchInstitutionalDocument(supabase, organizationId, documentId);
+
+    if (currentError || !currentDocument) {
+      return NextResponse.json(
+        { error: "Documento institucional não encontrado." },
+        { status: 404 },
+      );
+    }
+
+    const storageBucket = currentDocument.storage_bucket || DEFAULT_BUCKET;
+    const storagePath =
+      typeof currentDocument.storage_path === "string"
+        ? currentDocument.storage_path.trim()
+        : "";
+
+    if (storagePath) {
+      const { error: storageError } = await supabase.storage
+        .from(storageBucket)
+        .remove([storagePath]);
+
+      if (storageError) {
+        console.warn(
+          "[governance] Arquivo institucional não removido do Storage:",
+          storageError,
+        );
+      }
+    }
+
+    const { error: deleteError } = await supabase
+      .from("institutional_documents")
+      .delete()
+      .eq("organization_id", organizationId)
+      .eq("id", documentId);
+
+    if (deleteError) {
+      console.error(
+        "[governance] Erro ao excluir documento institucional:",
+        deleteError,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível excluir o documento institucional." },
+        { status: 500 },
+      );
+    }
+
+    return NextResponse.json({ id: documentId });
+  } catch (error) {
+    console.error(
+      "[governance] Erro inesperado ao excluir documento institucional:",
+      error,
+    );
+
+    return NextResponse.json(
+      { error: "Erro inesperado ao excluir documento institucional." },
+      { status: 500 },
+    );
+  }
+}
+
