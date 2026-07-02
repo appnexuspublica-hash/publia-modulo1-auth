@@ -314,30 +314,6 @@ export function resolveUserAccess(params: {
     };
   }
 
-  // V8.7: se o snapshot consolidado indica assinatura ativa e não vencida,
-  // ele deve prevalecer sobre grants históricos/inconsistentes marcados como expired.
-  // Isso evita bloquear usuários com user_access.subscription_active válido
-  // quando existe um grant antigo com status expired, mas ends_at futuro.
-  if (
-    params.snapshot &&
-    isProductTier(params.snapshot.product_tier) &&
-    isSnapshotSubscriptionStatus(params.snapshot.access_status) &&
-    !hasExpired(params.snapshot.subscription_ends_at, now)
-  ) {
-    return {
-      effectiveProductTier: params.snapshot.product_tier,
-      effectiveAccessStatus: "subscription_active",
-      effectiveGrantKind: "subscription",
-      accessSource: "snapshot",
-      activeGrant: null,
-      fallbackGrant: null,
-      trialEndsAt: params.snapshot.trial_ends_at,
-      subscriptionEndsAt: params.snapshot.subscription_ends_at,
-      snapshot: params.snapshot,
-      grants: normalizedGrants,
-    };
-  }
-
   const expiredRelevantGrants = grantsByRecency.filter((grant) =>
     isExpiredRelevantGrant(grant, now),
   );

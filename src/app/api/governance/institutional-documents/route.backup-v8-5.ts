@@ -171,7 +171,7 @@ async function extractInstitutionalDocumentText(options: {
 
   if (isPdf) {
     const result = await extractPdfTextFromBuffer(options.buffer, {
-      preferOcr: true,
+      preferOcr: false,
       fileSizeBytes: options.buffer.length,
     });
 

@@ -84,7 +84,6 @@ type GovernanceChatSource = {
   source_url?: string | null;
   storage_url?: string | null;
   type?: string | null;
-  kind?: "institutional" | "official" | "legal" | string | null;
 };
 
 type GovernanceChatSources = {
@@ -2951,32 +2950,6 @@ export default function GovernanceChatClient({
     return sources as GovernanceChatSources;
   }
 
-  function getMessageReferences(message: GovernanceMessage): GovernanceChatSource[] {
-    const metadata = message.metadata ?? {};
-    const references = (metadata as { references?: unknown }).references;
-
-    if (Array.isArray(references)) {
-      return references as GovernanceChatSource[];
-    }
-
-    const sources = getMessageSources(message);
-
-    return [
-      ...(sources.institutional ?? []).map((source) => ({
-        ...source,
-        kind: "institutional",
-      })),
-      ...(sources.officialSources ?? []).map((source) => ({
-        ...source,
-        kind: "official",
-      })),
-      ...(sources.officialGazette ?? []).map((source) => ({
-        ...source,
-        kind: "official",
-      })),
-    ];
-  }
-
   function normalizeInstitutionalSources(
     sources: GovernanceChatSource[] | undefined,
   ) {
@@ -3008,22 +2981,20 @@ export default function GovernanceChatClient({
   }
 
   function renderInstitutionalSources(message: GovernanceMessage) {
-    const consultedReferences = normalizeInstitutionalSources(
-      getMessageReferences(message),
+    const institutionalSources = normalizeInstitutionalSources(
+      getMessageSources(message).institutional,
     );
 
-    if (consultedReferences.length === 0) {
+    if (institutionalSources.length === 0) {
       return null;
     }
 
     return (
       <div className="mt-5 border-t border-[#dedede] pt-4 text-sm">
-        <p className="mb-2 font-black text-[#0f3a4a]">
-          Documentos consultados
-        </p>
+        <p className="mb-2 font-black text-[#0f3a4a]">Base institucional</p>
 
-        <ul className="space-y-1.5">
-          {consultedReferences.map((source, index) => {
+        <ul className="list-disc space-y-1.5 pl-5">
+          {institutionalSources.map((source, index) => {
             const key = `${source.title}-${source.url ?? index}`;
 
             if (source.url) {
@@ -3033,22 +3004,17 @@ export default function GovernanceChatClient({
                     href={source.url}
                     target="_blank"
                     rel="noreferrer noopener"
-                    className="inline-flex items-center gap-2 font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
+                    className="font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
                   >
-                    <span aria-hidden="true">✓</span>
-                    <span>{source.title}</span>
+                    {source.title}
                   </a>
                 </li>
               );
             }
 
             return (
-              <li
-                key={key}
-                className="inline-flex items-center gap-2 font-semibold text-slate-700"
-              >
-                <span aria-hidden="true">✓</span>
-                <span>{source.title}</span>
+              <li key={key} className="font-semibold text-slate-700">
+                {source.title}
               </li>
             );
           })}

@@ -72,6 +72,71 @@ export function getSkippedLargePdfMessage(maxMbLabel?: number | null) {
   return "PDF grande demais para extração automática. Faça OCR/versão menor.";
 }
 
+
+function normalizeForQuality(text: string) {
+  return String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function countMatches(text: string, patterns: RegExp[]) {
+  return patterns.reduce((total, pattern) => total + (text.match(pattern)?.length ?? 0), 0);
+}
+
+function assessNativeExtractionQuality(text: string) {
+  const normalized = normalizeForQuality(text);
+  const compactText = normalized.replace(/\s+/g, " ").trim();
+
+  const signalPatterns = [
+    /\b(prefeito|prefeita|vice-prefeito|vice-prefeita|vereador|vereadora|secretario|secretaria)\b/g,
+    /\b(posse|empossad[oa]s?|mandato|eleito|eleita|nomeia|nomeado|nomeada|exonera|portaria|decreto|lei|ata)\b/g,
+    /\b(cpf|rg|matricula|cargo|funcao|municipio|camara|poder executivo|poder legislativo)\b/g,
+    /\b\d{1,2}\s+de\s+[a-z]+(?:\s+de)?\s+\d{4}\b/g,
+    /\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g,
+  ];
+
+  const noisePatterns = [
+    /\bd4sign\b/g,
+    /\bassinado eletronicamente\b/g,
+    /\bcertificado de assinaturas\b/g,
+    /\beventos do documento\b/g,
+    /\bhash do documento original\b/g,
+    /\bintegridade certificada\b/g,
+    /\bobservatorio nacional\b/g,
+    /\bsincronizado com o ntp\b/g,
+    /\bpara confirmar as assinaturas\b/g,
+    /\bcodigo do documento\b/g,
+    /\bdatas e horarios baseados\b/g,
+  ];
+
+  const signalCount = countMatches(normalized, signalPatterns);
+  const noiseCount = countMatches(normalized, noisePatterns);
+  const hasLongEnoughContent = compactText.length >= OCR_MIN_TEXT_LENGTH;
+  const hasUsefulSignal = signalCount >= 2;
+  const looksLikeSignatureOnly =
+    compactText.length < 2500 &&
+    noiseCount >= 2 &&
+    signalCount === 0;
+
+  const looksLikeHeaderFooterOnly =
+    compactText.length < 1200 &&
+    noiseCount >= 1 &&
+    signalCount <= 1;
+
+  return {
+    hasLongEnoughContent,
+    hasUsefulSignal,
+    signalCount,
+    noiseCount,
+    looksLikeSignatureOnly,
+    looksLikeHeaderFooterOnly,
+    shouldUseNative:
+      hasLongEnoughContent &&
+      (hasUsefulSignal || (!looksLikeSignatureOnly && !looksLikeHeaderFooterOnly)),
+  };
+}
+
 function normalizeBufferInput(buf: Buffer): Uint8Array {
   return new Uint8Array(buf);
 }
@@ -250,6 +315,7 @@ export async function extractPdfTextFromBuffer(
       ? options.maxBytes
       : null;
 
+
   if (maxBytes && fileSizeBytes && fileSizeBytes > maxBytes) {
     console.log("[extractPdfTextFromBuffer] skipped_large", {
       fileSizeBytes,
@@ -291,9 +357,21 @@ export async function extractPdfTextFromBuffer(
     });
 
     const bestNativeText = pageText.length >= fallbackText.length ? pageText : fallbackText;
+    const nativeQuality = assessNativeExtractionQuality(bestNativeText);
+
+    console.log("[extractPdfTextFromBuffer] native quality", {
+      textLength: bestNativeText.length,
+      signalCount: nativeQuality.signalCount,
+      noiseCount: nativeQuality.noiseCount,
+      looksLikeSignatureOnly: nativeQuality.looksLikeSignatureOnly,
+      looksLikeHeaderFooterOnly: nativeQuality.looksLikeHeaderFooterOnly,
+      shouldUseNative: nativeQuality.shouldUseNative,
+    });
 
     if (options.preferOcr && bestNativeText.length >= OCR_MIN_TEXT_LENGTH) {
+
       const ocrDecision = shouldAttemptOcr(buf);
+
 
       if (!ocrDecision.allowed) {
         console.log("[extractPdfTextFromBuffer] preferred OCR skipped", {
@@ -311,23 +389,32 @@ export async function extractPdfTextFromBuffer(
         });
 
         const ocrText = await extractByOpenAiOcr(buf, hardLimit);
+        const ocrQuality = assessNativeExtractionQuality(ocrText);
 
         console.log("[extractPdfTextFromBuffer] preferred OCR result", {
           finalLength: ocrText.length,
+          signalCount: ocrQuality.signalCount,
+          noiseCount: ocrQuality.noiseCount,
           preview: ocrText.slice(0, 200),
         });
 
-        if (ocrText.trim() && ocrText.length >= Math.floor(bestNativeText.length * 0.6)) {
+        if (
+          ocrText.trim() &&
+          (ocrQuality.hasUsefulSignal || ocrText.length >= Math.floor(bestNativeText.length * 0.6))
+        ) {
+
           return { kind: "ready", text: ocrText };
         }
+
       } catch (ocrError: any) {
         console.error("[extractPdfTextFromBuffer] preferred OCR technical_error", ocrError);
       }
 
+
       return { kind: "ready", text: bestNativeText };
     }
 
-    if (bestNativeText.length >= OCR_MIN_TEXT_LENGTH) {
+    if (nativeQuality.shouldUseNative) {
       return { kind: "ready", text: bestNativeText };
     }
 
@@ -335,12 +422,15 @@ export async function extractPdfTextFromBuffer(
       console.log("[extractPdfTextFromBuffer] weak native text, trying OCR", {
         nativeTextLength: bestNativeText.length,
         minTextLength: OCR_MIN_TEXT_LENGTH,
+        signalCount: nativeQuality.signalCount,
+        noiseCount: nativeQuality.noiseCount,
       });
     } else {
       console.log("[extractPdfTextFromBuffer] no_text, trying OCR");
     }
 
     const ocrDecision = shouldAttemptOcr(buf);
+
 
     if (!ocrDecision.allowed) {
       console.log("[extractPdfTextFromBuffer] OCR skipped", {
@@ -368,6 +458,7 @@ export async function extractPdfTextFromBuffer(
       });
 
       if (ocrText.trim()) {
+
         return { kind: "ready", text: ocrText };
       }
     } catch (ocrError: any) {

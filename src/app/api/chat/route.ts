@@ -1,33 +1,50 @@
-//src/app/api/chat/route.ts
+// src/app/api/governance/chat/route.ts
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
-import { toFile } from "openai/uploads";
+
+import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 import { buildProductScopedPrompt } from "@/lib/publiaPrompt";
-import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
-import {
-  getAccessSummary,
-  resolveChatResponseModeAccess,
-  syncEffectiveAccessStatus,
-  type ChatResponseMode,
-} from "@/lib/access-control";
+import { buildGovernanceLegalGuardrails, findGovernanceCriticalKnowledge } from "@/lib/governanceLegalGuardrails";
 import { shouldForceWebFirst } from "@/lib/webFirstDetector";
+import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
+import type {
+  GovernanceMessage,
+  GovernanceResponseMode,
+} from "@/types/governance";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ---- Supabase & OpenAI ----
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const openaiApiKey = process.env.OPENAI_API_KEY;
+
+const OPENAI_MODEL_GOVERNANCE =
+  process.env.OPENAI_MODEL_GOVERNANCE ||
+  process.env.OPENAI_MODEL_NO_PDF ||
+  "gpt-5.1";
 
 const EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+
 const RAG_TOP_K = Math.max(2, Math.min(10, Number(process.env.RAG_TOP_K ?? 4)));
 
-const OPENAI_MODEL_WITH_PDF =
-  process.env.OPENAI_MODEL_WITH_PDF || "gpt-5.1";
-const OPENAI_MODEL_NO_PDF =
-  process.env.OPENAI_MODEL_NO_PDF || "gpt-5.1";
+const MAX_USER_MESSAGE_LENGTH = 12000;
+const MAX_HISTORY_MESSAGES = 6;
+const MAX_GOVERNANCE_PDF_CONTEXT_CHARS = 9000;
+const MAX_SELECTED_PDFS_IN_GOVERNANCE_CHAT = 5;
+
+const MAX_OFFICIAL_GAZETTE_CONTEXT_CHARS = 9000;
+const MAX_OFFICIAL_GAZETTE_CHUNKS = 250;
+const MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS = 80;
+const MAX_OFFICIAL_GAZETTE_COMPLETE_LIST_CONTEXT_CHARS = 30000;
+
+const MAX_INSTITUTIONAL_CONTEXT_CHARS = 10000;
+const MAX_INSTITUTIONAL_DOCUMENTS = 30;
+const MAX_INSTITUTIONAL_SELECTED_CHUNKS = 12;
+
+const uuidRe =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const SSE_HEADERS: HeadersInit = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -36,1302 +53,1291 @@ const SSE_HEADERS: HeadersInit = {
   "X-Accel-Buffering": "no",
 };
 
+
 let openai: OpenAI | null = null;
 
 if (!openaiApiKey) {
-  console.error("[/api/chat] OPENAI_API_KEY não está definida.");
+  console.error("[/api/governance/chat] OPENAI_API_KEY não está definida.");
 } else {
   openai = new OpenAI({ apiKey: openaiApiKey });
 }
 
-type PdfChatMode = "active" | "all" | "selected";
-
-type InternalResponseMode = ChatResponseMode;
-type PromptScopedResponseMode = Parameters<typeof buildProductScopedPrompt>[0]["responseMode"];
-
-function mapResponseModeToPromptScope(
-  responseMode: InternalResponseMode
-): PromptScopedResponseMode {
-  switch (responseMode) {
-    case "attention_points":
-      return "checklist";
-    default:
-      return responseMode;
-  }
-}
-
-function buildResponseModeInstruction(
-  responseMode: InternalResponseMode
-): string {
-  switch (responseMode) {
-    case "summary":
-      return "MODO DE RESPOSTA: Resumo. Responda de forma sintética, priorizando visão geral, pontos centrais e conclusão prática.";
-    case "manager_guidance":
-      return "MODO DE RESPOSTA: Orientação ao gestor. Estruture a resposta com foco em tomada de decisão, implicações práticas, providências e encaminhamentos recomendados para gestão pública.";
-    case "checklist":
-      return "MODO DE RESPOSTA: Checklist. Responda em formato de checklist objetivo, com itens acionáveis e verificáveis.";
-    case "attention_points":
-      return "MODO DE RESPOSTA: Pontos de atenção. Destaque riscos, cuidados, alertas, exigências críticas e pontos que merecem validação antes de agir.";
-    case "step_by_step":
-      return "MODO DE RESPOSTA: Passo a passo. Estruture a resposta em sequência operacional, com ordem lógica de execução.";
-    case "document_draft":
-      return "MODO DE RESPOSTA: Minuta de documento. Quando fizer sentido, entregue uma minuta inicial prática, estruturada e editável, deixando claro o que precisa ser validado antes do uso oficial.";
-    case "objective":
-    default:
-      return "MODO DE RESPOSTA: Padrão. Responda de forma natural, direta, clara e técnica, sem forçar checklist, passo a passo ou minuta, preservando precisão e aplicabilidade prática.";
-  }
-}
-
-type MessageRow = {
-  id: string;
-  conversation_id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  created_at: string;
+type GovernanceChatRequestBody = {
+  conversationId?: string;
+  content?: string;
+  responseMode?: GovernanceResponseMode;
+  selectedPdfAttachmentNames?: string[];
+  selectedPdfFileIds?: string[];
 };
 
-type PdfFileRow = {
+type GovernanceConversationForChat = {
   id: string;
-  conversation_id: string | null;
+  organization_id: string;
   user_id: string;
-  file_name: string | null;
-  storage_path: string;
-  openai_file_id: string | null;
-  file_size: number | null;
-  created_at: string;
-  extracted_text: string | null;
-  extracted_text_status: string | null;
-  extracted_text_error: string | null;
-  vector_index_status: string | null;
-  vector_index_error: string | null;
-  vector_chunks_count: number | null;
+  title: string;
+  category: string | null;
+  response_mode: GovernanceResponseMode;
+  visibility: "private" | "organization";
+  status: "active" | "archived" | "deleted";
+  deleted_at: string | null;
 };
 
-type ConversationPdfState = {
-  pdf_enabled: boolean;
-  active_pdf_file_id: string | null;
+type GovernanceOfficialSourceForChat = {
+  id: string;
+  organization_id: string;
+  name: string;
+  source_type: string;
+  url: string;
+  notes: string | null;
+  status: string;
+  priority: string | null;
+  reviewed_at: string | null;
 };
 
-type ConversationPdfLinkRow = {
-  pdf_file_id: string | null;
-  is_active: boolean | null;
-  created_at: string | null;
-};
-
-type OrderedPdfLink = {
-  pdfFileId: string;
-  isActive: boolean;
-};
-
-type MatchPdfChunkRow = {
-  chunk_index: number;
+type OpenAIInputMessage = {
+  role: "system" | "user" | "assistant";
   content: string;
 };
 
-type UserProfileContext = {
-  municipio: string | null;
-  uf: string | null;
-  porte_municipio: string | null;
-};
-
-type PdfResolution =
-  | {
-      status: "ready_context";
-      pdfRow: PdfFileRow;
-      pdfContext: string;
-      openaiFileId: null;
-      userError: null;
-      ocrSuggested: false;
-    }
-  | {
-      status: "ready_file";
-      pdfRow: PdfFileRow;
-      pdfContext: "";
-      openaiFileId: string;
-      userError: null;
-      ocrSuggested: false;
-    }
-  | {
-      status: "processing";
-      pdfRow: PdfFileRow;
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-    }
-  | {
-      status: "no_text";
-      pdfRow: PdfFileRow;
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: true;
-    }
-  | {
-      status: "error";
-      pdfRow: PdfFileRow;
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-    }
-  | {
-      status: "skipped_large";
-      pdfRow: PdfFileRow;
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-    };
-
-type PdfChatState =
-  | {
-      kind: "none";
-      pdfRows: [];
-      pdfContext: "";
-      openaiFileId: null;
-      userError: null;
-      ocrSuggested: false;
-      pdfCount: 0;
-      activePdfFileId: null;
-    }
-  | {
-      kind: "ready_context";
-      pdfRows: PdfFileRow[];
-      pdfContext: string;
-      openaiFileId: null;
-      userError: null;
-      ocrSuggested: false;
-      pdfCount: number;
-      activePdfFileId: string | null;
-    }
-  | {
-      kind: "ready_file";
-      pdfRows: [PdfFileRow];
-      pdfContext: "";
-      openaiFileId: string;
-      userError: null;
-      ocrSuggested: false;
-      pdfCount: 1;
-      activePdfFileId: string | null;
-    }
-  | {
-      kind: "processing";
-      pdfRows: PdfFileRow[];
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-      pdfCount: number;
-      activePdfFileId: string | null;
-    }
-  | {
-      kind: "no_text";
-      pdfRows: PdfFileRow[];
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: true;
-      pdfCount: number;
-      activePdfFileId: string | null;
-    }
-  | {
-      kind: "error";
-      pdfRows: PdfFileRow[];
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-      pdfCount: number;
-      activePdfFileId: string | null;
-    }
-  | {
-      kind: "skipped_large";
-      pdfRows: PdfFileRow[];
-      pdfContext: "";
-      openaiFileId: null;
-      userError: string;
-      ocrSuggested: false;
-      pdfCount: number;
-      activePdfFileId: string | null;
-    };
-
-type LegalBaseLinkRule = {
-  pattern: RegExp;
-  label: string;
-  url: string;
-};
-
-type ContinuationAcceptanceParseResult = {
-  accepted: boolean;
-  refinement: string | null;
-};
-
-// --------------------
-// LIMITES
-// --------------------
-const MAX_HISTORY = 4;
-const MAX_PDF_CONTEXT_CHARS = 6000;
-const MAX_TOTAL_CHARS = 10000;
-const MAX_EXTRACTED_TEXT_CHARS = 150000;
-const MAX_FULL_FILE_FALLBACK_MB = 20;
-const DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT = 3;
-const STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT = 5;
-
-const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
-const PDF_PROCESSING_MESSAGE =
-  "Os PDFs anexados ainda estão sendo processados. Aguarde alguns instantes e tente novamente.";
-const PDF_TECHNICAL_MESSAGE =
-  "Os PDFs foram anexados, mas houve uma falha técnica no processamento. Tente reprocessar ou reenviar o arquivo.";
-const PDF_NO_TEXT_MESSAGE =
-  "Infelizmente não consigo acessar o conteúdo dos PDFs. Faça OCR e reenvie. Use o botão FAZER OCR abaixo para abrir aplicativo.";
-const PDF_LARGE_MESSAGE =
-  "Um ou mais PDFs são grandes demais para processamento automático neste momento. Envie uma versão menor ou reprocessada.";
-
-const LEGAL_BASE_LINK_RULES: LegalBaseLinkRule[] = [
-  {
-    pattern:
-      /\bConstitui[cç][aã]o\s+Federal\s+de\s+1988\b|\bConstitui[cç][aã]o\s+da\s+Rep[úu]blica\s+Federativa\s+do\s+Brasil\s+de\s+1988\b/i,
-    label: "Constituição Federal de 1988",
-    url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
-  },
-  {
-    pattern:
-      /\bLei\s+Complementar\s+n[ºo°]?\s*101\s*\/\s*2000\b|\bLC\s*n[ºo°]?\s*101\s*\/\s*2000\b|\bLei\s+de\s+Responsabilidade\s+Fiscal\b/i,
-    label: "Lei Complementar nº 101/2000",
-    url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
-  },
-  {
-    pattern: /\bLei\s+n[ºo°]?\s*4\.?320\s*\/\s*1964\b/i,
-    label: "Lei nº 4.320/1964",
-    url: "https://www.planalto.gov.br/ccivil_03/leis/l4320.htm",
-  },
-  {
-    pattern:
-      /\bLei\s+n[ºo°]?\s*12\.?527\s*\/\s*2011\b|\bLei\s+de\s+Acesso\s+[àa]\s+Informa[cç][aã]o\b/i,
-    label: "Lei nº 12.527/2011",
-    url: "https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm",
-  },
-  {
-    pattern:
-      /\bLei\s+n[ºo°]?\s*13\.?709\s*\/\s*2018\b|\bLGPD\b|\bLei\s+Geral\s+de\s+Prote[cç][aã]o\s+de\s+Dados\b/i,
-    label: "Lei nº 13.709/2018",
-    url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
-  },
-  {
-    pattern:
-      /\bLei\s+n[ºo°]?\s*14\.?133\s*\/\s*2021\b|\bLei\s+de\s+Licita[cç][õo]es\s+e\s+Contratos\b/i,
-    label: "Lei nº 14.133/2021",
-    url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
-  },
+const allowedResponseModes: GovernanceResponseMode[] = [
+  "objective",
+  "summary",
+  "checklist",
+  "technical_opinion",
+  "risk_analysis",
+  "attention_points",
+  "action_plan",
+  "draft",
+  "comparison",
+  "manager_guidance",
 ];
 
-function parseCookieHeader(cookieHeader: string | null) {
-  const out: Record<string, string> = {};
-  if (!cookieHeader) return out;
-
-  for (const part of cookieHeader.split(";")) {
-    const p = part.trim();
-    if (!p) continue;
-
-    const eq = p.indexOf("=");
-    if (eq === -1) continue;
-
-    const k = p.slice(0, eq).trim();
-    const v = p.slice(eq + 1).trim();
-    out[k] = decodeURIComponent(v);
-  }
-
-  return out;
+function isValidGovernanceResponseMode(
+  value: unknown,
+): value is GovernanceResponseMode {
+  return (
+    typeof value === "string" &&
+    allowedResponseModes.includes(value as GovernanceResponseMode)
+  );
 }
 
-function createAuthClient(req: Request) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Supabase anon envs faltando");
-  }
+function normalizeResponseMode(
+  value: unknown,
+  fallback: GovernanceResponseMode,
+): GovernanceResponseMode {
+  return isValidGovernanceResponseMode(value) ? value : fallback;
+}
 
-  const jar = parseCookieHeader(req.headers.get("cookie"));
+function createWritableSupabaseRouteClient() {
+  const cookieStore = cookies();
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      get: (name) => jar[name],
-      set() {},
-      remove() {},
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(name: string, value: string, options: any) {
+        cookieStore.set({ name, value, ...options });
+      },
+      remove(name: string, options: any) {
+        cookieStore.set({ name, value: "", ...options });
+      },
     },
   });
 }
 
-function sseEvent(event: string, data: unknown) {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
+function mapGovernanceModeToPromptMode(
+  mode: GovernanceResponseMode,
+):
+  | "objective"
+  | "summary"
+  | "step_by_step"
+  | "checklist"
+  | "document_draft"
+  | "manager_guidance" {
+  switch (mode) {
+    case "summary":
+      return "summary";
 
-function parseTemperature(input: unknown, fallback = 0.3) {
-  const n = typeof input === "number" ? input : Number(input);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(0, Math.min(2, n));
-}
+    case "checklist":
+    case "risk_analysis":
+    case "attention_points":
+    case "action_plan":
+    case "comparison":
+      return "checklist";
 
-function stripTrailingUrlPunctuation(url: string) {
-  const source = String(url ?? "").trim();
-  const cleaned = source.replace(/[),.;:!?]+$/g, "");
-  const trailing = source.slice(cleaned.length);
-  return { cleaned, trailing };
-}
+    case "technical_opinion":
+    case "draft":
+      return "document_draft";
 
-function isLikelyUrlOrDomain(value: string) {
-  const v = String(value ?? "").trim().replace(/^\((.*)\)$/, "$1");
-  if (!v) return false;
+    case "manager_guidance":
+      return "manager_guidance";
 
-  return /^(https?:\/\/|www\.)/i.test(v) || /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/.*)?$/i.test(v);
-}
-
-function normalizeUrlOrDomain(raw: string) {
-  const trimmed = String(raw ?? "")
-    .trim()
-    .replace(/^\((.*)\)$/, "$1")
-    .replace(/^URL:\s*/i, "")
-    .replace(/^Link:\s*/i, "")
-    .replace(/^Acesse em:\s*/i, "")
-    .replace(/^Endere[cç]o completo:\s*/i, "");
-
-  const { cleaned, trailing } = stripTrailingUrlPunctuation(trimmed);
-
-  if (!cleaned) {
-    return { url: "", trailing: "" };
+    case "objective":
+    default:
+      return "objective";
   }
+}
 
-  if (/^https?:\/\//i.test(cleaned)) {
-    return { url: cleaned, trailing };
+function buildGovernanceModeInstruction(mode: GovernanceResponseMode): string {
+  switch (mode) {
+    case "summary":
+      return [
+        "MODO DE RESPOSTA ATIVO: RESUMO.",
+        "OBEDEÇA AO FORMATO: entregue uma síntese curta, sem parecer, sem checklist longo e sem plano de ação.",
+        "Estrutura obrigatória:",
+        "1. Comece com 1 parágrafo de visão geral.",
+        "2. Depois apresente no máximo 5 pontos essenciais.",
+        "3. Finalize com uma conclusão prática em 1 parágrafo.",
+        "Limite a resposta a uma versão enxuta, focada no essencial.",
+      ].join("\n");
+
+    case "checklist":
+      return [
+        "MODO DE RESPOSTA ATIVO: CHECKLIST.",
+        "OBEDEÇA AO FORMATO: a resposta deve ser predominantemente uma lista verificável.",
+        "Estrutura obrigatória:",
+        "Título: CHECKLIST PRÁTICO",
+        "Use itens iniciados por '☐'.",
+        "Cada item deve ser acionável e verificável.",
+        "Evite parágrafos longos. Não escreva parecer, minuta ou análise de risco.",
+      ].join("\n");
+
+    case "technical_opinion":
+      return [
+        "MODO DE RESPOSTA ATIVO: PARECER TÉCNICO.",
+        "OBEDEÇA AO FORMATO: a resposta deve iniciar obrigatoriamente com o título PARECER TÉCNICO.",
+        "Escreva como documento técnico institucional, não como conversa, resumo, checklist, minuta ou orientação ao gestor.",
+        "Use obrigatoriamente estes blocos, nesta ordem e com títulos em caixa alta:",
+        "PARECER TÉCNICO",
+        "",
+        "1. ASSUNTO",
+        "Indique em uma frase o tema analisado.",
+        "",
+        "2. RELATÓRIO",
+        "Contextualize brevemente a situação apresentada pelo usuário.",
+        "",
+        "3. FUNDAMENTAÇÃO TÉCNICA",
+        "Aponte os fundamentos administrativos, técnicos e normativos aplicáveis, sem inventar norma local.",
+        "",
+        "4. ANÁLISE",
+        "Examine o caso de forma objetiva, relacionando fatos, cautelas, riscos e condições de validade.",
+        "",
+        "5. CONCLUSÃO",
+        "Apresente conclusão clara sobre o entendimento técnico.",
+        "",
+        "6. RECOMENDAÇÃO TÉCNICA",
+        "Indique as providências recomendadas ao órgão.",
+        "",
+        "É proibido começar com introdução conversacional do tipo 'Na prática' ou 'O ponto central é'.",
+        "É proibido responder apenas com tópicos soltos. O formato deve parecer um parecer técnico institucional.",
+      ].join("\n");
+
+    case "risk_analysis":
+      return [
+        "MODO DE RESPOSTA ATIVO: ANÁLISE DE RISCO.",
+        "OBEDEÇA AO FORMATO: a resposta deve mapear riscos, não virar orientação genérica.",
+        "Estrutura obrigatória:",
+        "1. Matriz de riscos em tópicos ou tabela.",
+        "2. Para cada risco, indique: risco, probabilidade, impacto, consequência e mitigação.",
+        "3. Finalize com prioridades de controle.",
+        "Não escreva como resumo, parecer ou checklist simples.",
+      ].join("\n");
+
+    case "attention_points":
+      return [
+        "MODO DE RESPOSTA ATIVO: PONTOS DE ATENÇÃO.",
+        "OBEDEÇA AO FORMATO: liste alertas objetivos e cuidados críticos.",
+        "Estrutura obrigatória:",
+        "Título: PONTOS DE ATENÇÃO",
+        "Use tópicos curtos iniciados por 'Atenção:'.",
+        "Destaque riscos de conformidade, documentação, prazos, responsabilidades e validações necessárias.",
+        "Não transforme em plano de ação completo.",
+      ].join("\n");
+
+    case "action_plan":
+      return [
+        "MODO DE RESPOSTA ATIVO: PLANO DE AÇÃO.",
+        "OBEDEÇA AO FORMATO: organize ações práticas em sequência operacional.",
+        "Estrutura obrigatória:",
+        "Use uma tabela em Markdown com as colunas: Etapa | Ação | Responsável sugerido | Prazo sugerido | Resultado esperado.",
+        "Depois da tabela, inclua apenas 3 prioridades imediatas.",
+        "Não escreva parecer, minuta ou resumo.",
+      ].join("\n");
+
+    case "draft":
+      return [
+        "MODO DE RESPOSTA ATIVO: MINUTA.",
+        "OBEDEÇA AO FORMATO: produza um texto formal editável, pronto para adaptação pelo órgão.",
+        "Estrutura obrigatória:",
+        "1. Título da minuta.",
+        "2. Texto em linguagem institucional.",
+        "3. Campos faltantes entre colchetes, como [NOME DO ÓRGÃO], [DATA], [RESPONSÁVEL].",
+        "4. Observação final de validação jurídica/técnica.",
+        "Não responda com explicação longa; entregue a minuta.",
+      ].join("\n");
+
+    case "comparison":
+      return [
+        "MODO DE RESPOSTA ATIVO: COMPARATIVO.",
+        "OBEDEÇA AO FORMATO: compare alternativas, cenários, regras ou caminhos.",
+        "Estrutura obrigatória:",
+        "Use uma tabela em Markdown com colunas adequadas ao tema, por exemplo: Critério | Opção A | Opção B | Observação.",
+        "Depois da tabela, inclua uma conclusão comparativa objetiva.",
+        "Não escreva como checklist ou parecer.",
+      ].join("\n");
+
+    case "manager_guidance":
+      return [
+        "MODO DE RESPOSTA ATIVO: ORIENTAÇÃO AO GESTOR.",
+        "OBEDEÇA AO FORMATO: responda para apoiar decisão administrativa.",
+        "Estrutura obrigatória:",
+        "1. Decisão que o gestor precisa tomar.",
+        "2. O que observar antes de decidir.",
+        "3. Providências recomendadas.",
+        "4. Riscos se nada for feito.",
+        "5. Próximo passo sugerido.",
+        "Use tom direto, executivo e prático.",
+      ].join("\n");
+
+    case "objective":
+    default:
+      return [
+        "MODO DE RESPOSTA ATIVO: PADRÃO CONSULTIVO.",
+        "Responda de forma natural, consultiva e didática.",
+        "Comece com texto corrido explicando a lógica do tema.",
+        "Depois, se útil, organize os principais pontos práticos.",
+        "Não force formato de checklist, parecer, minuta, tabela ou plano de ação, salvo pedido expresso do usuário.",
+      ].join("\n");
   }
-
-  if (/^www\./i.test(cleaned)) {
-    return { url: `https://${cleaned}`, trailing };
-  }
-
-  if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/.*)?$/i.test(cleaned)) {
-    return { url: `https://${cleaned}`, trailing };
-  }
-
-  return { url: "", trailing: "" };
 }
 
-function shouldSkipLabelForAutoLink(label: string) {
-  const lower = String(label ?? "").trim().toLowerCase();
-
-  if (!lower) return true;
-  if (/\[[^\]]+\]\([^)]+\)/.test(lower)) return true;
-  if (isLikelyUrlOrDomain(lower)) return true;
-
-  return (
-    lower === "base legal" ||
-    lower === "referências oficiais consultadas" ||
-    lower === "referencias oficiais consultadas" ||
-    lower === "nome do portal" ||
-    lower === "endereço completo" ||
-    lower === "endereco completo" ||
-    lower === "url" ||
-    lower === "link"
-  );
-}
-
-function convertLabelParenDomainLines(text: string) {
-  return String(text || "").replace(
-    /^(\s*[-*]?\s*)(.+?)\s+\((https?:\/\/[^\s)]+|www\.[^\s)]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)]*)?)\)\s*$/gim,
-    (match, prefix: string, rawLabel: string, rawUrl: string) => {
-      const label = rawLabel.trim();
-      if (shouldSkipLabelForAutoLink(label)) return match;
-
-      const { url } = normalizeUrlOrDomain(rawUrl);
-      if (!url) return match;
-
-      return `${prefix}[${label}](${url})`;
-    }
-  );
-}
-
-function convertLabelColonDomainLines(text: string) {
-  return String(text || "").replace(
-    /^(\s*[-*]?\s*)(.+?)\s*:\s*(https?:\/\/\S+|www\.\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?)\s*$/gim,
-    (match, prefix: string, rawLabel: string, rawUrl: string) => {
-      const label = rawLabel.trim();
-      if (shouldSkipLabelForAutoLink(label)) return match;
-
-      const { url, trailing } = normalizeUrlOrDomain(rawUrl);
-      if (!url) return match;
-
-      return `${prefix}[${label}](${url})${trailing}`;
-    }
-  );
-}
-
-function convertLabelNextLineUrl(text: string) {
-  const lines = String(text || "").split("\n");
-  const out: string[] = [];
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const current = lines[i];
-    const next = lines[i + 1];
-
-    if (!next) {
-      out.push(current);
-      continue;
-    }
-
-    const currentTrim = current.trim();
-    const nextTrim = next.trim();
-
-    if (
-      currentTrim &&
-      nextTrim &&
-      !shouldSkipLabelForAutoLink(currentTrim) &&
-      isLikelyUrlOrDomain(nextTrim)
-    ) {
-      const { url, trailing } = normalizeUrlOrDomain(nextTrim);
-      if (url) {
-        const prefixMatch = current.match(/^(\s*[-*]?\s*)(.*)$/);
-        const prefix = prefixMatch?.[1] ?? "";
-        const label = prefixMatch?.[2]?.trim() ?? currentTrim;
-
-        out.push(`${prefix}[${label}](${url})${trailing}`);
-        i += 1;
-        continue;
-      }
-    }
-
-    out.push(current);
-  }
-
-  return out.join("\n");
-}
-
-function isBaseLegalHeader(line: string) {
-  const normalized = String(line ?? "")
-    .replace(/\*\*/g, "")
-    .trim()
-    .toLowerCase();
-
-  return normalized === "base legal:" || normalized === "base legal";
-}
-
-function isReferencesHeader(line: string) {
-  const normalized = String(line ?? "")
-    .replace(/\*\*/g, "")
-    .trim()
-    .toLowerCase();
-
-  return (
-    normalized === "referências oficiais consultadas:" ||
-    normalized === "referências oficiais consultadas" ||
-    normalized === "referencias oficiais consultadas:" ||
-    normalized === "referencias oficiais consultadas"
-  );
-}
-
-function normalizeFooterHeadings(text: string) {
-  return String(text || "")
-    .replace(/^\s*\*\*?\s*base legal\s*:?\s*\*\*?\s*$/gim, "**Base legal:**")
-    .replace(
-      /^\s*\*\*?\s*refer[eê]ncias oficiais consultadas\s*:?\s*\*\*?\s*$/gim,
-      "**Referências oficiais consultadas:**"
-    );
-}
-
-function applyLegalBaseLinks(text: string) {
-  const lines = String(text || "").split("\n");
-  let inBaseLegalSection = false;
-
-  const transformed = lines.map((line) => {
-    if (isBaseLegalHeader(line)) {
-      inBaseLegalSection = true;
-      return line;
-    }
-
-    if (inBaseLegalSection && isReferencesHeader(line)) {
-      inBaseLegalSection = false;
-      return line;
-    }
-
-    if (!inBaseLegalSection) {
-      return line;
-    }
-
-    if (!line.trim()) {
-      return line;
-    }
-
-    let nextLine = line;
-
-    for (const rule of LEGAL_BASE_LINK_RULES) {
-      if (/\[[^\]]+\]\([^)]+\)/.test(nextLine)) {
-        break;
-      }
-
-      nextLine = nextLine.replace(rule.pattern, (foundText) => {
-        return `[${foundText}](${rule.url})`;
-      });
-    }
-
-    return nextLine;
-  });
-
-  return transformed.join("\n");
-}
-
-function convertNamedLinksToMarkdown(text: string) {
-  let out = String(text || "");
-
-  out = convertLabelParenDomainLines(out);
-  out = convertLabelColonDomainLines(out);
-  out = convertLabelNextLineUrl(out);
-
-  out = out.replace(
-    /(^|\n)([^\n]{3,160})\n{1,2}(?:\*\*|__)?(?:Endere[cç]o completo|URL|Link|Acesse em)(?:\*\*|__)?\s*:\s*(https?:\/\/[^\s<]+)/gim,
-    (match, prefix: string, label: string, rawUrl: string) => {
-      const safeLabel = label.trim();
-      if (shouldSkipLabelForAutoLink(safeLabel)) return match;
-
-      const { cleaned, trailing } = stripTrailingUrlPunctuation(rawUrl);
-      if (!cleaned) return match;
-
-      return `${prefix}[${safeLabel}](${cleaned})${trailing}`;
-    }
-  );
-
-  return out;
-}
-
-function detectLegalBasesFromText(text: string) {
-  const found: string[] = [];
-
-  for (const rule of LEGAL_BASE_LINK_RULES) {
-    if (rule.pattern.test(text)) {
-      found.push(`- [${rule.label}](${rule.url})`);
-    }
-  }
-
-  const unique = Array.from(new Set(found));
-
-  if (unique.length > 0) return unique;
-
-  const lower = String(text || "").toLowerCase();
-
-  if (
-    lower.includes("licitação") ||
-    lower.includes("licitacao") ||
-    lower.includes("contrato administrativo") ||
-    lower.includes("dispensa") ||
-    lower.includes("inexigibilidade")
-  ) {
-    return ["- [Lei nº 14.133/2021](https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm)"];
-  }
-
-  if (
-    lower.includes("orçamento") ||
-    lower.includes("orcamento") ||
-    lower.includes("empenho") ||
-    lower.includes("liquidação") ||
-    lower.includes("liquidacao") ||
-    lower.includes("pagamento") ||
-    lower.includes("lrf")
-  ) {
-    return [
-      "- [Lei nº 4.320/1964](https://www.planalto.gov.br/ccivil_03/leis/l4320.htm)",
-      "- [Lei Complementar nº 101/2000](https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm)",
-    ];
-  }
-
-  if (
-    lower.includes("transparência") ||
-    lower.includes("transparencia") ||
-    lower.includes("lai")
-  ) {
-    return ["- [Lei nº 12.527/2011](https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm)"];
-  }
-
-  if (
-    lower.includes("lgpd") ||
-    lower.includes("dados pessoais") ||
-    lower.includes("proteção de dados") ||
-    lower.includes("protecao de dados")
-  ) {
-    return ["- [Lei nº 13.709/2018](https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm)"];
-  }
-
-  return ["- [Constituição Federal de 1988](https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm)"];
-}
-
-function hasFooterSection(text: string, kind: "base_legal" | "references") {
-  const normalized = String(text || "").toLowerCase();
-
-  if (kind === "base_legal") {
-    return normalized.includes("base legal");
-  }
-
-  return (
-    normalized.includes("referências oficiais consultadas") ||
-    normalized.includes("referencias oficiais consultadas")
-  );
-}
-
-function ensureNormativeFooter(params: {
-  text: string;
-  forceWebFirst: boolean;
-  forceOfficialLinksRequested: boolean;
+function buildConversationContext(params: {
+  organizationName: string;
+  organizationId: string;
+  conversation: GovernanceConversationForChat;
 }) {
-  const { text, forceWebFirst, forceOfficialLinksRequested } = params;
+  const { organizationName, organizationId, conversation } = params;
 
-  let out = String(text || "").trim();
-
-  const needsBaseLegal = !hasFooterSection(out, "base_legal");
-  const needsReferences = !hasFooterSection(out, "references");
-
-  if (!needsBaseLegal && !needsReferences) {
-    return out;
-  }
-
-  const chunks: string[] = [out];
-
-  if (needsBaseLegal) {
-    const bases = detectLegalBasesFromText(out);
-    chunks.push(["**Base legal:**", ...bases].join("\n"));
-  }
-
-  if (needsReferences) {
-    const webWasMandatory = forceWebFirst;
-    const onlyLinkIntent = !forceWebFirst && forceOfficialLinksRequested;
-
-    if (webWasMandatory) {
-      chunks.push(
-        [
-          "**Referências oficiais consultadas:**",
-          "- Consultar a Web (web First) era obrigatório, mas a consulta ficou indisponível neste momento.",
-        ].join("\n")
-      );
-    } else if (onlyLinkIntent) {
-      chunks.push(
-        [
-          "**Referências oficiais consultadas:**",
-          "- Não houve consulta web nesta resposta (resposta geral/conceitual).",
-        ].join("\n")
-      );
-    } else {
-      chunks.push(
-        [
-          "**Referências oficiais consultadas:**",
-          "- Não houve consulta web nesta resposta (resposta geral/conceitual).",
-        ].join("\n")
-      );
-    }
-  }
-
-  return chunks.join("\n\n").trim();
-}
-
-function formatAssistantText(params: {
-  text: string;
-  forceWebFirst: boolean;
-  forceOfficialLinksRequested: boolean;
-}) {
-  const trimmed = String(params.text || "").trim();
-  const normalizedHeadings = normalizeFooterHeadings(trimmed);
-  const withNamedLinks = convertNamedLinksToMarkdown(normalizedHeadings);
-  const withLegalLinks = applyLegalBaseLinks(withNamedLinks);
-
-  return ensureNormativeFooter({
-    text: withLegalLinks,
-    forceWebFirst: params.forceWebFirst,
-    forceOfficialLinksRequested: params.forceOfficialLinksRequested,
-  });
-}
-
-function shouldForceOfficialLinks(text: string) {
-  const t = String(text || "").toLowerCase();
-
-  const keywords = [
-    "site",
-    "sites",
-    "portal",
-    "portais",
-    "link",
-    "links",
-    "url",
-    "urls",
-    "acesse",
-    "acessar",
-    "consultar",
-    "onde consultar",
-    "onde posso consultar",
-    "endereço",
-    "endereco",
-    "página oficial",
-    "pagina oficial",
-  ];
-
-  return keywords.some((k) => t.includes(k));
-}
-
-function buildOfficialLinksInstruction() {
   return [
-    "INSTRUÇÃO OBRIGATÓRIA SOBRE LINKS:",
-    "- Quando citar site, portal, sistema, manual, tribunal ou página oficial, escreva SEMPRE a URL oficial completa.",
-    "- Sempre prefira o formato Markdown clicável: [Nome do portal](https://url-oficial).",
-    "- Nunca escreva apenas o nome do portal sem URL.",
-    "- Se citar mais de um site, cada um deve aparecer com seu respectivo link clicável.",
-    "- Se necessário, use web_search_preview para localizar a URL oficial exata antes de responder.",
+    "CONTEXTO INSTITUCIONAL DO GOVERNANÇA",
+    `- Organização: ${organizationName}`,
+    `- organization_id: ${organizationId}`,
+    `- Conversa: ${conversation.title}`,
+    `- Categoria: ${conversation.category || "não informada"}`,
+    `- Visibilidade: ${conversation.visibility}`,
+    "",
+    "REGRAS DE ISOLAMENTO",
+    "- Responda apenas no contexto da organização atual.",
+    "- Não presuma acesso a dados de outros órgãos.",
+    "- Quando faltar informação local, diga que o órgão deve validar em sua base institucional ou norma própria.",
+    "- Não afirme que consultou documentos institucionais se eles ainda não foram fornecidos nesta conversa.",
+    "- Para temas jurídicos, contábeis, fiscais, licitatórios ou de controle, indique quando houver necessidade de revisão por área técnica competente.",
   ].join("\n");
 }
 
-function clampText(value: string, max: number) {
-  const text = String(value ?? "");
-  return text.length <= max ? text : text.slice(0, max);
-}
 
-function normalizeText(raw: string) {
-  let text = String(raw ?? "");
-  text = text.replace(/\u0000/g, " ");
-  text = text.replace(/[ \t]+\n/g, "\n");
-  text = text.replace(/\n{3,}/g, "\n\n");
-  text = text.replace(/[ \t]{2,}/g, " ");
-  return text.trim();
-}
+function normalizeOfficialSourcePriority(priority: string | null | undefined) {
+  const normalizedPriority = String(priority ?? "medium")
+    .trim()
+    .toLowerCase();
 
-function isNoTextPdfError(errorText: string | null | undefined) {
-  const msg = String(errorText ?? "").toLowerCase();
-
-  return (
-    msg.includes("sem texto detectável") ||
-    msg.includes("sem texto detectavel") ||
-    msg.includes("faça ocr e reenvie") ||
-    msg.includes("imagem/escaneado") ||
-    msg.includes("sem texto detectável para indexação") ||
-    msg.includes("sem texto detectavel para indexação")
-  );
-}
-
-function buildPdfLabel(pdfRow: PdfFileRow, index?: number) {
-  const name = String(pdfRow.file_name ?? "").trim();
-  if (name) return name;
-  return `PDF ${typeof index === "number" ? index + 1 : pdfRow.id.slice(0, 8)}`;
-}
-
-function formatPorteMunicipioLabel(value: string | null | undefined) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-
-  if (normalized === "pequeno") return "Pequeno";
-  if (normalized === "medio") return "Médio";
-  if (normalized === "grande") return "Grande";
-
-  return "";
-}
-
-function buildUserProfileContextText(profile: UserProfileContext | null) {
-  if (!profile) return "";
-
-  const municipio = String(profile.municipio ?? "").trim();
-  const uf = String(profile.uf ?? "").trim().toUpperCase();
-  const porte = formatPorteMunicipioLabel(profile.porte_municipio);
-
-  const lines: string[] = [];
-
-  if (municipio || uf) {
-    lines.push(
-      `Município/UF do usuário cadastrado: ${[municipio, uf].filter(Boolean).join(" / ")}`
-    );
+  if (["alta", "high", "1"].includes(normalizedPriority)) {
+    return "alta";
   }
 
-  if (porte) {
-    lines.push(`Porte do município cadastrado: ${porte}`);
+  if (["baixa", "low", "3"].includes(normalizedPriority)) {
+    return "baixa";
   }
 
-  if (!lines.length) return "";
-
-  return (
-    "CONTEXTO CADASTRAL DO USUÁRIO (usar como referência padrão da conversa, sem perguntar novamente esses dados por rotina):\n\n" +
-    lines.join("\n") +
-    "\n\nINSTRUÇÃO IMPORTANTE: use esse contexto cadastral como base inicial da resposta. Só peça confirmação de município/UF ou Tribunal de Contas competente se o usuário indicar outra localidade, outro ente, consórcio, órgão estadual/federal, ou se houver dúvida real de jurisdição."
-  );
+  return "media";
 }
 
-function getMaxMultiPdfsInContext(params: {
-  accessSummary: any;
-  productTier: string;
-}) {
-  const capabilityLimit = Number(
-    params?.accessSummary?.capabilities?.maxPdfsPerConversation ?? NaN
-  );
+function getOfficialSourcePriorityLabel(priority: string | null | undefined) {
+  const normalizedPriority = normalizeOfficialSourcePriority(priority);
 
-  if (Number.isFinite(capabilityLimit) && capabilityLimit > 0) {
-    return Math.max(1, Math.floor(capabilityLimit));
+  if (normalizedPriority === "alta") {
+    return "Alta";
   }
 
-  if (params.productTier === "governance") {
-    return Math.max(10, STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT);
+  if (normalizedPriority === "baixa") {
+    return "Baixa";
   }
 
-  if (params.productTier === "strategic") {
-    return STRATEGIC_MAX_MULTI_PDFS_IN_CONTEXT;
-  }
-
-  return DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT;
+  return "Média";
 }
 
-function normalizeContinuationMessage(value: string) {
-  return String(value ?? "")
+function getOfficialSourcePriorityRank(priority: string | null | undefined) {
+  const normalizedPriority = normalizeOfficialSourcePriority(priority);
+
+  if (normalizedPriority === "alta") {
+    return 1;
+  }
+
+  if (normalizedPriority === "media") {
+    return 2;
+  }
+
+  return 3;
+}
+
+function getOfficialSourceTypeLabel(sourceType: string | null | undefined) {
+  switch (sourceType) {
+    case "municipal_website":
+      return "Site municipal";
+    case "official_gazette":
+      return "Diário oficial";
+    case "transparency_portal":
+      return "Portal da transparência";
+    case "institutional_repository":
+      return "Repositório institucional";
+    case "other":
+      return "Outra fonte";
+    default:
+      return sourceType ? String(sourceType) : "Tipo não informado";
+  }
+}
+
+function normalizeOfficialSourceSearchText(value: string) {
+  return value
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[“”"'`´]/g, "")
-    .replace(/[.!?,;:()\-_/\\]+/g, " ")
+    .toLowerCase();
+}
+
+type OfficialSourceIntent =
+  | "legislation"
+  | "official_gazette"
+  | "transparency"
+  | "institutional"
+  | "bidding"
+  | "generic";
+
+function detectOfficialSourceIntent(question: string): OfficialSourceIntent {
+  const normalizedQuestion = normalizeOfficialSourceSearchText(question);
+
+  if (
+    /\b(lei|leis|legislacao|legislativo|decreto|decretos|portaria|portarias|codigo|norma|normas|ato administrativo|atos administrativos|lei organica)\b/.test(
+      normalizedQuestion,
+    )
+  ) {
+    return "legislation";
+  }
+
+  if (
+    /\b(diario oficial|diario|edicao|publicacao|publicado|publicada|publicados|publicadas|edital|extrato|ratificacao)\b/.test(
+      normalizedQuestion,
+    )
+  ) {
+    return "official_gazette";
+  }
+
+  if (
+    /\b(transparencia|receita|receitas|despesa|despesas|empenho|empenhos|pagamento|pagamentos|orcamento|prestacao de contas)\b/.test(
+      normalizedQuestion,
+    )
+  ) {
+    return "transparency";
+  }
+
+  if (/\b(licitacao|licitacoes|dispensa|inexigibilidade|pregao|contrato|contratos)\b/.test(normalizedQuestion)) {
+    return "bidding";
+  }
+
+  if (/\b(site|portal|pagina oficial|endereco|url|link|acessar|acesso)\b/.test(normalizedQuestion)) {
+    return "institutional";
+  }
+
+  return "generic";
+}
+
+function getOfficialSourceIntentLabel(intent: OfficialSourceIntent) {
+  switch (intent) {
+    case "legislation":
+      return "legislação municipal, leis, decretos, portarias e atos administrativos";
+    case "official_gazette":
+      return "Diário Oficial, edições, publicações, editais, extratos e atos publicados";
+    case "transparency":
+      return "Portal da Transparência, receitas, despesas, empenhos, orçamento e prestação de contas";
+    case "bidding":
+      return "licitações, dispensas, inexigibilidades, pregões e contratos";
+    case "institutional":
+      return "site, portal, URL, acesso e páginas oficiais";
+    case "generic":
+    default:
+      return "referências oficiais gerais da organização";
+  }
+}
+
+function getOfficialSourceTextForScoring(source: GovernanceOfficialSourceForChat) {
+  return normalizeOfficialSourceSearchText(
+    [
+      source.name,
+      source.source_type,
+      source.url,
+      source.notes,
+      getOfficialSourceTypeLabel(source.source_type),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+}
+
+function scoreOfficialSourceForQuestion(
+  source: GovernanceOfficialSourceForChat,
+  question: string,
+) {
+  const intent = detectOfficialSourceIntent(question);
+  const text = getOfficialSourceTextForScoring(source);
+  const sourceName = normalizeOfficialSourceSearchText(String(source.name ?? ""));
+  const sourceUrl = normalizeOfficialSourceSearchText(String(source.url ?? ""));
+  const sourceType = normalizeOfficialSourceSearchText(String(source.source_type ?? ""));
+  let score = 0;
+
+  score += Math.max(0, 4 - getOfficialSourcePriorityRank(source.priority));
+
+  if (intent === "legislation") {
+    const isExplicitLegislationSource =
+      /legislacao municipal|legislacao|leis municipais|leis|atos administrativos|atos-administrativos|lei organica/.test(
+        sourceName,
+      ) ||
+      /leis-e-atos-administrativos|leis|atos-administrativos|legislacao|lei-organica/.test(
+        sourceUrl,
+      );
+
+    const isGenericTransparencySource =
+      /portal da transparencia|transparencia/.test(sourceName) &&
+      !/leis|atos|legislacao/.test(sourceName) &&
+      !/leis|atos-administrativos|legislacao/.test(sourceUrl);
+
+    const isOfficialGazetteSource = /diario oficial|official_gazette|gazette/.test(text);
+
+    if (isExplicitLegislationSource) score += 500;
+    if (/legislacao|leis|lei|atos administrativos|atos-administrativos|lei organica/.test(text)) score += 120;
+    if (/transparencia.*leis|leis.*atos|leis-e-atos-administrativos/.test(text)) score += 100;
+    if (isOfficialGazetteSource) score += 15;
+    if (isGenericTransparencySource) score -= 80;
+  }
+
+  if (intent === "official_gazette") {
+    if (/diario oficial|official_gazette|gazette|publicacao|edicao/.test(text)) score += 120;
+    if (/leis|legislacao|atos administrativos/.test(text)) score += 15;
+  }
+
+  if (intent === "transparency") {
+    if (/transparencia|transparency|receita|despesa|empenho|orcamento|prestacao/.test(text)) score += 120;
+    if (/leis-e-atos-administrativos|legislacao municipal/.test(text)) score -= 20;
+  }
+
+  if (intent === "bidding") {
+    if (/licitacao|licitacoes|pregao|contrato|contratos|dispensa|inexigibilidade/.test(text)) score += 120;
+    if (/transparencia/.test(text)) score += 40;
+    if (/diario oficial/.test(text)) score += 20;
+  }
+
+  if (intent === "institutional") {
+    if (/site municipal|municipal_website|portal|prefeitura|municipio/.test(text)) score += 80;
+  }
+
+  if (sourceType.includes(intent)) {
+    score += 20;
+  }
+
+  const normalizedQuestion = normalizeOfficialSourceSearchText(question);
+  const questionWords = normalizedQuestion
+    .split(/\W+/)
+    .filter((word) => word.length >= 4);
+
+  for (const word of questionWords) {
+    if (text.includes(word)) {
+      score += 4;
+    }
+  }
+
+  return {
+    score,
+    intent,
+  };
+}
+
+function sortOfficialSourcesForQuestion(
+  sources: GovernanceOfficialSourceForChat[],
+  question: string,
+) {
+  return [...sources].sort((a, b) => {
+    const scoreA = scoreOfficialSourceForQuestion(a, question).score;
+    const scoreB = scoreOfficialSourceForQuestion(b, question).score;
+
+    if (scoreA !== scoreB) {
+      return scoreB - scoreA;
+    }
+
+    const priorityDiff =
+      getOfficialSourcePriorityRank(a.priority) - getOfficialSourcePriorityRank(b.priority);
+
+    if (priorityDiff !== 0) {
+      return priorityDiff;
+    }
+
+    return String(a.name ?? "").localeCompare(String(b.name ?? ""), "pt-BR", {
+      sensitivity: "base",
+      numeric: true,
+    });
+  });
+}
+
+type PrioritizedOfficialSourceForChat = {
+  source: GovernanceOfficialSourceForChat;
+  score: number;
+  intent: OfficialSourceIntent;
+};
+
+function getPrioritizedOfficialSourceForQuestion(
+  sources: GovernanceOfficialSourceForChat[],
+  question: string,
+): PrioritizedOfficialSourceForChat | null {
+  const intent = detectOfficialSourceIntent(question);
+
+  if (intent === "legislation") {
+    const explicitLegislationSource = sources.find((source) => {
+      const sourceName = normalizeOfficialSourceSearchText(String(source.name ?? ""));
+      const sourceUrl = normalizeOfficialSourceSearchText(String(source.url ?? ""));
+      const sourceNotes = normalizeOfficialSourceSearchText(String(source.notes ?? ""));
+
+      return (
+        /legislacao municipal|legislacao|leis municipais|leis|atos administrativos|lei organica/.test(
+          sourceName,
+        ) ||
+        /leis-e-atos-administrativos|legislacao|lei-organica/.test(sourceUrl) ||
+        /legislacao municipal|leis municipais|atos administrativos|lei organica/.test(sourceNotes)
+      );
+    });
+
+    if (explicitLegislationSource) {
+      return {
+        source: explicitLegislationSource,
+        score: 10000,
+        intent,
+      };
+    }
+  }
+
+  const sortedSources = sortOfficialSourcesForQuestion(sources, question);
+  const scoredSources = sortedSources.map((source) => ({
+    source,
+    ...scoreOfficialSourceForQuestion(source, question),
+  }));
+
+  return scoredSources.find((item) => item.score >= 25) ?? null;
+}
+
+function buildOfficialSourcesContextText(
+  sources: GovernanceOfficialSourceForChat[],
+  question: string,
+) {
+  if (sources.length === 0) {
+    return "";
+  }
+
+  const sortedSources = sortOfficialSourcesForQuestion(sources, question);
+  const prioritizedSource = getPrioritizedOfficialSourceForQuestion(sources, question);
+  const detectedIntent = detectOfficialSourceIntent(question);
+
+  const lines = [
+    "FONTES OFICIAIS CADASTRADAS DA ORGANIZAÇÃO",
+    "",
+    "Use estas fontes como referência preferencial para indicar links oficiais do órgão atual.",
+    "Regra obrigatória: quando existir uma fonte oficial cadastrada claramente relacionada ao assunto da pergunta, cite essa fonte específica com a URL oficial cadastrada.",
+    "Regra obrigatória: para perguntas sobre onde encontrar leis, legislação, decretos, portarias ou atos administrativos, responda primeiro com a fonte Legislação Municipal quando ela estiver cadastrada.",
+    "Não substitua uma fonte específica por uma fonte genérica. Exemplo: para perguntas sobre leis, legislação, decretos, portarias ou atos administrativos, priorize a fonte de Legislação Municipal, quando cadastrada.",
+    "Não afirme que consultou o conteúdo da página em tempo real; use os links como referências oficiais cadastradas.",
+    "",
+    prioritizedSource
+      ? [
+          "FONTE OFICIAL PRIORITÁRIA PARA ESTA PERGUNTA",
+          `Nome exato obrigatório: ${String(prioritizedSource.source.name ?? "Fonte oficial").trim()}`,
+          `Tipo: ${getOfficialSourceTypeLabel(prioritizedSource.source.source_type)}`,
+          `Prioridade cadastrada: ${getOfficialSourcePriorityLabel(prioritizedSource.source.priority)}`,
+          `URL exata obrigatória: ${String(prioritizedSource.source.url ?? "").trim()}`,
+          `Motivo: a pergunta foi classificada como relacionada a ${getOfficialSourceIntentLabel(prioritizedSource.intent)}.`,
+          "Instrução obrigatória: comece a orientação de consulta por esta fonte prioritária.",
+          "Instrução obrigatória: cite o nome exato obrigatório e a URL exata obrigatória antes de qualquer fonte genérica.",
+          "Instrução obrigatória: não troque, resuma, encurte ou substitua esta URL por outro endereço.",
+          "Instrução obrigatória: se a fonte prioritária for Legislação Municipal, não substitua por Portal da Transparência genérico nem por Diário Oficial.",
+          "",
+        ].join("\n")
+      : [
+          "ASSUNTO IDENTIFICADO",
+          `A pergunta foi classificada como relacionada a ${getOfficialSourceIntentLabel(detectedIntent)}.`,
+          "Nenhuma fonte específica superou o limite de priorização; use a lista abaixo por ordem de relevância e prioridade.",
+          "",
+        ].join("\n"),
+    "DEMAIS FONTES OFICIAIS ATIVAS, ORDENADAS POR RELEVÂNCIA PARA A PERGUNTA",
+    "",
+    ...sortedSources.flatMap((source, index) => [
+      `${index + 1}. ${String(source.name ?? "Fonte oficial").trim()}`,
+      `   Tipo: ${getOfficialSourceTypeLabel(source.source_type)}`,
+      `   Prioridade: ${getOfficialSourcePriorityLabel(source.priority)}`,
+      `   URL oficial cadastrada: ${String(source.url ?? "").trim()}`,
+      source.notes ? `   Observações: ${String(source.notes).trim()}` : "",
+      source.reviewed_at ? `   Última revisão: ${source.reviewed_at}` : "",
+      "",
+    ]),
+  ];
+
+  return lines.filter((line) => line !== "").join("\n").trim();
+}
+
+function resolveMandatoryOfficialSourceForFinalAnswer(params: {
+  sources: GovernanceOfficialSourceForChat[];
+  prioritizedSource: PrioritizedOfficialSourceForChat | null;
+  question: string;
+}) {
+  const { sources, prioritizedSource, question } = params;
+  const intent = detectOfficialSourceIntent(question);
+
+  if (intent === "legislation") {
+    const legislationSource = sources.find((source) => {
+      const sourceName = normalizeOfficialSourceSearchText(String(source.name ?? ""));
+      const sourceUrl = normalizeOfficialSourceSearchText(String(source.url ?? ""));
+      const sourceNotes = normalizeOfficialSourceSearchText(String(source.notes ?? ""));
+
+      return (
+        /legislacao municipal|legislacao|leis municipais|leis|atos administrativos|lei organica/.test(
+          sourceName,
+        ) ||
+        /leis-e-atos-administrativos|legislacao|lei-organica/.test(sourceUrl) ||
+        /legislacao municipal|leis municipais|atos administrativos|lei organica/.test(sourceNotes)
+      );
+    });
+
+    if (legislationSource) {
+      return legislationSource;
+    }
+  }
+
+  return prioritizedSource?.source ?? null;
+}
+
+function applyOfficialSourceCitationGuard(params: {
+  assistantText: string;
+  sources: GovernanceOfficialSourceForChat[];
+  prioritizedSource: PrioritizedOfficialSourceForChat | null;
+  question: string;
+}) {
+  const { assistantText, sources, prioritizedSource, question } = params;
+
+  const mandatorySource = resolveMandatoryOfficialSourceForFinalAnswer({
+    sources,
+    prioritizedSource,
+    question,
+  });
+
+  if (!mandatorySource) {
+    return assistantText;
+  }
+
+  const sourceName = String(mandatorySource.name ?? "Fonte oficial").trim();
+  const sourceUrl = String(mandatorySource.url ?? "").trim();
+
+  if (!sourceName || !sourceUrl) {
+    return assistantText;
+  }
+
+  const normalizedAssistantText = normalizeOfficialSourceSearchText(assistantText);
+  const normalizedSourceName = normalizeOfficialSourceSearchText(sourceName);
+  const hasExactUrl = assistantText.includes(sourceUrl);
+  const hasSourceName = normalizedAssistantText.includes(normalizedSourceName);
+
+  if (hasExactUrl && hasSourceName) {
+    return assistantText;
+  }
+
+  const guardBlock = [
+    "Referência oficial específica cadastrada:",
+    `- ${sourceName}: ${sourceUrl}`,
+  ].join("\n");
+
+  return `${assistantText.trim()}\n\n${guardBlock}`;
+}
+
+async function loadActiveOfficialSourcesForChat(params: {
+  client: ReturnType<typeof createWritableSupabaseRouteClient>;
+  organizationId: string;
+  question: string;
+}) {
+  const { client, organizationId, question } = params;
+
+  const { data, error } = await client
+    .from("official_sources")
+    .select(
+      `
+        id,
+        organization_id,
+        name,
+        source_type,
+        url,
+        notes,
+        status,
+        priority,
+        reviewed_at
+      `,
+    )
+    .eq("organization_id", organizationId)
+    .eq("status", "active")
+    .order("name", { ascending: true });
+
+  if (error) {
+    console.warn(
+      "[governance/chat] Não foi possível carregar fontes oficiais ativas:",
+      error,
+    );
+
+    return {
+      sources: [] as GovernanceOfficialSourceForChat[],
+      prioritizedSource: null as PrioritizedOfficialSourceForChat | null,
+      contextText: "",
+      error: "Não foi possível carregar as fontes oficiais cadastradas.",
+    };
+  }
+
+  const sources = ((data ?? []) as GovernanceOfficialSourceForChat[])
+    .filter((source) => String(source.url ?? "").trim().length > 0);
+
+  return {
+    sources,
+    prioritizedSource: getPrioritizedOfficialSourceForQuestion(sources, question),
+    contextText: buildOfficialSourcesContextText(sources, question),
+    error: "",
+  };
+}
+
+
+function buildGovernanceConsultantStyleInstruction(
+  mode: GovernanceResponseMode,
+  userText = "",
+  relation: ConversationRelation = "INICIAL",
+): string {
+  if (mode !== "objective") {
+    return [
+      "REGRA DE PRIORIDADE DO MODO DE RESPOSTA",
+      "O modo selecionado pelo usuário tem prioridade sobre o estilo consultivo geral.",
+      "Não neutralize o formato escolhido.",
+      "Se o modo for checklist, responda como checklist.",
+      "Se o modo for parecer técnico, responda como parecer técnico.",
+      "Se o modo for análise de risco, responda como análise de risco.",
+      "Se o modo for minuta, entregue minuta.",
+      "Se o modo for comparativo, use comparação clara.",
+      "Mantenha clareza e segurança técnica, mas preserve a estrutura específica do modo selecionado.",
+    ].join("\n");
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      "ESTILO ESPECIAL PARA FOLLOW-UP EXECUTIVO",
+      "A pergunta atual foi classificada como continuidade complementar.",
+      "Neste caso, NÃO abra uma nova consultoria completa.",
+      "Responda como fechamento executivo de uma conversa já em andamento.",
+      "Comece diretamente pelo ponto solicitado pelo usuário.",
+      "Não faça introdução longa.",
+      "Não redefina conceitos já explicados.",
+      "Não reapresente o contexto anterior.",
+      "Não repita listas gerais já apresentadas.",
+      "Não produza análise extensa.",
+      "Não inclua seção de base legal, salvo se o usuário pedir expressamente ou se houver risco jurídico direto.",
+      "Limite a resposta a no máximo 180 palavras, salvo pedido expresso de detalhamento.",
+      "Use somente lista curta, tabela simples ou roteiro objetivo.",
+      "Quando a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente.",
+      "Finalize com uma orientação prática curta para o gestor.",
+    ].join("\n");
+  }
+
+  if (isObjectiveAdministrativeQuestion(userText)) {
+    return [
+      "REGRA PRIORITÁRIA DE ESTILO PARA PERGUNTA OBJETIVA",
+      "A pergunta atual pede dado objetivo ligado à Administração Pública.",
+      "Neste caso, a utilidade administrativa tem prioridade sobre o estilo consultivo longo.",
+      "Comece pela resposta direta, sem introdução conceitual.",
+      "É permitido iniciar com lista curta, tabela simples, valor, percentual, prazo ou frase objetiva.",
+      "Não aplique a regra de 'explicar a lógica antes de responder'.",
+      "Não transforme a resposta em mini parecer quando a pergunta pedir apenas limite, valor, prazo ou percentual.",
+      "Depois da resposta direta, acrescente fundamento legal e cautelas práticas em blocos curtos.",
+      "A resposta deve ser escaneável: o gestor precisa encontrar o dado principal nos primeiros segundos.",
+    ].join("\n");
+  }
+
+  return [
+    "REGRA PRIORITÁRIA DE ESTILO DO GOVERNANÇA",
+    "A resposta deve soar como uma conversa técnica com um consultor experiente, não como despacho, checklist, manual interno ou relatório de auditoria.",
+    "Antes de listar providências, explique a lógica do tema em 2 a 4 frases curtas, com linguagem natural e didática.",
+    "Use frases de transição, exemplo: 'Na prática...', 'O ponto central é...', 'Antes de abrir o processo...', 'Sem isso, o procedimento fica frágil...'.",
+    "Explique o porquê das providências. O usuário precisa entender a razão administrativa, não apenas receber uma sequência de tarefas.",
+    "Evite começar a resposta com lista numerada, tópicos ou blocos intitulados. Comece com uma orientação em texto corrido.",
+    "Use listas somente depois da introdução, quando elas ajudarem a organizar a resposta.",
+    "Quando usar listas, misture orientação com explicação curta. Não escreva itens secos.",
+    "Não use aparência de checklist no modo Padrão. Checklist só quando o usuário pedir ou escolher modo Checklist.",
+    "Evite excesso de seções como 'Riscos', 'Providências', 'Base legal' em toda resposta. Use apenas quando realmente agregarem valor.",
+    "O tom desejado é fluido, seguro, didático e aplicável à rotina de uma prefeitura.",
+  ].join("\n");
+}
+
+function buildFinalConsultativeOverride(
+  mode: GovernanceResponseMode,
+  relation: ConversationRelation = "INICIAL",
+): string {
+  if (mode === "technical_opinion") {
+    return [
+      "REGRA FINAL OBRIGATÓRIA PARA PARECER TÉCNICO",
+      "A resposta deve iniciar obrigatoriamente com o título: PARECER TÉCNICO.",
+      "Use exatamente os blocos: 1. ASSUNTO, 2. RELATÓRIO, 3. FUNDAMENTAÇÃO TÉCNICA, 4. ANÁLISE, 5. CONCLUSÃO e 6. RECOMENDAÇÃO TÉCNICA.",
+      "É proibido responder como conversa consultiva, checklist, resumo, plano de ação ou minuta.",
+      "Não use abertura genérica. Comece diretamente no formato de parecer.",
+      "Mantenha linguagem formal, institucional e tecnicamente cautelosa.",
+    ].join("\n");
+  }
+
+  if (mode !== "objective") {
+    return [
+      "REGRA FINAL OBRIGATÓRIA",
+      `O modo selecionado é ${mode}. A resposta precisa ficar visual e estruturalmente diferente do modo Padrão.`,
+      "Não comece com a mesma introdução genérica usada no modo Padrão.",
+      "Não entregue uma orientação consultiva genérica se o modo exigir outro formato.",
+      "Siga rigorosamente a estrutura indicada para o modo selecionado.",
+    ].join("\n");
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      "REGRA FINAL OBRIGATÓRIA PARA FOLLOW-UP EXECUTIVO",
+      "A pergunta atual é complementar ao tema anterior.",
+      "A resposta NÃO deve seguir o formato longo do modo Padrão.",
+      "Não comece com contextualização ampla.",
+      "Não explique novamente a lógica administrativa já apresentada.",
+      "Não use estrutura de artigo, parecer, relatório ou mini consultoria.",
+      "Não inclua Base legal ou Referências oficiais, salvo pedido expresso ou risco jurídico direto.",
+      "FORMATO EXATO OBRIGATÓRIO:",
+      "Resposta direta:",
+      "Uma frase curta respondendo ao ponto perguntado.",
+      "",
+      "Indicadores/Métricas principais:",
+      "- item 1",
+      "- item 2",
+      "- item 3",
+      "- item 4",
+      "- item 5",
+      "",
+      "Como acompanhar:",
+      "- item 1",
+      "- item 2",
+      "",
+      "REGRAS DE TAMANHO:",
+      "- Máximo de 180 palavras.",
+      "- Máximo de 6 indicadores/métricas.",
+      "- Máximo de 2 itens em Como acompanhar.",
+      "- Fechamento prático em uma única frase.",
+    ].join("\n");
+  }
+
+  return [
+    "REGRA FINAL OBRIGATÓRIA PARA O MODO PADRÃO",
+    "No modo Padrão, a primeira parte da resposta deve ser texto corrido, explicativo e fluido.",
+    "É proibido começar diretamente com '1.', '-', '•', tabela ou cabeçalho técnico.",
+    "Formato desejado:",
+    "1. Um parágrafo inicial contextualizando o tema.",
+    "2. Um segundo parágrafo explicando a lógica administrativa.",
+    "3. Só depois, se útil, uma lista com os pontos principais.",
+    "4. Fechar com um cuidado prático ou orientação ao gestor.",
+    "Escreva como o módulo Estratégico: didático, natural, gostoso de ler, mas tecnicamente seguro.",
+  ].join("\n");
+}
+
+function mapMessagesToOpenAIInput(
+  messages: GovernanceMessage[],
+  options?: {
+    currentMessageOnly?: boolean;
+  },
+): OpenAIInputMessage[] {
+  const sourceMessages = options?.currentMessageOnly
+    ? [...messages].reverse().filter((message) => message.role === "user").slice(0, 1).reverse()
+    : messages;
+
+  const relevantMessages = sourceMessages.filter((message) => {
+    return (
+      message.role === "user" ||
+      message.role === "assistant" ||
+      message.role === "system"
+    );
+  });
+
+  return relevantMessages.map((message) => {
+    if (message.role === "system") {
+      return {
+        role: "system",
+        content: message.content,
+      };
+    }
+
+    if (message.role === "assistant") {
+      return {
+        role: "assistant",
+        content: message.content,
+      };
+    }
+
+    return {
+      role: "user",
+      content: message.content,
+    };
+  });
+}
+
+
+type SuggestedNextQuestion = {
+  id: string;
+  label: string;
+  prompt: string;
+};
+
+function stripSuggestionMarkdown(value: string) {
+  return String(value ?? "")
+    .replace(/^[-*•\d.)\s]+/g, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function parseContinuationAcceptance(message: string): ContinuationAcceptanceParseResult {
-  const raw = String(message ?? "").trim();
-  const normalized = normalizeContinuationMessage(raw);
+function normalizeSuggestionText(value: unknown) {
+  const text = stripSuggestionMarkdown(String(value ?? ""));
 
-  if (!normalized) {
-    return { accepted: false, refinement: null };
+  if (!text) {
+    return "";
   }
 
-  const exactMatches = new Set([
-    "eu quero",
-    "quero",
-    "quero sim",
-    "sim",
-    "sim quero",
-    "sim eu quero",
-    "pode",
-    "pode sim",
-    "ok",
-    "ok pode",
-    "isso",
-    "isso mesmo",
-    "faça isso",
-    "faca isso",
-    "pode fazer",
-    "pode continuar",
-    "continue",
-    "continua",
-    "pode seguir",
-    "segue",
-    "quero isso",
-    "vamos em frente",
-    "vamos seguir",
-    "vamos continuar",
-    "concordo",
-    "concordo sim",
-    "de acordo",
-    "pode prosseguir",
-    "prosseguir",
-  ]);
+  return text.length > 140 ? `${text.slice(0, 137).trim()}...` : text;
+}
 
-  if (exactMatches.has(normalized)) {
-    return { accepted: true, refinement: null };
+function makeSuggestionId(value: string, index: number) {
+  const base = String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 48);
+
+  return base ? `${base}-${index + 1}` : `suggestion-${index + 1}`;
+}
+
+function parseSuggestedNextQuestions(rawText: string): SuggestedNextQuestion[] {
+  const text = String(rawText ?? "").trim();
+
+  if (!text) {
+    return [];
   }
 
-  const prefixPatterns: Array<{ regex: RegExp; strip: RegExp }> = [
-    { regex: /^eu quero\b/i, strip: /^eu quero\b[\s,:;.-]*/i },
-    { regex: /^quero\b/i, strip: /^quero\b[\s,:;.-]*/i },
-    { regex: /^ok\b/i, strip: /^ok\b[\s,:;.-]*/i },
-    { regex: /^sim\b/i, strip: /^sim\b[\s,:;.-]*/i },
-    { regex: /^pode\b/i, strip: /^pode\b[\s,:;.-]*/i },
-    { regex: /^vamos em frente\b/i, strip: /^vamos em frente\b[\s,:;.-]*/i },
-    { regex: /^vamos seguir\b/i, strip: /^vamos seguir\b[\s,:;.-]*/i },
-    { regex: /^vamos continuar\b/i, strip: /^vamos continuar\b[\s,:;.-]*/i },
-    { regex: /^concordo\b/i, strip: /^concordo\b[\s,:;.-]*/i },
-    { regex: /^de acordo\b/i, strip: /^de acordo\b[\s,:;.-]*/i },
-    { regex: /^pode prosseguir\b/i, strip: /^pode prosseguir\b[\s,:;.-]*/i },
-    { regex: /^prosseguir\b/i, strip: /^prosseguir\b[\s,:;.-]*/i },
-  ];
+  const candidates: unknown[] = [];
 
-  for (const item of prefixPatterns) {
-    if (!item.regex.test(raw)) continue;
+  try {
+    const parsed = JSON.parse(text);
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.suggestions)
+        ? parsed.suggestions
+        : Array.isArray(parsed?.questions)
+          ? parsed.questions
+          : [];
 
-    const remainder = raw.replace(item.strip, "").trim();
+    candidates.push(...list);
+  } catch {
+    const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
 
-    if (!remainder) {
-      return { accepted: true, refinement: null };
+    if (jsonMatch?.[0]) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const list = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.suggestions)
+            ? parsed.suggestions
+            : Array.isArray(parsed?.questions)
+              ? parsed.questions
+              : [];
+
+        candidates.push(...list);
+      } catch {
+        // Fallback abaixo.
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    const fallbackLines = text
+      .split("\n")
+      .map((line) => normalizeSuggestionText(line))
+      .filter(Boolean);
+
+    candidates.push(...fallbackLines);
+  }
+
+  const seen = new Set<string>();
+  const suggestions: SuggestedNextQuestion[] = [];
+
+  for (const candidate of candidates) {
+    const rawLabel =
+      typeof candidate === "string"
+        ? candidate
+        : (candidate as any)?.label ?? (candidate as any)?.question ?? (candidate as any)?.prompt;
+
+    const rawPrompt =
+      typeof candidate === "string"
+        ? candidate
+        : (candidate as any)?.prompt ?? (candidate as any)?.question ?? (candidate as any)?.label;
+
+    const label = normalizeSuggestionText(rawLabel);
+    const prompt = normalizeSuggestionText(rawPrompt);
+
+    if (!label || !prompt) {
+      continue;
     }
 
-    return {
-      accepted: true,
-      refinement: clampText(remainder, 400),
-    };
+    const key = prompt.toLowerCase();
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    suggestions.push({
+      id: makeSuggestionId(prompt, suggestions.length),
+      label,
+      prompt,
+    });
+
+    if (suggestions.length >= 5) {
+      break;
+    }
   }
 
-  if (normalized.startsWith("eu quero ") && normalized.split(" ").length <= 8) {
-    return {
-      accepted: true,
-      refinement: clampText(raw.replace(/^eu quero\b[\s,:;.-]*/i, "").trim(), 400) || null,
-    };
-  }
-
-  if (normalized.startsWith("ok ") && normalized.split(" ").length <= 8) {
-    return {
-      accepted: true,
-      refinement: clampText(raw.replace(/^ok\b[\s,:;.-]*/i, "").trim(), 400) || null,
-    };
-  }
-
-  if (normalized.startsWith("vamos ") && normalized.split(" ").length <= 8) {
-    return {
-      accepted: true,
-      refinement: clampText(raw.replace(/^vamos\b[\s,:;.-]*/i, "").trim(), 400) || null,
-    };
-  }
-
-  if (normalized.startsWith("concordo") && normalized.split(" ").length <= 8) {
-    return {
-      accepted: true,
-      refinement: clampText(raw.replace(/^concordo\b[\s,:;.-]*/i, "").trim(), 400) || null,
-    };
-  }
-
-  return { accepted: false, refinement: null };
+  return suggestions;
 }
 
-function lastAssistantOfferToContinue(historyRows: MessageRow[]) {
-  const lastAssistant = [...historyRows]
-    .reverse()
-    .find((row) => row.role === "assistant" && String(row.content ?? "").trim());
+async function generateGovernanceFollowUpSuggestions(params: {
+  userContent: string;
+  assistantText: string;
+  responseMode: GovernanceResponseMode;
+  hasSelectedPdfAttachments: boolean;
+  selectedPdfAttachmentNames: string[];
+}): Promise<SuggestedNextQuestion[]> {
+  if (!openai) {
+    return [];
+  }
 
-  if (!lastAssistant) return null;
+  const assistantContext = clampText(params.assistantText, 7000);
+  const userContext = clampText(params.userContent, 1800);
 
-  const content = String(lastAssistant.content ?? "").trim();
-  const normalized = normalizeContinuationMessage(content);
+  if (!assistantContext) {
+    return [];
+  }
 
-  const offerPatterns = [
-    "se voce quiser",
-    "posso em uma proxima resposta",
-    "posso em uma resposta seguinte",
-    "posso sugerir",
-    "posso montar",
-    "posso estruturar",
-    "posso elaborar",
-    "posso transformar",
-    "posso gerar",
-    "posso criar",
-    "posso adaptar",
-    "quer que eu",
-    "deseja que eu",
+  const pdfContext = params.hasSelectedPdfAttachments
+    ? [
+        "A pergunta envolveu PDFs selecionados.",
+        params.selectedPdfAttachmentNames.length > 0
+          ? `PDFs informados: ${params.selectedPdfAttachmentNames.join(", ")}.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "A pergunta não usou PDFs selecionados.";
+
+  const suggestionInstructions = [
+    "Você gera sugestões inteligentes de próxima pergunta para o chat Publ.IA Governança.",
+    "Baseie-se exclusivamente na pergunta do usuário e na resposta da IA.",
+    "Crie perguntas realmente contextuais, específicas e úteis para continuidade da conversa.",
+    "Não use sugestões genéricas como 'Gerar resumo executivo', 'Pontos de atenção' ou 'Transformar em checklist', salvo se isso for claramente o próximo passo mais específico.",
+    "As perguntas devem ser em português do Brasil, curtas e acionáveis.",
+    "Retorne somente JSON válido, sem Markdown, sem comentários e sem texto antes ou depois.",
+    'Formato obrigatório: {"suggestions":[{"label":"...","prompt":"..."}]}',
+    "Gere entre 3 e 5 sugestões.",
+  ].join("\n");
+
+  const suggestionInput = [
+    {
+      role: "user" as const,
+      content: [
+        `Modo de resposta usado: ${params.responseMode}.`,
+        pdfContext,
+        "",
+        "Pergunta do usuário:",
+        userContext,
+        "",
+        "Resposta da IA:",
+        assistantContext,
+      ].join("\n"),
+    },
   ];
 
-  const hasOfferPattern = offerPatterns.some((pattern) =>
-    normalized.includes(pattern)
-  );
+  try {
+    const response = await openai.responses.create({
+      model: OPENAI_MODEL_GOVERNANCE,
+      instructions: suggestionInstructions,
+      input: suggestionInput,
+      temperature: 0.2,
+      max_output_tokens: 700,
+    } as any);
 
-  if (!hasOfferPattern) return null;
-
-  const paragraphs = content
-    .split(/\n{2,}/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  const offerParagraph =
-    [...paragraphs].reverse().find((part) => {
-      const partNormalized = normalizeContinuationMessage(part);
-      return offerPatterns.some((pattern) => partNormalized.includes(pattern));
-    }) ?? content;
-
-  return clampText(offerParagraph, 1400);
+    return parseSuggestedNextQuestions(response.output_text ?? "");
+  } catch (error) {
+    console.error("[governance/chat] Erro ao gerar sugestões de próxima pergunta:", error);
+    return [];
+  }
 }
 
-function buildContinuationAcceptanceInstruction(params: {
-  userMessage: string;
-  offerText: string;
-  refinement?: string | null;
-}) {
-  const lines = [
-    "CONTINUIDADE CONVERSACIONAL OBRIGATÓRIA:",
-    "- O usuário respondeu com uma aceitação curta da sugestão imediatamente anterior da IA.",
-    "- NÃO trate isso como mensagem incompleta.",
-    "- NÃO peça para o usuário reformular, completar a frase ou escolher novamente.",
-    "- Continue exatamente a linha proposta na última resposta da IA, executando a sugestão oferecida.",
-    "- Só peça esclarecimento adicional se houver ambiguidade real e incontornável.",
-    "",
-    "ÚLTIMA SUGESTÃO OBJETIVA DA IA A SER CONTINUADA:",
-    params.offerText,
-    "",
-    `MENSAGEM CURTA DO USUÁRIO: ${params.userMessage.trim()}`,
-  ];
+type GovernancePdfContextResult = {
+  selectedPdfFileIds: string[];
+  pdfContextText: string;
+  pdfContextAvailable: boolean;
+  pdfContextWarnings: string[];
+};
 
-  if (params.refinement?.trim()) {
-    lines.push(
-      "",
-      "REFINAMENTO ADICIONAL DO USUÁRIO A SER INCORPORADO:",
-      params.refinement.trim(),
-      "",
-      "INSTRUÇÃO EXTRA: continue a sugestão anterior já incorporando esse refinamento específico."
-    );
+type GovernancePdfFileRow = {
+  id: string;
+  file_name: string | null;
+  extracted_text: string | null;
+  extracted_text_status: string | null;
+  vector_index_status: string | null;
+  vector_chunks_count: number | null;
+};
+
+type GovernanceMatchPdfChunkRow = {
+  chunk_index: number;
+  content: string;
+};
+
+function clampText(text: string, maxChars: number) {
+  const clean = String(text ?? "").trim();
+
+  if (clean.length <= maxChars) {
+    return clean;
   }
 
-  lines.push(
-    "",
-    "INSTRUÇÃO FINAL: responda já entregando o conteúdo prometido na sugestão anterior."
-  );
-
-  return lines.join("\n");
+  return `${clean.slice(0, Math.max(0, maxChars - 20)).trim()}\n\n[texto cortado]`;
 }
 
-async function getUserProfileContext(
-  client: any,
-  userId: string
-): Promise<UserProfileContext | null> {
-  const { data, error } = await client
-    .from("profiles")
-    .select("municipio, uf, porte_municipio")
-    .eq("user_id", userId)
-    .maybeSingle();
+function normalizePdfText(text: string) {
+  return String(text ?? "")
+    .replace(/\u0000/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
 
-  if (error) {
-    console.error("[/api/chat] erro ao buscar contexto do profile:", error);
+function buildGovernancePdfLabel(pdfRow: GovernancePdfFileRow) {
+  const fileName = String(pdfRow.file_name ?? "").trim();
+  return fileName || `PDF ${pdfRow.id}`;
+}
+
+async function getGovernancePdfQueryEmbedding(question: string) {
+  if (!openai) {
     return null;
   }
 
-  if (!data) return null;
-
-  return {
-    municipio: (data as any).municipio ?? null,
-    uf: (data as any).uf ?? null,
-    porte_municipio: (data as any).porte_municipio ?? null,
-  };
-}
-
-async function getIsAdminUser(client: any, userId: string): Promise<boolean> {
-  const { data, error } = await client
-    .from("profiles")
-    .select("is_admin, role")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("[/api/chat] erro ao buscar perfil admin:", error);
-    return false;
-  }
-
-  return (
-    Boolean((data as any)?.is_admin) ||
-    String((data as any)?.role ?? "").toLowerCase() === "admin"
-  );
-}
-
-async function getConversationPdfState(
-  client: any,
-  conversationId: string,
-  userId: string
-): Promise<ConversationPdfState> {
-  const { data, error } = await client
-    .from("conversations")
-    .select("pdf_enabled, active_pdf_file_id")
-    .eq("id", conversationId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error || !data) {
-    return { pdf_enabled: false, active_pdf_file_id: null };
-  }
-
-  return {
-    pdf_enabled: (data as any).pdf_enabled !== false,
-    active_pdf_file_id:
-      ((data as any).active_pdf_file_id as string | null) ?? null,
-  };
-}
-
-async function getPdfsForConversation(
-  client: any,
-  conversationId: string,
-  userId: string,
-  state: ConversationPdfState
-): Promise<PdfFileRow[]> {
-  if (!state.pdf_enabled) return [];
-
-  const { data: links, error: linksError } = await client
-    .from("conversation_pdf_links")
-    .select("pdf_file_id, is_active, created_at")
-    .eq("conversation_id", conversationId)
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
-
-  if (linksError) {
-    console.error("[/api/chat] erro ao buscar vínculos dos PDFs:", linksError);
-    return [];
-  }
-
-  const orderedIdsRaw: OrderedPdfLink[] = ((links ?? []) as ConversationPdfLinkRow[])
-    .map((item: ConversationPdfLinkRow) => ({
-      pdfFileId: String(item?.pdf_file_id ?? "").trim(),
-      isActive: item?.is_active === true,
-    }))
-    .filter((item: OrderedPdfLink) => !!item.pdfFileId);
-
-  let orderedIds: string[] = orderedIdsRaw.map(
-    (item: OrderedPdfLink) => item.pdfFileId
-  );
-
-  const activeId = String(state.active_pdf_file_id ?? "").trim();
-  if (activeId && orderedIds.includes(activeId)) {
-    orderedIds = [
-      activeId,
-      ...orderedIds.filter((pdfFileId: string) => pdfFileId !== activeId),
-    ];
-  } else {
-    const activeFromLinks = orderedIdsRaw.find(
-      (item: OrderedPdfLink) => item.isActive
-    )?.pdfFileId;
-
-    if (activeFromLinks && orderedIds.includes(activeFromLinks)) {
-      orderedIds = [
-        activeFromLinks,
-        ...orderedIds.filter(
-          (pdfFileId: string) => pdfFileId !== activeFromLinks
-        ),
-      ];
-    }
-  }
-
-  if (!orderedIds.length) {
-    const { data: latest } = await client
-      .from("pdf_files")
-      .select(
-        "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
-      )
-      .eq("conversation_id", conversationId)
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    const rows = (latest ?? []) as PdfFileRow[];
-    return rows.filter(
-      (row: PdfFileRow) =>
-        row.storage_path && !String(row.storage_path).includes("..")
-    );
-  }
-
-  const { data: pdfRows, error: pdfError } = await client
-    .from("pdf_files")
-    .select(
-      "id, conversation_id, user_id, file_name, storage_path, openai_file_id, file_size, created_at, extracted_text, extracted_text_status, extracted_text_error, vector_index_status, vector_index_error, vector_chunks_count"
-    )
-    .in("id", orderedIds)
-    .eq("conversation_id", conversationId)
-    .eq("user_id", userId);
-
-  if (pdfError || !pdfRows) {
-    console.error("[/api/chat] erro ao buscar PDFs da conversa:", pdfError);
-    return [];
-  }
-
-  const byId = new Map<string, PdfFileRow>();
-  for (const row of pdfRows as PdfFileRow[]) {
-    if (!row.storage_path || String(row.storage_path).includes("..")) continue;
-    byId.set(row.id, row);
-  }
-
-  return orderedIds
-    .map((id: string) => byId.get(id) ?? null)
-    .filter(Boolean) as PdfFileRow[];
-}
-
-function applyPdfChatMode(params: {
-  pdfRows: PdfFileRow[];
-  pdfMode: PdfChatMode;
-  selectedPdfIds: string[];
-  activePdfFileId: string | null;
-}) {
-  const { pdfRows, pdfMode, selectedPdfIds, activePdfFileId } = params;
-
-  if (!pdfRows.length) return [];
-
-  if (pdfMode === "active") {
-    const activeId = String(activePdfFileId ?? "").trim();
-    if (!activeId) return pdfRows.slice(0, 1);
-    return pdfRows.filter((row) => row.id === activeId).slice(0, 1);
-  }
-
-  if (pdfMode === "selected") {
-    const selectedSet = new Set(
-      selectedPdfIds.map((id) => String(id ?? "").trim()).filter(Boolean)
-    );
-
-    if (!selectedSet.size) return [];
-
-    const filtered = pdfRows.filter((row) => selectedSet.has(row.id));
-
-    const ordered = [
-      ...selectedPdfIds
-        .map((id) => filtered.find((row) => row.id === id) ?? null)
-        .filter(Boolean),
-    ] as PdfFileRow[];
-
-    return ordered;
-  }
-
-  return pdfRows;
-}
-
-async function getQueryEmbedding(query: string): Promise<number[] | null> {
-  if (!openai) return null;
-
   try {
-    const resp = await openai.embeddings.create({
+    const response = await openai.embeddings.create({
       model: EMBEDDING_MODEL,
-      input: query,
+      input: question,
       encoding_format: "float",
     } as any);
 
-    const emb = (resp as any)?.data?.[0]?.embedding;
-    return Array.isArray(emb) ? emb : null;
-  } catch {
+    const embedding = (response as any)?.data?.[0]?.embedding;
+
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      return null;
+    }
+
+    return embedding as number[];
+  } catch (error) {
+    console.error("[governance/chat] Erro ao gerar embedding da pergunta:", error);
     return null;
   }
 }
 
-async function uploadPdfToOpenAI(
-  client: any,
-  pdfRow: PdfFileRow
-): Promise<string | null> {
-  if (!openai) return null;
+async function buildGovernancePdfContextFromVector(
+  client: ReturnType<typeof createWritableSupabaseRouteClient>,
+  pdfRow: GovernancePdfFileRow,
+  question: string,
+  maxChars: number,
+) {
+  const vectorReady =
+    String(pdfRow.vector_index_status ?? "").toLowerCase() === "ready" &&
+    Number(pdfRow.vector_chunks_count ?? 0) > 0;
 
-  const { data: fileData, error: downloadError } = await client.storage
-    .from("pdf-files")
-    .download(pdfRow.storage_path);
-
-  if (downloadError || !fileData) return null;
-
-  try {
-    const buffer = Buffer.from(await fileData.arrayBuffer());
-    const filename = pdfRow.file_name || "documento.pdf";
-    const fileForOpenAI = await toFile(buffer, filename, {
-      type: "application/pdf",
-    });
-
-    const uploaded = await openai.files.create({
-      file: fileForOpenAI,
-      purpose: "user_data",
-    });
-
-    return uploaded.id;
-  } catch {
-    return null;
+  if (!vectorReady) {
+    return "";
   }
+
+  const queryEmbedding = await getGovernancePdfQueryEmbedding(question);
+
+  if (!queryEmbedding) {
+    return "";
+  }
+
+  const { data: matches, error: matchError } = await client.rpc("match_pdf_chunks", {
+    query_embedding: queryEmbedding,
+    match_count: RAG_TOP_K,
+    filter_pdf_file_id: pdfRow.id,
+  } as any);
+
+  if (matchError) {
+    console.error("[governance/chat] Erro ao buscar chunks vetoriais do PDF:", {
+      pdfFileId: pdfRow.id,
+      error: matchError.message,
+    });
+
+    return "";
+  }
+
+  if (!Array.isArray(matches) || matches.length === 0) {
+    return "";
+  }
+
+  const label = buildGovernancePdfLabel(pdfRow);
+
+  const raw = (matches as GovernanceMatchPdfChunkRow[])
+    .map((match, index) =>
+      [
+        `[${label}] Trecho ${index + 1} (chunk #${Number(match.chunk_index ?? 0)}):`,
+        String(match.content ?? "").trim(),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .filter((block) => block.trim().length > 0)
+    .join("\n\n---\n\n");
+
+  return clampText(raw, maxChars);
 }
 
-async function buildPdfContextFromExtractedText(
-  pdfRow: PdfFileRow,
-  message: string,
-  maxChars: number
+function buildGovernancePdfContextFromExtractedText(
+  pdfRow: GovernancePdfFileRow,
+  question: string,
+  maxChars: number,
 ) {
   if (String(pdfRow.extracted_text_status ?? "").toLowerCase() !== "ready") {
     return "";
   }
-  if (!pdfRow.extracted_text) return "";
 
-  const text = clampText(
-    normalizeText(pdfRow.extracted_text),
-    MAX_EXTRACTED_TEXT_CHARS
-  );
+  const text = normalizePdfText(pdfRow.extracted_text ?? "");
+
+  if (!text) {
+    return "";
+  }
 
   const chunks = chunkText(text, {
     chunkSize: 1200,
@@ -1339,1061 +1345,2714 @@ async function buildPdfContextFromExtractedText(
     maxChunks: 320,
   });
 
-  const picked = pickRelevantChunks(chunks, message, {
+  const picked = pickRelevantChunks(chunks, question, {
     maxChunks: 4,
     maxChars,
     minScore: 1,
   });
 
-  if (!picked.length) return "";
+  const chunksToUse = picked.length > 0 ? picked : chunks.slice(0, 4);
 
-  const label = buildPdfLabel(pdfRow);
+  if (!chunksToUse.length) {
+    return "";
+  }
 
-  const raw = picked
-    .map(
-      (c, i) =>
-        `[${label}] Trecho ${i + 1} (chunk #${c.index}):\n${c.text}`
+  const label = buildGovernancePdfLabel(pdfRow);
+
+  const raw = chunksToUse
+    .map((chunk, index) =>
+      [
+        `[${label}] Trecho ${index + 1} (chunk #${chunk.index}):`,
+        chunk.text,
+      ].join("\n"),
     )
     .join("\n\n---\n\n");
 
   return clampText(raw, maxChars);
 }
 
-async function buildPdfContextFromVector(
-  client: any,
-  pdfRow: PdfFileRow,
-  message: string,
-  maxChars: number
-): Promise<string> {
-  const vectorReady =
-    String(pdfRow.vector_index_status ?? "").toLowerCase() === "ready" &&
-    (pdfRow.vector_chunks_count ?? 0) > 0;
+async function buildGovernancePdfContext({
+  client,
+  userId,
+  selectedPdfFileIds,
+  question,
+}: {
+  client: ReturnType<typeof createWritableSupabaseRouteClient>;
+  userId: string;
+  selectedPdfFileIds: string[];
+  question: string;
+}): Promise<GovernancePdfContextResult> {
+  const uniquePdfFileIds = Array.from(new Set(selectedPdfFileIds))
+    .map((id) => id.trim())
+    .filter((id) => uuidRe.test(id))
+    .slice(0, MAX_SELECTED_PDFS_IN_GOVERNANCE_CHAT);
 
-  if (!vectorReady) return "";
+  if (uniquePdfFileIds.length === 0) {
+    return {
+      selectedPdfFileIds: [],
+      pdfContextText: "",
+      pdfContextAvailable: false,
+      pdfContextWarnings: [],
+    };
+  }
 
-  const qEmb = await getQueryEmbedding(message);
-  if (!qEmb) return "";
+  const warnings: string[] = [];
+  const contextBlocks: string[] = [];
 
-  const { data: matches, error: matchErr } = await client.rpc("match_pdf_chunks", {
-    query_embedding: qEmb,
-    match_count: RAG_TOP_K,
-    filter_pdf_file_id: pdfRow.id,
-  });
-
-  if (matchErr || !Array.isArray(matches) || !matches.length) return "";
-
-  const label = buildPdfLabel(pdfRow);
-
-  const raw = (matches as MatchPdfChunkRow[])
-    .map(
-      (m: MatchPdfChunkRow, i: number) =>
-        `[${label}] Trecho ${i + 1} (chunk #${m.chunk_index}):\n${m.content}`
+  const { data: pdfRows, error: pdfRowsError } = await client
+    .from("pdf_files")
+    .select(
+      `
+        id,
+        file_name,
+        extracted_text,
+        extracted_text_status,
+        vector_index_status,
+        vector_chunks_count
+      `,
     )
-    .join("\n\n---\n\n");
+    .eq("user_id", userId)
+    .in("id", uniquePdfFileIds);
 
-  return clampText(raw, maxChars);
-}
-
-async function resolveSinglePdf(
-  client: any,
-  pdfRow: PdfFileRow,
-  userId: string,
-  message: string,
-  maxCharsForThisPdf: number
-): Promise<PdfResolution> {
-  const extractedStatus = String(pdfRow.extracted_text_status ?? "").toLowerCase();
-  const vectorStatus = String(pdfRow.vector_index_status ?? "").toLowerCase();
-
-  const vectorContext = await buildPdfContextFromVector(
-    client,
-    pdfRow,
-    message,
-    maxCharsForThisPdf
-  );
-  if (vectorContext) {
+  if (pdfRowsError) {
+    console.error("[governance/chat] Erro ao buscar PDFs selecionados:", pdfRowsError);
     return {
-      status: "ready_context",
-      pdfRow,
-      pdfContext: vectorContext,
-      openaiFileId: null,
-      userError: null,
-      ocrSuggested: false,
+      selectedPdfFileIds: uniquePdfFileIds,
+      pdfContextText: "",
+      pdfContextAvailable: false,
+      pdfContextWarnings: ["Não foi possível validar os PDFs selecionados."],
     };
   }
 
-  const extractedContext = await buildPdfContextFromExtractedText(
-    pdfRow,
-    message,
-    maxCharsForThisPdf
-  );
-  if (extractedContext) {
-    return {
-      status: "ready_context",
-      pdfRow,
-      pdfContext: extractedContext,
-      openaiFileId: null,
-      userError: null,
-      ocrSuggested: false,
-    };
-  }
-
-  if (extractedStatus === "pending" || extractedStatus === "processing") {
-    return {
-      status: "processing",
-      pdfRow,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_PROCESSING_MESSAGE,
-      ocrSuggested: false,
-    };
-  }
-
-  if (extractedStatus === "error") {
-    if (isNoTextPdfError(pdfRow.extracted_text_error)) {
-      return {
-        status: "no_text",
-        pdfRow,
-        pdfContext: "",
-        openaiFileId: null,
-        userError: PDF_NO_TEXT_MESSAGE,
-        ocrSuggested: true,
-      };
-    }
-
-    return {
-      status: "error",
-      pdfRow,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_TECHNICAL_MESSAGE,
-      ocrSuggested: false,
-    };
-  }
-
-  if (extractedStatus === "skipped_large") {
-    return {
-      status: "skipped_large",
-      pdfRow,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_LARGE_MESSAGE,
-      ocrSuggested: false,
-    };
-  }
-
-  if (extractedStatus === "ready" && vectorStatus !== "ready") {
-    const sizeMb = (pdfRow.file_size ?? 0) / (1024 * 1024);
-    const allowFullFile = sizeMb > 0 && sizeMb <= MAX_FULL_FILE_FALLBACK_MB;
-
-    if (allowFullFile) {
-      let openaiFileId = pdfRow.openai_file_id ?? null;
-
-      if (!openaiFileId) {
-        const uploadedId = await uploadPdfToOpenAI(client, pdfRow);
-        if (uploadedId) {
-          openaiFileId = uploadedId;
-
-          await client
-            .from("pdf_files")
-            .update({ openai_file_id: uploadedId } as any)
-            .eq("id", pdfRow.id)
-            .eq("user_id", userId);
-        }
-      }
-
-      if (openaiFileId) {
-        return {
-          status: "ready_file",
-          pdfRow,
-          pdfContext: "",
-          openaiFileId,
-          userError: null,
-          ocrSuggested: false,
-        };
-      }
-    }
-  }
-
-  return {
-    status: "error",
-    pdfRow,
-    pdfContext: "",
-    openaiFileId: null,
-    userError: PDF_TECHNICAL_MESSAGE,
-    ocrSuggested: false,
-  };
-}
-
-async function resolvePdfChatState(
-  client: any,
-  pdfRows: PdfFileRow[],
-  userId: string,
-  message: string,
-  activePdfFileId: string | null,
-  maxMultiPdfsInContext: number
-): Promise<PdfChatState> {
-  if (!pdfRows.length) {
-    return {
-      kind: "none",
-      pdfRows: [],
-      pdfContext: "",
-      openaiFileId: null,
-      userError: null,
-      ocrSuggested: false,
-      pdfCount: 0,
-      activePdfFileId: null,
-    };
-  }
-
-  const safeMaxMultiPdfsInContext = Math.max(
-    1,
-    Math.floor(maxMultiPdfsInContext || DEFAULT_MAX_MULTI_PDFS_IN_CONTEXT)
+  const rowsById = new Map(
+    ((pdfRows ?? []) as GovernancePdfFileRow[]).map((row) => [String(row.id), row]),
   );
 
-  const rowsToUse = pdfRows.slice(0, safeMaxMultiPdfsInContext);
   const maxCharsPerPdf = Math.max(
     900,
-    Math.floor(MAX_PDF_CONTEXT_CHARS / Math.max(1, rowsToUse.length))
+    Math.floor(MAX_GOVERNANCE_PDF_CONTEXT_CHARS / Math.max(1, uniquePdfFileIds.length)),
   );
 
-  const resolutions = await Promise.all(
-    rowsToUse.map((pdfRow: PdfFileRow) =>
-      resolveSinglePdf(client, pdfRow, userId, message, maxCharsPerPdf)
-    )
-  );
+  for (const pdfFileId of uniquePdfFileIds) {
+    const pdf = rowsById.get(pdfFileId);
+    const fileName = String(pdf?.file_name ?? "PDF selecionado");
 
-  const readyContexts = resolutions.filter(
-    (item: PdfResolution) => item.status === "ready_context"
-  ) as Array<Extract<PdfResolution, { status: "ready_context" }>>;
+    if (!pdf) {
+      warnings.push(`PDF não encontrado ou sem permissão: ${pdfFileId}.`);
+      continue;
+    }
 
-  if (readyContexts.length > 0) {
-    const combinedContext = clampText(
-      readyContexts
-        .map((item) => item.pdfContext)
-        .filter(Boolean)
-        .join("\n\n====================\n\n"),
-      MAX_PDF_CONTEXT_CHARS
+    const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
+    const vectorStatus = String(pdf.vector_index_status ?? "").toLowerCase();
+
+    const vectorContext = await buildGovernancePdfContextFromVector(
+      client,
+      pdf,
+      question,
+      maxCharsPerPdf,
     );
 
-    return {
-      kind: "ready_context",
-      pdfRows: rowsToUse,
-      pdfContext: combinedContext,
-      openaiFileId: null,
-      userError: null,
-      ocrSuggested: false,
-      pdfCount: rowsToUse.length,
-      activePdfFileId,
-    };
-  }
+    const extractedTextContext = vectorContext
+      ? ""
+      : buildGovernancePdfContextFromExtractedText(pdf, question, maxCharsPerPdf);
 
-  if (rowsToUse.length === 1) {
-    const single = resolutions[0];
+    const contextText = vectorContext || extractedTextContext;
 
-    if (single.status === "ready_file" && single.openaiFileId) {
-      return {
-        kind: "ready_file",
-        pdfRows: [single.pdfRow],
-        pdfContext: "",
-        openaiFileId: single.openaiFileId,
-        userError: null,
-        ocrSuggested: false,
-        pdfCount: 1,
-        activePdfFileId,
-      };
+    if (!contextText) {
+      warnings.push(
+        `Não encontrei trechos disponíveis no PDF "${fileName}". Status de texto: ${extractedStatus || "não informado"}. Status vetorial: ${vectorStatus || "não informado"}.`,
+      );
+      continue;
     }
 
-    if (single.status === "processing") {
-      return {
-        kind: "processing",
-        pdfRows: rowsToUse,
-        pdfContext: "",
-        openaiFileId: null,
-        userError: single.userError,
-        ocrSuggested: false,
-        pdfCount: 1,
-        activePdfFileId,
-      };
-    }
-
-    if (single.status === "no_text") {
-      return {
-        kind: "no_text",
-        pdfRows: rowsToUse,
-        pdfContext: "",
-        openaiFileId: null,
-        userError: single.userError,
-        ocrSuggested: true,
-        pdfCount: 1,
-        activePdfFileId,
-      };
-    }
-
-    if (single.status === "skipped_large") {
-      return {
-        kind: "skipped_large",
-        pdfRows: rowsToUse,
-        pdfContext: "",
-        openaiFileId: null,
-        userError: single.userError,
-        ocrSuggested: false,
-        pdfCount: 1,
-        activePdfFileId,
-      };
-    }
-
-    return {
-      kind: "error",
-      pdfRows: rowsToUse,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_TECHNICAL_MESSAGE,
-      ocrSuggested: false,
-      pdfCount: 1,
-      activePdfFileId,
-    };
+    contextBlocks.push(
+      [
+        `PDF: ${fileName}`,
+        `ID: ${pdfFileId}`,
+        "",
+        contextText,
+      ].join("\n"),
+    );
   }
 
-  if (resolutions.some((item: PdfResolution) => item.status === "processing")) {
-    return {
-      kind: "processing",
-      pdfRows: rowsToUse,
-      pdfContext: "",
-      openaiFileId: null,
-      userError:
-        "Nenhum dos PDFs anexados está pronto para consulta ainda. Aguarde o processamento e tente novamente.",
-      ocrSuggested: false,
-      pdfCount: rowsToUse.length,
-      activePdfFileId,
-    };
-  }
-
-  if (resolutions.every((item: PdfResolution) => item.status === "no_text")) {
-    return {
-      kind: "no_text",
-      pdfRows: rowsToUse,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_NO_TEXT_MESSAGE,
-      ocrSuggested: true,
-      pdfCount: rowsToUse.length,
-      activePdfFileId,
-    };
-  }
-
-  if (resolutions.some((item: PdfResolution) => item.status === "skipped_large")) {
-    return {
-      kind: "skipped_large",
-      pdfRows: rowsToUse,
-      pdfContext: "",
-      openaiFileId: null,
-      userError: PDF_LARGE_MESSAGE,
-      ocrSuggested: false,
-      pdfCount: rowsToUse.length,
-      activePdfFileId,
-    };
-  }
+  const pdfContextText = contextBlocks
+    .join("\n\n---\n\n")
+    .slice(0, MAX_GOVERNANCE_PDF_CONTEXT_CHARS);
 
   return {
-    kind: "error",
-    pdfRows: rowsToUse,
-    pdfContext: "",
-    openaiFileId: null,
-    userError: PDF_TECHNICAL_MESSAGE,
-    ocrSuggested: false,
-    pdfCount: rowsToUse.length,
-    activePdfFileId,
+    selectedPdfFileIds: uniquePdfFileIds,
+    pdfContextText,
+    pdfContextAvailable: pdfContextText.trim().length > 0,
+    pdfContextWarnings: warnings,
   };
 }
 
-async function registerUsageEvent(
-  client: any,
-  params: {
-    userId: string;
-    conversationId: string;
-    eventType: "chat_message" | "pdf_question";
-    inputTokens?: number;
-    outputTokens?: number;
-    metadata?: Record<string, any>;
+
+type InstitutionalDocumentContextRow = {
+  id: string;
+  title: string | null;
+  document_type: string | null;
+  source_url: string | null;
+  storage_bucket: string | null;
+  storage_path: string | null;
+  extracted_text: string | null;
+  indexing_status: string | null;
+  review_status: string | null;
+  indexed_at: string | null;
+  updated_at: string | null;
+};
+
+type GovernanceChatSource = {
+  id: string;
+  title: string;
+  url: string | null;
+  type: string | null;
+};
+
+type GovernanceChatSources = {
+  institutional: GovernanceChatSource[];
+  officialGazette: GovernanceChatSource[];
+  officialSources: GovernanceChatSource[];
+};
+
+type GovernanceChatReferenceKind = "institutional" | "official" | "legal";
+
+type GovernanceChatReference = {
+  title: string;
+  url: string | null;
+  kind: GovernanceChatReferenceKind;
+  sourceId?: string | null;
+  type?: string | null;
+};
+
+function normalizeGovernanceReferenceTitle(value: string | null | undefined) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeGovernanceReferenceUrl(value: string | null | undefined) {
+  const url = String(value ?? "").trim();
+  return url || null;
+}
+
+function inferOfficialReferenceKind(source: GovernanceOfficialSourceForChat): GovernanceChatReferenceKind {
+  const searchable = normalizeOfficialSourceSearchText(
+    [source.name, source.source_type, source.notes, source.url].filter(Boolean).join(" "),
+  );
+
+  if (/legislacao|legislação|lei|leis|atos administrativos|lei organica|lei orgânica/.test(searchable)) {
+    return "legal";
   }
-) {
+
+  return "official";
+}
+
+function dedupeGovernanceReferences(references: GovernanceChatReference[]) {
+  const unique = new Map<string, GovernanceChatReference>();
+
+  for (const reference of references) {
+    const title = normalizeGovernanceReferenceTitle(reference.title);
+    const url = normalizeGovernanceReferenceUrl(reference.url);
+
+    if (!title) {
+      continue;
+    }
+
+    const key = `${reference.kind}::${title.toLowerCase()}::${url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, {
+        ...reference,
+        title,
+        url,
+      });
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+function buildGovernanceChatReferences(params: {
+  institutionalSources: GovernanceChatSource[];
+  officialGazetteReferences: OfficialGazetteReferenceLink[];
+  officialSources: GovernanceOfficialSourceForChat[];
+  prioritizedOfficialSource: PrioritizedOfficialSourceForChat | null;
+  question: string;
+}): GovernanceChatReference[] {
   const {
-    userId,
-    conversationId,
-    eventType,
-    inputTokens = 0,
-    outputTokens = 0,
-    metadata = {},
+    institutionalSources,
+    officialGazetteReferences,
+    officialSources,
+    prioritizedOfficialSource,
+    question,
   } = params;
 
-  const { error } = await client.from("usage_events").insert({
-    user_id: userId,
-    event_type: eventType,
-    conversation_id: conversationId,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    metadata,
+  const references: GovernanceChatReference[] = [];
+
+  for (const source of institutionalSources) {
+    references.push({
+      title: source.title,
+      url: source.url,
+      kind: "institutional",
+      sourceId: source.id,
+      type: source.type,
+    });
+  }
+
+  const mandatoryOfficialSource = resolveMandatoryOfficialSourceForFinalAnswer({
+    sources: officialSources,
+    prioritizedSource: prioritizedOfficialSource,
+    question,
   });
 
+  if (mandatoryOfficialSource) {
+    references.push({
+      title: String(mandatoryOfficialSource.name ?? "Fonte oficial").trim(),
+      url: normalizeGovernanceReferenceUrl(mandatoryOfficialSource.url),
+      kind: inferOfficialReferenceKind(mandatoryOfficialSource),
+      sourceId: mandatoryOfficialSource.id,
+      type: getOfficialSourceTypeLabel(mandatoryOfficialSource.source_type),
+    });
+  }
+
+  for (const referenceLink of officialGazetteReferences) {
+    references.push({
+      title: normalizeGovernanceReferenceTitle(referenceLink.title || referenceLink.label || "Diário Oficial do Município"),
+      url: normalizeGovernanceReferenceUrl(referenceLink.url),
+      kind: "official",
+      sourceId: null,
+      type: "Diário Oficial do Município",
+    });
+  }
+
+  return dedupeGovernanceReferences(references);
+}
+
+type InstitutionalContextResult = {
+  contextText: string;
+  matchedDocumentIds: string[];
+  matchedDocumentTitles: string[];
+  sources: GovernanceChatSource[];
+  warnings: string[];
+};
+
+function isInstitutionalDocumentAvailable(row: InstitutionalDocumentContextRow) {
+  const extractedText = String(row.extracted_text ?? "").trim();
+  if (!extractedText) {
+    return false;
+  }
+
+  const indexingStatus = String(row.indexing_status ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (
+    indexingStatus &&
+    ![
+      "indexed",
+      "indexado",
+      "processed",
+      "completed",
+      "success",
+      "ready",
+    ].includes(indexingStatus)
+  ) {
+    return false;
+  }
+
+  const reviewStatus = String(row.review_status ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (
+    [
+      "inactive",
+      "inativo",
+      "deleted",
+      "excluido",
+      "rejected",
+      "rejeitado",
+    ].includes(reviewStatus)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function getInstitutionalDocumentTypeLabel(value: string | null | undefined) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+
+  const labels: Record<string, string> = {
+    lei: "Lei",
+    lei_organica: "Lei Orgânica",
+    estatuto: "Estatuto",
+    codigo: "Código",
+    plano: "Plano",
+    manual: "Manual",
+    instrucao_normativa: "Instrução Normativa",
+    organograma: "Organograma",
+    portaria: "Portaria",
+    decreto: "Decreto",
+    decreto_consolidado: "Decreto Consolidado",
+    parecer_modelo: "Parecer/modelo",
+    regulamento: "Regulamento",
+    contrato: "Contrato",
+    edital: "Edital",
+    ata: "Ata",
+    outro: "Outro",
+  };
+
+  return labels[normalized] ?? (value ? String(value) : "Documento institucional");
+}
+
+
+function resolveInstitutionalDocumentUrl(
+  client: ReturnType<typeof createWritableSupabaseRouteClient>,
+  document: InstitutionalDocumentContextRow,
+) {
+  const sourceUrl = String(document.source_url ?? "").trim();
+
+  if (sourceUrl) {
+    return sourceUrl;
+  }
+
+  const storageBucket = String(document.storage_bucket ?? "").trim();
+  const storagePath = String(document.storage_path ?? "").trim();
+
+  if (storageBucket && storagePath) {
+    const { data } = client.storage.from(storageBucket).getPublicUrl(storagePath);
+    const publicUrl = String(data?.publicUrl ?? "").trim();
+
+    if (publicUrl) {
+      return publicUrl;
+    }
+  }
+
+  return null;
+}
+
+function buildInstitutionalSource(
+  client: ReturnType<typeof createWritableSupabaseRouteClient>,
+  document: InstitutionalDocumentContextRow,
+): GovernanceChatSource {
+  const title =
+    String(document.title ?? "").trim() ||
+    "Documento institucional sem título";
+
+  return {
+    id: document.id,
+    title,
+    url: resolveInstitutionalDocumentUrl(client, document),
+    type: getInstitutionalDocumentTypeLabel(document.document_type),
+  };
+}
+
+
+const INSTITUTIONAL_STOP_WORDS = new Set([
+  "a",
+  "as",
+  "o",
+  "os",
+  "e",
+  "em",
+  "de",
+  "da",
+  "das",
+  "do",
+  "dos",
+  "para",
+  "por",
+  "com",
+  "sem",
+  "sobre",
+  "qual",
+  "quais",
+  "onde",
+  "posso",
+  "pode",
+  "tem",
+  "possui",
+  "existe",
+  "existem",
+  "municipio",
+  "municipal",
+  "municipais",
+  "prefeitura",
+  "santana",
+  "itarare",
+  "pr",
+  "publicado",
+  "publicada",
+  "consultar",
+  "encontrar",
+  "localizar",
+]);
+
+function normalizeInstitutionalSearchText(value: string | null | undefined) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getInstitutionalSearchTokens(value: string) {
+  return normalizeInstitutionalSearchText(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !INSTITUTIONAL_STOP_WORDS.has(token));
+}
+
+function getInstitutionalQueryPhrases(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+  const phrases: string[] = [];
+
+  const phraseRules = [
+    "ata de posse",
+    "gestao 2025 2028",
+    "plano diretor",
+    "lei organica",
+    "codigo tributario",
+    "sistema tributario",
+    "estatuto dos servidores",
+    "estatuto servidor",
+    "servidores municipais",
+    "portal transparencia",
+    "diario oficial",
+    "fontes oficiais",
+  ];
+
+  for (const phrase of phraseRules) {
+    if (q.includes(phrase)) {
+      phrases.push(phrase);
+    }
+  }
+
+  return phrases;
+}
+
+function scoreInstitutionalDocumentForQuestion(
+  document: InstitutionalDocumentContextRow,
+  question: string,
+) {
+  const q = normalizeInstitutionalSearchText(question);
+  const title = normalizeInstitutionalSearchText(document.title);
+  const type = normalizeInstitutionalSearchText(document.document_type);
+  const text = normalizeInstitutionalSearchText(
+    String(document.extracted_text ?? "").slice(0, 30000),
+  );
+
+  if (!q || !title) {
+    return 0;
+  }
+
+  let score = 0;
+  const queryTokens = getInstitutionalSearchTokens(question);
+  const titleTokens = new Set(getInstitutionalSearchTokens(title));
+  const phrases = getInstitutionalQueryPhrases(question);
+
+  if (q.length >= 6 && (title.includes(q) || q.includes(title))) {
+    score += 180;
+  }
+
+  for (const phrase of phrases) {
+    if (title.includes(phrase)) {
+      score += 170;
+    }
+
+    if (type.includes(phrase)) {
+      score += 60;
+    }
+
+    if (text.includes(phrase)) {
+      score += 18;
+    }
+  }
+
+  for (const token of queryTokens) {
+    if (titleTokens.has(token) || title.includes(token)) {
+      score += 28;
+    } else if (type.includes(token)) {
+      score += 12;
+    } else if (text.includes(token)) {
+      score += 3;
+    }
+  }
+
+  const matchedTitleTokens = queryTokens.filter(
+    (token) => titleTokens.has(token) || title.includes(token),
+  );
+
+  if (queryTokens.length >= 2 && matchedTitleTokens.length >= 2) {
+    score += 70;
+  }
+
+  if (queryTokens.length >= 3 && matchedTitleTokens.length >= queryTokens.length - 1) {
+    score += 60;
+  }
+
+  if (/\bata\b/.test(q) && title.includes("ata")) {
+    score += 90;
+  }
+
+  if (/\bposse\b/.test(q) && title.includes("posse")) {
+    score += 90;
+  }
+
+  if (/\bplano\b/.test(q) && /\bdiretor\b/.test(q) && title.includes("plano") && title.includes("diretor")) {
+    score += 130;
+  }
+
+  if (/\bestatuto\b/.test(q) && title.includes("estatuto")) {
+    score += 120;
+  }
+
+  if (/\blei\b/.test(q) && /\borganica\b/.test(q) && title.includes("lei") && title.includes("organica")) {
+    score += 130;
+  }
+
+  if (/\bcodigo\b/.test(q) && /\btributario\b/.test(q) && title.includes("codigo") && title.includes("tributario")) {
+    score += 130;
+  }
+
+  return score;
+}
+
+function selectRelevantInstitutionalDocuments(
+  rows: InstitutionalDocumentContextRow[],
+  question: string,
+) {
+  const ranked = rows
+    .map((document) => ({
+      document,
+      score: scoreInstitutionalDocumentForQuestion(document, question),
+    }))
+    .filter((item) => item.score >= 28)
+    .sort((a, b) => b.score - a.score);
+
+  if (ranked.length === 0) {
+    return [];
+  }
+
+  const topScore = ranked[0]?.score ?? 0;
+  const minScore = Math.max(28, topScore >= 120 ? topScore * 0.5 : 28);
+  const maxDocuments = topScore >= 120 ? 2 : 3;
+
+  return ranked
+    .filter((item) => item.score >= minScore)
+    .slice(0, maxDocuments);
+}
+
+
+async function buildInstitutionalDocumentsContext(params: {
+  client: ReturnType<typeof createWritableSupabaseRouteClient>;
+  organizationId: string;
+  question: string;
+}): Promise<InstitutionalContextResult> {
+  const { client, organizationId, question } = params;
+
+  const { data, error } = await client
+    .from("institutional_documents")
+    .select(
+      `
+        id,
+        title,
+        document_type,
+        source_url,
+        storage_bucket,
+        storage_path,
+        extracted_text,
+        indexing_status,
+        review_status,
+        indexed_at,
+        updated_at
+      `,
+    )
+    .eq("organization_id", organizationId)
+    .not("extracted_text", "is", null)
+    .order("updated_at", { ascending: false })
+    .limit(MAX_INSTITUTIONAL_DOCUMENTS);
+
   if (error) {
-    console.error("[/api/chat] erro ao registrar usage_events", error);
+    console.warn(
+      "[governance/chat] Não foi possível carregar Base Institucional:",
+      error,
+    );
+
+    return {
+      contextText: "",
+      matchedDocumentIds: [],
+      matchedDocumentTitles: [],
+      sources: [],
+      warnings: ["Não foi possível consultar a Base Institucional."],
+    };
+  }
+
+  const rows = ((data ?? []) as InstitutionalDocumentContextRow[]).filter(
+    isInstitutionalDocumentAvailable,
+  );
+
+  const candidateDocuments = selectRelevantInstitutionalDocuments(rows, question);
+
+  if (candidateDocuments.length === 0) {
+    return {
+      contextText: "",
+      matchedDocumentIds: [],
+      matchedDocumentTitles: [],
+      sources: [],
+      warnings: [],
+    };
+  }
+
+  const selected: Array<{
+    document: InstitutionalDocumentContextRow;
+    documentScore: number;
+    chunkIndex: number;
+    text: string;
+  }> = [];
+
+  for (const candidate of candidateDocuments) {
+    const document = candidate.document;
+    const text = normalizePdfText(document.extracted_text ?? "");
+
+    if (!text) {
+      continue;
+    }
+
+    const chunks = chunkText(text, {
+      chunkSize: 1400,
+      overlap: 180,
+      maxChunks: 250,
+    });
+
+    const relevantChunks = pickRelevantChunks(chunks, question, {
+      maxChunks: candidate.score >= 120 ? 3 : 2,
+      maxChars: candidate.score >= 120 ? 4500 : 3000,
+      minScore: candidate.score >= 120 ? 0 : 1,
+    });
+
+    const chunksToUse =
+      relevantChunks.length > 0
+        ? relevantChunks
+        : candidate.score >= 120
+          ? chunks.slice(0, 2).map((chunk) => ({
+              index: chunk.index,
+              text: chunk.text,
+              score: candidate.score,
+            }))
+          : [];
+
+    for (const chunk of chunksToUse) {
+      selected.push({
+        document,
+        documentScore: candidate.score,
+        chunkIndex: chunk.index,
+        text: clampText(chunk.text, 1800),
+      });
+    }
+
+    if (selected.length >= MAX_INSTITUTIONAL_SELECTED_CHUNKS) {
+      break;
+    }
+  }
+
+  if (selected.length === 0) {
+    return {
+      contextText: "",
+      matchedDocumentIds: [],
+      matchedDocumentTitles: [],
+      sources: [],
+      warnings: [],
+    };
+  }
+
+  const selectedDocumentsById = new Map<string, InstitutionalDocumentContextRow>();
+
+  for (const item of selected) {
+    if (!selectedDocumentsById.has(item.document.id)) {
+      selectedDocumentsById.set(item.document.id, item.document);
+    }
+  }
+
+  const matchedDocumentIds = Array.from(selectedDocumentsById.keys());
+
+  const matchedDocumentTitles = Array.from(selectedDocumentsById.values()).map(
+    (document) =>
+      String(document.title ?? "").trim() ||
+      "Documento institucional sem título",
+  );
+
+  const sources = Array.from(selectedDocumentsById.values()).map((document) =>
+    buildInstitutionalSource(client, document),
+  );
+
+  let usedChars = 0;
+  const blocks: string[] = [];
+
+  for (const [index, item] of selected.entries()) {
+    const title =
+      String(item.document.title ?? "").trim() ||
+      "Documento institucional sem título";
+
+    const documentTypeLabel = getInstitutionalDocumentTypeLabel(
+      item.document.document_type,
+    );
+
+    const sourceUrl = String(item.document.source_url ?? "").trim();
+
+    const block = [
+      `[Base Institucional - Trecho ${index + 1}]`,
+      `Documento: ${title}`,
+      `Tipo: ${documentTypeLabel}`,
+      `Relevância interna: ${item.documentScore}`,
+      `document_id: ${item.document.id}`,
+      `chunk_index: ${item.chunkIndex}`,
+      sourceUrl ? `Link da fonte: ${sourceUrl}` : "",
+      "",
+      item.text,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    if (usedChars + block.length > MAX_INSTITUTIONAL_CONTEXT_CHARS) {
+      break;
+    }
+
+    blocks.push(block);
+    usedChars += block.length;
+  }
+
+  if (blocks.length === 0) {
+    return {
+      contextText: "",
+      matchedDocumentIds,
+      matchedDocumentTitles,
+      sources,
+      warnings: [],
+    };
+  }
+
+  const contextText = [
+    "BASE INSTITUCIONAL DA ORGANIZAÇÃO",
+    "",
+    "Prioridade máxima: use estes trechos antes do Diário Oficial, das Fontes Oficiais e do conhecimento geral.",
+    "Regra anti-alucinação: quando estes trechos trouxerem nomes, datas, cargos, mandatos, números ou fatos, use somente o que estiver nos trechos recuperados.",
+    "Use somente os documentos institucionais listados nos trechos abaixo para responder sobre Base Institucional.",
+    "Quando responder com base nestes trechos, mencione o documento institucional utilizado pelo título, sem criar link manual no corpo da resposta.",
+    "Não inclua seção 'Base institucional' no texto da resposta; o sistema exibirá essa fonte de forma estruturada e clicável abaixo da resposta.",
+    "Não crie seções de referências. Não escreva Base Legal, Referências Oficiais ou Base Institucional como blocos separados; o sistema consolidará tudo em \"Base legal e documentos consultados\".",
+    "Não escreva frases como 'Não houve consulta web nesta resposta'. Se não houver referência oficial específica, simplesmente omita essa observação.",
+    "Não invente conteúdo ausente. Se os trechos forem insuficientes, diga que a Base Institucional não trouxe informação suficiente.",
+    "",
+    ...blocks,
+  ].join("\n");
+
+  return {
+    contextText,
+    matchedDocumentIds,
+    matchedDocumentTitles,
+    sources,
+    warnings: [],
+  };
+}
+
+
+function normalizeContent(content: string) {
+  return content.trim().slice(0, MAX_USER_MESSAGE_LENGTH);
+}
+
+
+function normalizeAdministrativeText(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function isObjectiveAdministrativeQuestion(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  if (!q.trim()) {
+    return false;
+  }
+
+  const asksObjectiveData =
+    /\b(qual|quais|quanto|quantos|quando|prazo|valor|limite|teto|percentual|porcentagem|requisito|documento|documentos|competencia|competência)\b/.test(q);
+
+  const hasAdministrativeTheme =
+    /\b(dispensa|licitacao|licitação|contrato|contratacao|contratação|ata|carona|reajuste|repactuacao|repactuação|sancao|sanção|lrf|prudencial|pessoal|irrf|tributo|tributario|tributário|contabil|contábil|orcamentaria|orçamentária|estagio|estágio|diaria|diária|empenho|liquidacao|liquidação|pagamento|lei|decreto|portaria|municipio|município|executivo|legislativo)\b/.test(q);
+
+  return asksObjectiveData && hasAdministrativeTheme;
+}
+
+
+type ConversationRelation =
+  | "INICIAL"
+  | "CONTINUA"
+  | "CONTINUA_COMPLEMENTAR"
+  | "RELACIONA"
+  | "ROMPE";
+
+const GOVERNANCE_CONTEXT_DOMAINS: Record<string, RegExp> = {
+  fiscal_arrecadacao:
+    /\b(arrecadacao|arrecadação|receita|tributo|tributario|tributária|imposto|iptu|iss|itbi|taxa|taxas|divida ativa|dívida ativa|contribuinte|cadastro imobiliario|cadastro imobiliário|cadastro mobiliario|cadastro mobiliário|cobranca|cobrança|inadimplencia|inadimplência|refis|pgv|planta generica|planta genérica|inteligencia de dados|inteligência de dados|dados fiscais|gestao fiscal|gestão fiscal)\b/,
+  transparencia:
+    /\b(transparencia|transparência|portal da transparencia|portal da transparência|lai|lei de acesso|acesso a informacao|acesso à informação|contas publicas|contas públicas|sic|e-sic|controle social|audiencia publica|audiência pública|dados abertos)\b/,
+  contratacoes:
+    /\b(licitacao|licitação|licitacoes|licitações|contratacao|contratação|contratacoes|contratações|contrato|contratos|pca|plano de contratacoes|plano de contratações|etp|estudo tecnico preliminar|estudo técnico preliminar|termo de referencia|termo de referência|tr|matriz de riscos|dispensa|inexigibilidade|pregao|pregão|ata de registro|carona|reajuste|repactuacao|repactuação)\b/,
+  pessoal_rh:
+    /\b(servidor|servidores|ferias|férias|decimo terceiro|décimo terceiro|13o|13º|folha|remuneracao|remuneração|vencimento|cargo|concurso|admissao|admissão|contratacao temporaria|contratação temporária|estatutario|estatutário|rh|recursos humanos)\b/,
+  lrf_pessoal:
+    /\b(lrf|lei de responsabilidade fiscal|limite prudencial|limite maximo|limite máximo|despesa com pessoal|rcl|receita corrente liquida|receita corrente líquida|gasto com pessoal)\b/,
+  contabilidade:
+    /\b(contabilidade|contabil|contábil|orcamento|orçamento|orcamentaria|orçamentária|empenho|liquidacao|liquidação|pagamento|dotacao|dotação|gnd|elemento de despesa|restos a pagar|balanco|balanço)\b/,
+  controle_interno:
+    /\b(controle interno|auditoria|conformidade|governanca|governança|risco|riscos|responsabilizacao|responsabilização|tce|tribunal de contas|ministerio publico|ministério público)\b/,
+  urbanismo:
+    /\b(plano diretor|zoneamento|uso do solo|parcelamento do solo|mobilidade urbana|cidade|urbanismo|habite-se|alvara de construcao|alvará de construção|obra particular)\b/,
+  lgpd:
+    /\b(lgpd|dados pessoais|proteção de dados|protecao de dados|encarregado de dados|dpo|privacidade)\b/,
+};
+
+const RELATED_CONTEXT_DOMAIN_PAIRS = new Set([
+  "fiscal_arrecadacao::transparencia",
+  "transparencia::fiscal_arrecadacao",
+  "fiscal_arrecadacao::contabilidade",
+  "contabilidade::fiscal_arrecadacao",
+  "fiscal_arrecadacao::controle_interno",
+  "controle_interno::fiscal_arrecadacao",
+  "transparencia::controle_interno",
+  "controle_interno::transparencia",
+  "transparencia::contratacoes",
+  "contratacoes::transparencia",
+  "contratacoes::controle_interno",
+  "controle_interno::contratacoes",
+  "contratacoes::contabilidade",
+  "contabilidade::contratacoes",
+  "pessoal_rh::lrf_pessoal",
+  "lrf_pessoal::pessoal_rh",
+  "lrf_pessoal::contabilidade",
+  "contabilidade::lrf_pessoal",
+]);
+
+function detectGovernanceContextDomains(text: string) {
+  const normalized = normalizeAdministrativeText(text);
+  const domains: string[] = [];
+
+  for (const [domain, pattern] of Object.entries(GOVERNANCE_CONTEXT_DOMAINS)) {
+    if (pattern.test(normalized)) {
+      domains.push(domain);
+    }
+  }
+
+  return domains;
+}
+
+function hasExplicitContinuationCue(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  return /\b(para isso|sobre isso|nesse caso|neste caso|nesse contexto|neste contexto|com base nisso|diante disso|a partir disso|essas medidas|essas acoes|essas ações|isso|esse tema|essa situacao|essa situação|e como|e quais|e qual|qual a diferenca|qual a diferença|quais medidas|proximo passo|próximo passo|como mensurar|como acompanhar|como implementar)\b/.test(q);
+}
+
+function isComplementaryContinuationQuestion(userText: string) {
+  const q = normalizeAdministrativeText(userText);
+
+  if (!q.trim()) {
+    return false;
+  }
+
+  const asksMeasurementOrFollowUp =
+    /\b(como medir|como mensurar|como acompanhar|como monitorar|como avaliar|como verificar|como controlar|como saber se|como demonstrar|como comprovar|quais indicadores|quais metricas|quais métricas|quais kpis|indicadores|metricas|métricas|resultados|metas|painel|dashboard|relatorio|relatório)\b/.test(q);
+
+  const refersToPreviousActions =
+    /\b(essas medidas|essas acoes|essas ações|esses pontos|essas providencias|essas providências|isso|desse plano|deste plano|da estrategia|da estratégia|do que foi dito|do que foi discutido|na pratica|na prática)\b/.test(q);
+
+  return asksMeasurementOrFollowUp || refersToPreviousActions;
+}
+
+function classifyConversationRelation(params: {
+  previousUserQuestion: string;
+  currentUserQuestion: string;
+}): ConversationRelation {
+  const previous = params.previousUserQuestion.trim();
+  const current = params.currentUserQuestion.trim();
+
+  if (!previous) {
+    return "INICIAL";
+  }
+
+  const isComplementary = isComplementaryContinuationQuestion(current);
+
+  if (hasExplicitContinuationCue(current)) {
+    return isComplementary ? "CONTINUA_COMPLEMENTAR" : "CONTINUA";
+  }
+
+  const previousDomains = detectGovernanceContextDomains(previous);
+  const currentDomains = detectGovernanceContextDomains(current);
+
+  if (previousDomains.length === 0 || currentDomains.length === 0) {
+    return "ROMPE";
+  }
+
+  const previousDomainSet = new Set(previousDomains);
+
+  if (currentDomains.some((domain) => previousDomainSet.has(domain))) {
+    return isComplementary ? "CONTINUA_COMPLEMENTAR" : "CONTINUA";
+  }
+
+  const hasRelatedDomain = previousDomains.some((previousDomain) =>
+    currentDomains.some((currentDomain) =>
+      RELATED_CONTEXT_DOMAIN_PAIRS.has(`${previousDomain}::${currentDomain}`),
+    ),
+  );
+
+  return hasRelatedDomain ? "RELACIONA" : "ROMPE";
+}
+
+function getPreviousUserQuestion(
+  history: GovernanceMessage[],
+  currentUserMessageId: string,
+) {
+  return [...history]
+    .reverse()
+    .find(
+      (message) =>
+        message.role === "user" &&
+        message.id !== currentUserMessageId &&
+        String(message.content ?? "").trim().length > 0,
+    )?.content ?? "";
+}
+
+function buildConversationRelationInstruction(params: {
+  relation: ConversationRelation;
+  previousUserQuestion: string;
+  currentUserQuestion: string;
+}) {
+  const previousQuestion = clampText(params.previousUserQuestion, 600);
+  const currentQuestion = clampText(params.currentUserQuestion, 600);
+
+  const base = [
+    "CLASSIFICAÇÃO DA RELAÇÃO ENTRE PERGUNTAS",
+    "",
+    `Resultado: ${params.relation}.`,
+    previousQuestion ? `Pergunta anterior do usuário: ${previousQuestion}` : "Pergunta anterior do usuário: não identificada.",
+    `Pergunta atual do usuário: ${currentQuestion}`,
+    "",
+    "A pergunta atual continua sendo a prioridade absoluta da resposta.",
+    "Use esta classificação para controlar continuidade, repetição e tamanho da resposta.",
+    "",
+  ];
+
+  if (params.relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      ...base,
+      "REGRA PARA CONTINUIDADE COMPLEMENTAR",
+      "- A pergunta atual é um complemento do tema anterior, geralmente pedindo medição, acompanhamento, indicadores, metas, verificação ou próximos controles.",
+      "- Responda apenas ao aspecto específico perguntado agora.",
+      "- Não redefina conceitos já explicados.",
+      "- Não reapresente contexto amplo.",
+      "- Não recrie listas gerais já apresentadas em respostas anteriores.",
+      "- Não escreva uma nova consultoria completa.",
+      "- Comece diretamente com a resposta prática.",
+      "- A resposta deve ser muito mais curta que a resposta principal do tema.",
+      "- Não ultrapasse 180 palavras, salvo pedido expresso do usuário.",
+      "- Use no máximo 6 itens principais.",
+      "- Se a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente no início.",
+      "- Não inclua Base legal ou Referências oficiais nesse tipo de follow-up, salvo pedido expresso ou risco jurídico direto.",
+      "- Feche com uma orientação prática de aplicação para o gestor em uma única frase.",
+    ].join("\n");
+  }
+
+  if (params.relation === "CONTINUA") {
+    return [
+      ...base,
+      "REGRA PARA CONTINUIDADE FORTE",
+      "- A pergunta atual aprofunda ou desdobra o tema anterior.",
+      "- Não redefina conceitos já explicados, salvo se for indispensável em uma frase curta.",
+      "- Não repita listas gerais, fundamentos amplos ou blocos já apresentados.",
+      "- Comece conectando em no máximo 1 frase e avance para o próximo passo prático.",
+      "- A resposta deve ser mais complementar e mais enxuta que uma resposta inicial.",
+      "- Foque no novo recorte pedido pelo usuário.",
+    ].join("\n");
+  }
+
+  if (params.relation === "RELACIONA") {
+    return [
+      ...base,
+      "REGRA PARA TEMA RELACIONADO",
+      "- A pergunta atual tem relação com a trajetória da conversa, mas não é o mesmo tema.",
+      "- Faça uma ponte curta, de no máximo 1 frase, se isso ajudar.",
+      "- Depois responda o novo foco normalmente.",
+      "- Não recapitule os temas anteriores.",
+      "- Não transforme a resposta em plano integrado salvo pedido expresso do usuário.",
+    ].join("\n");
+  }
+
+  if (params.relation === "ROMPE") {
+    return [
+      ...base,
+      "REGRA PARA RUPTURA DE TEMA",
+      "- A pergunta atual iniciou um novo assunto.",
+      "- Não mencione, não recapitule e não responda temas anteriores.",
+      "- Ignore a trajetória anterior, salvo se o usuário pedir comparação ou relação expressamente.",
+      "- Responda exclusivamente ao novo assunto.",
+    ].join("\n");
+  }
+
+  return [
+    ...base,
+    "REGRA PARA PRIMEIRA PERGUNTA OU CONTEXTO INICIAL",
+    "- Responda normalmente, sem tentar conectar com histórico inexistente.",
+  ].join("\n");
+}
+
+function buildForcedExecutiveFollowUpInstruction(params: {
+  relation: ConversationRelation;
+  mode: GovernanceResponseMode;
+}) {
+  if (params.mode !== "objective" || params.relation !== "CONTINUA_COMPLEMENTAR") {
+    return "";
+  }
+
+  return [
+    "PRIORIDADE MÁXIMA — FOLLOW-UP EXECUTIVO",
+    "",
+    "Esta instrução prevalece sobre o estilo consultivo padrão do Governança.",
+    "A pergunta atual é complementar. Portanto, responda como acompanhamento executivo, não como nova explicação completa.",
+    "",
+    "FORMATO OBRIGATÓRIO DA RESPOSTA:",
+    "",
+    "Resposta direta:",
+    "[uma frase curta]",
+    "",
+    "Indicadores/Métricas principais:",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "- [item objetivo]",
+    "",
+    "Como acompanhar:",
+    "- [ação objetiva]",
+    "- [ação objetiva]",
+    "",
+    "PROIBIDO NESTE CASO:",
+    "- abrir com contextualização ampla;",
+    "- repetir conceitos já explicados;",
+    "- criar seções novas além das três acima;",
+    "- escrever como artigo, parecer, plano completo ou mini consultoria;",
+    "- incluir Base legal ou Referências oficiais, salvo pedido expresso ou risco jurídico direto;",
+    "- ultrapassar 180 palavras.",
+  ].join("\n");
+}
+
+
+function isDefaultConversationTitle(title: string | null | undefined) {
+  const normalized = String(title ?? "").trim().toLowerCase();
+
+  return (
+    normalized === "" ||
+    normalized === "nova conversa" ||
+    normalized === "nova conversa institucional"
+  );
+}
+
+function buildConversationTitleFromMessage(content: string) {
+  const clean = String(content ?? "")
+    .split("\nPDFs selecionados para esta pergunta:")[0]
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean) {
+    return "Conversa";
+  }
+
+  if (clean.length <= 54) {
+    return clean;
+  }
+
+  return `${clean.slice(0, 54).trim()}...`;
+}
+
+async function updateConversationTitleFromMessage(params: {
+  supabase: ReturnType<typeof createWritableSupabaseRouteClient>;
+  conversation: GovernanceConversationForChat;
+  organizationId: string;
+  content: string;
+}) {
+  const { supabase, conversation, organizationId, content } = params;
+
+  if (!isDefaultConversationTitle(conversation.title)) {
+    return conversation.title;
+  }
+
+  // O título da conversa deve nascer da PRIMEIRA mensagem do usuário.
+  // Mesmo que a conversa ainda esteja com título padrão após várias mensagens,
+  // evitamos usar a pergunta atual, pois isso faria o histórico mudar para a última.
+  const { data: firstUserMessage, error: firstUserMessageError } = await supabase
+    .from("governance_messages")
+    .select("content")
+    .eq("conversation_id", conversation.id)
+    .eq("organization_id", organizationId)
+    .eq("role", "user")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle<{ content: string | null }>();
+
+  if (firstUserMessageError) {
+    console.warn(
+      "[governance/chat] Não foi possível buscar a primeira mensagem para compor o título:",
+      firstUserMessageError,
+    );
+  }
+
+  const titleSource =
+    typeof firstUserMessage?.content === "string" &&
+    firstUserMessage.content.trim().length > 0
+      ? firstUserMessage.content
+      : content;
+
+  const nextTitle = buildConversationTitleFromMessage(titleSource);
+
+  const { error } = await supabase
+    .from("governance_conversations")
+    .update({
+      title: nextTitle,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", conversation.id)
+    .eq("organization_id", organizationId);
+
+  if (error) {
+    console.warn(
+      "[governance/chat] Mensagem salva, mas não foi possível atualizar o título da conversa:",
+      error,
+    );
+
+    return conversation.title;
+  }
+
+  conversation.title = nextTitle;
+
+  return nextTitle;
+}
+
+
+type OfficialGazetteContextChunkRow = {
+  document_id: string;
+  organization_id: string;
+  page_number: number | null;
+  section_type: string | null;
+  title: string | null;
+  content: string | null;
+  governance_official_gazette_documents?:
+    | {
+        edition_number?: number | null;
+        publication_date?: string | null;
+        public_url?: string | null;
+        pdf_url?: string | null;
+        source_page_url?: string | null;
+      }
+    | {
+        edition_number?: number | null;
+        publication_date?: string | null;
+        public_url?: string | null;
+        pdf_url?: string | null;
+        source_page_url?: string | null;
+      }[];
+};
+
+type OfficialGazetteReferenceLink = {
+  label: string;
+  url: string;
+  title: string;
+  editionNumber: number | null;
+  publicationDate: string | null;
+};
+
+type OfficialGazetteContextResult = {
+  contextText: string;
+  chunksUsed: number;
+  totalChunksRead: number;
+  enabled: boolean;
+  referenceLinks: OfficialGazetteReferenceLink[];
+};
+
+const OFFICIAL_GAZETTE_TRIGGER_WORDS = [
+  "diario oficial",
+  "diário oficial",
+  "ato",
+  "atos",
+  "decreto",
+  "portaria",
+  "resolucao",
+  "resolução",
+  "dispensa",
+  "licitacao",
+  "licitação",
+  "inexigibilidade",
+  "edital",
+  "lei",
+  "extrato",
+  "contrato",
+  "publicado",
+  "publicada",
+  "publicadas",
+  "publicados",
+  "suplementacao",
+  "suplementação",
+];
+
+const OFFICIAL_GAZETTE_STOPWORDS = new Set([
+  "sobre",
+  "para",
+  "com",
+  "sem",
+  "que",
+  "qual",
+  "quais",
+  "quando",
+  "quanto",
+  "quantas",
+  "quantos",
+  "houve",
+  "existe",
+  "existem",
+  "foram",
+  "publicada",
+  "publicadas",
+  "publicado",
+  "publicados",
+  "diario",
+  "diário",
+  "oficial",
+  "atos",
+  "ato",
+  "tem",
+  "das",
+  "dos",
+  "uma",
+  "uns",
+  "por",
+  "entre",
+  "este",
+  "esta",
+  "esse",
+  "essa",
+  "municipio",
+  "município",
+]);
+
+function normalizeOfficialGazetteSearchText(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9/.-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shouldUseOfficialGazetteContext(question: string) {
+  const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+
+  return OFFICIAL_GAZETTE_TRIGGER_WORDS.some((word) =>
+    normalizedQuestion.includes(normalizeOfficialGazetteSearchText(word)),
+  );
+}
+
+function extractOfficialGazetteSearchTerms(question: string) {
+  const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+
+  const terms = normalizedQuestion
+    .split(" ")
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4)
+    .filter((term) => !OFFICIAL_GAZETTE_STOPWORDS.has(term));
+
+  const mappedTerms: string[] = [];
+
+  if (normalizedQuestion.includes("decreto")) mappedTerms.push("decreto");
+  if (normalizedQuestion.includes("portaria")) mappedTerms.push("portaria");
+  if (normalizedQuestion.includes("resolucao")) mappedTerms.push("resolucao");
+  if (normalizedQuestion.includes("dispensa")) mappedTerms.push("dispensa", "licitacao");
+  if (normalizedQuestion.includes("licitacao")) mappedTerms.push("licitacao");
+  if (normalizedQuestion.includes("suplementacao")) mappedTerms.push("suplementacao", "credito", "orcamento");
+  if (normalizedQuestion.includes("junho")) mappedTerms.push("junho", "06/");
+
+  return Array.from(new Set([...mappedTerms, ...terms])).slice(0, 20);
+}
+
+function extractOfficialGazetteEditionNumber(question: string) {
+  const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+
+  const editionMatch =
+    normalizedQuestion.match(/\bedicao\s+(?:do\s+diario\s+oficial\s+)?(\d{1,8})\b/i) ??
+    normalizedQuestion.match(/\bdiario\s+oficial\s+(?:n\s*)?(\d{1,8})\b/i) ??
+    normalizedQuestion.match(/\bdiario\s+(?:n\s*)?(\d{1,8})\b/i);
+
+  if (!editionMatch?.[1]) {
+    return null;
+  }
+
+  const editionNumber = Number(editionMatch[1]);
+
+  return Number.isFinite(editionNumber) ? editionNumber : null;
+}
+
+function normalizeOfficialGazetteDateFromQuestion(question: string) {
+  const text = String(question ?? "");
+
+  const brDateMatch = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b/);
+
+  if (brDateMatch) {
+    const day = brDateMatch[1].padStart(2, "0");
+    const month = brDateMatch[2].padStart(2, "0");
+    const year = brDateMatch[3];
+
+    return `${year}-${month}-${day}`;
+  }
+
+  const isoDateMatch = text.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+
+  if (isoDateMatch) {
+    const year = isoDateMatch[1];
+    const month = isoDateMatch[2].padStart(2, "0");
+    const day = isoDateMatch[3].padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  }
+
+  return null;
+}
+
+function isOfficialGazetteCompleteListIntent(question: string) {
+  const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+
+  const mentionsGazette =
+    normalizedQuestion.includes("diario") ||
+    normalizedQuestion.includes("edicao") ||
+    normalizedQuestion.includes("publicacao") ||
+    normalizedQuestion.includes("publicacoes") ||
+    normalizedQuestion.includes("atos") ||
+    normalizedQuestion.includes("ato");
+
+  const asksCount =
+    /\b(quantos|quantas|quantidade|total|numero|número)\b/i.test(normalizedQuestion) &&
+    /\b(atos|ato|publicacoes|publicacao|publicados|publicadas)\b/i.test(normalizedQuestion);
+
+  const asksList =
+    /\b(liste|listar|lista|mostre|mostrar|relacione|descreva|descrever|quais)\b/i.test(
+      normalizedQuestion,
+    ) &&
+    /\b(atos|ato|publicacoes|publicacao|publicados|publicadas)\b/i.test(normalizedQuestion);
+
+  return mentionsGazette && (asksCount || asksList || normalizedQuestion.includes("todos os atos"));
+}
+
+function compareOfficialGazetteRows(a: OfficialGazetteContextChunkRow, b: OfficialGazetteContextChunkRow) {
+  const aPage = typeof a.page_number === "number" ? a.page_number : Number.MAX_SAFE_INTEGER;
+  const bPage = typeof b.page_number === "number" ? b.page_number : Number.MAX_SAFE_INTEGER;
+
+  if (aPage !== bPage) {
+    return aPage - bPage;
+  }
+
+  return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function getOfficialGazetteDocumentSortValue(rows: OfficialGazetteContextChunkRow[]) {
+  const firstRow = rows[0];
+
+  if (!firstRow) {
+    return 0;
+  }
+
+  const { editionNumber, publicationDate } = getOfficialGazetteDocumentMetadata(firstRow);
+  const publicationTime = publicationDate ? Date.parse(`${publicationDate}T00:00:00Z`) : 0;
+  const safePublicationTime = Number.isFinite(publicationTime) ? publicationTime : 0;
+
+  return safePublicationTime + Number(editionNumber ?? 0);
+}
+
+function selectCompleteOfficialGazetteRowsForQuestion(
+  rows: OfficialGazetteContextChunkRow[],
+  question: string,
+) {
+  const editionNumber = extractOfficialGazetteEditionNumber(question);
+  const publicationDate = normalizeOfficialGazetteDateFromQuestion(question);
+  const completeListIntent = isOfficialGazetteCompleteListIntent(question);
+
+  if (!editionNumber && !publicationDate && !completeListIntent) {
+    return null;
+  }
+
+  const rowsByDocumentId = new Map<string, OfficialGazetteContextChunkRow[]>();
+
+  for (const row of rows) {
+    const documentRows = rowsByDocumentId.get(row.document_id) ?? [];
+
+    documentRows.push(row);
+    rowsByDocumentId.set(row.document_id, documentRows);
+  }
+
+  const documentGroups = Array.from(rowsByDocumentId.values()).map((documentRows) =>
+    [...documentRows].sort(compareOfficialGazetteRows),
+  );
+
+  const matchedGroups = documentGroups.filter((documentRows) => {
+    const metadata = getOfficialGazetteDocumentMetadata(documentRows[0]);
+
+    if (editionNumber && Number(metadata.editionNumber) !== editionNumber) {
+      return false;
+    }
+
+    if (publicationDate && metadata.publicationDate !== publicationDate) {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (matchedGroups.length > 0) {
+    return matchedGroups
+      .sort((a, b) => getOfficialGazetteDocumentSortValue(b) - getOfficialGazetteDocumentSortValue(a))
+      .flat();
+  }
+
+  if (!editionNumber && !publicationDate && completeListIntent && documentGroups.length > 0) {
+    return documentGroups.sort(
+      (a, b) => getOfficialGazetteDocumentSortValue(b) - getOfficialGazetteDocumentSortValue(a),
+    )[0];
+  }
+
+  return null;
+}
+
+function scoreOfficialGazetteChunk(
+  row: OfficialGazetteContextChunkRow,
+  question: string,
+  searchTerms: string[],
+) {
+  const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+  const normalizedTitle = normalizeOfficialGazetteSearchText(row.title ?? "");
+  const normalizedSectionType = normalizeOfficialGazetteSearchText(row.section_type ?? "");
+  const normalizedContent = normalizeOfficialGazetteSearchText(row.content ?? "");
+  const searchableText = [normalizedTitle, normalizedSectionType, normalizedContent].join(" ");
+
+  let score = 0;
+
+  for (const term of searchTerms) {
+    if (!term) continue;
+
+    if (normalizedTitle.includes(term)) {
+      score += 4;
+    }
+
+    if (normalizedSectionType.includes(term)) {
+      score += 3;
+    }
+
+    if (normalizedContent.includes(term)) {
+      score += 1;
+    }
+  }
+
+  if (normalizedQuestion.includes("decreto") && searchableText.includes("decreto")) score += 10;
+  if (normalizedQuestion.includes("portaria") && searchableText.includes("portaria")) score += 10;
+  if (normalizedQuestion.includes("resolucao") && searchableText.includes("resolucao")) score += 10;
+  if (normalizedQuestion.includes("dispensa") && searchableText.includes("dispensa")) score += 10;
+  if (normalizedQuestion.includes("licitacao") && searchableText.includes("licitacao")) score += 6;
+  if (normalizedQuestion.includes("junho") && searchableText.includes("junho")) score += 5;
+
+  return score;
+}
+
+
+function isBrokenSupabasePublicStorageUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url);
+
+    return (
+      parsedUrl.hostname.endsWith(".supabase.co") &&
+      parsedUrl.pathname.includes("/storage/v1/object/public/governance-documents/")
+    );
+  } catch {
+    return false;
   }
 }
 
-export async function POST(req: Request) {
-  if (!openai || !supabaseUrl || !supabaseAnonKey) {
-    return new Response(
-      sseEvent("error", { error: "Servidor incompleto. Verifique envs." }),
-      {
-        status: 500,
-        headers: SSE_HEADERS,
-      }
-    );
+function getOfficialGazetteUploadYearMonth(publicationDate?: string | null) {
+  const dateMatch = String(publicationDate ?? "").match(/^(\d{4})-(\d{2})-/);
+
+  if (dateMatch) {
+    return {
+      year: dateMatch[1],
+      month: dateMatch[2],
+    };
   }
 
-  const client = createAuthClient(req) as any;
+  return null;
+}
 
-  let body: any;
+function normalizeOfficialGazetteFileName(fileName: string) {
+  return String(fileName ?? "")
+    .trim()
+    .replace(/^\d{10,}-/, "")
+    .replace(/-d4sign\.pdf$/i, "-D4Sign.pdf");
+}
+
+function buildOfficialMunicipalGazettePdfUrlFromStorageUrl(
+  url: string,
+  publicationDate?: string | null,
+) {
+  if (!isBrokenSupabasePublicStorageUrl(url)) {
+    return "";
+  }
+
+  const uploadYearMonth = getOfficialGazetteUploadYearMonth(publicationDate);
+
+  if (!uploadYearMonth) {
+    return "";
+  }
+
   try {
-    body = await req.json();
+    const parsedUrl = new URL(url);
+    const rawFileName = decodeURIComponent(
+      parsedUrl.pathname.split("/").filter(Boolean).pop() ?? "",
+    );
+    const fileName = normalizeOfficialGazetteFileName(rawFileName);
+
+    if (!fileName || !/\.pdf$/i.test(fileName)) {
+      return "";
+    }
+
+    /*
+      Correção V4:
+      alguns registros antigos guardaram o PDF como URL pública do Supabase Storage
+      em um bucket que não existe mais/ não está público no ambiente atual.
+
+      Para esses casos, reconstruímos o link oficial municipal do Diário Oficial
+      a partir do nome real do arquivo e da data de publicação já cadastrada no documento.
+    */
+    return `https://santanadoitarare.pr.gov.br/diariooficial/wp-content/uploads/${uploadYearMonth.year}/${uploadYearMonth.month}/${fileName}`;
   } catch {
-    return new Response(
-      sseEvent("error", { error: "Corpo inválido. JSON era esperado." }),
-      {
-        status: 400,
-        headers: SSE_HEADERS,
-      }
-    );
+    return "";
+  }
+}
+
+function normalizeOfficialGazetteUrl(
+  value: string | null | undefined,
+  publicationDate?: string | null,
+) {
+  const url = String(value ?? "").trim();
+
+  if (!/^https?:\/\//i.test(url)) {
+    return "";
   }
 
-  const {
-    conversationId,
-    message,
-    temperature,
-    pdfMode,
-    selectedPdfIds,
-    responseMode,
-  } = body as {
-    conversationId: string;
-    message: string;
-    temperature?: number;
-    pdfMode?: PdfChatMode;
-    selectedPdfIds?: string[];
-    responseMode?: string;
+  if (isBrokenSupabasePublicStorageUrl(url)) {
+    return buildOfficialMunicipalGazettePdfUrlFromStorageUrl(url, publicationDate);
+  }
+
+  return url;
+}
+
+function pickOfficialGazetteUrl(params: {
+  sourcePageUrl?: string | null;
+  publicUrl?: string | null;
+  pdfUrl?: string | null;
+  publicationDate?: string | null;
+}) {
+  const sourcePageUrl = normalizeOfficialGazetteUrl(
+    params.sourcePageUrl,
+    params.publicationDate,
+  );
+  const publicUrl = normalizeOfficialGazetteUrl(params.publicUrl, params.publicationDate);
+  const pdfUrl = normalizeOfficialGazetteUrl(params.pdfUrl, params.publicationDate);
+
+  /*
+    Preferência:
+    1) source_page_url: página oficial da edição, quando cadastrada.
+    2) public_url: URL pública consolidada, quando cadastrada.
+    3) pdf_url: PDF oficial.
+       Se o pdf_url antigo apontar para o Supabase Storage quebrado, ele é convertido
+       para o endereço oficial do Diário Oficial municipal.
+  */
+  return sourcePageUrl || publicUrl || pdfUrl || "";
+}
+
+function escapeRegExp(value: string) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeOfficialGazetteLabel(value: string) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*,.*$/g, "")
+    .trim();
+}
+
+function extractOfficialGazetteLegalLabels(value: string) {
+  const text = String(value ?? "");
+  const pattern =
+    /\b(?:Lei(?:\s+Complementar)?|Decreto|Portaria|Instrução Normativa|Resolução|Edital|Dispensa|Inexigibilidade)\s+n[º°]?\s*[\d.]+\/\d{4}\b/gi;
+
+  const labels = new Set<string>();
+
+  for (const match of text.matchAll(pattern)) {
+    const label = normalizeOfficialGazetteLabel(match[0]);
+
+    if (label) {
+      labels.add(label);
+    }
+  }
+
+  return Array.from(labels);
+}
+
+function buildOfficialGazetteReferenceLinks(
+  chunks: OfficialGazetteContextChunkRow[],
+) {
+  const linksByKey = new Map<string, OfficialGazetteReferenceLink>();
+
+  for (const chunk of chunks) {
+    const title = String(chunk.title ?? "Ato do Diário Oficial").trim();
+    const content = String(chunk.content ?? "");
+    const { editionNumber, publicationDate, publicUrl, pdfUrl, sourcePageUrl } =
+      getOfficialGazetteDocumentMetadata(chunk);
+    const officialUrl = pickOfficialGazetteUrl({
+      sourcePageUrl,
+      publicUrl,
+      pdfUrl,
+      publicationDate,
+    });
+
+    if (!officialUrl) {
+      continue;
+    }
+
+    const labels = [
+      ...extractOfficialGazetteLegalLabels(title),
+      ...extractOfficialGazetteLegalLabels(content).slice(0, 8),
+    ];
+
+    for (const label of labels) {
+      const key = label.toLocaleLowerCase("pt-BR");
+
+      if (!linksByKey.has(key)) {
+        linksByKey.set(key, {
+          label,
+          url: officialUrl,
+          title,
+          editionNumber,
+          publicationDate,
+        });
+      }
+    }
+  }
+
+  return Array.from(linksByKey.values());
+}
+
+function linkOfficialGazetteReferencesInAssistantText(
+  content: string,
+  referenceLinks: OfficialGazetteReferenceLink[],
+) {
+  let nextContent = String(content ?? "");
+
+  for (const referenceLink of referenceLinks) {
+    const label = normalizeOfficialGazetteLabel(referenceLink.label);
+    const url = normalizeOfficialGazetteUrl(
+      referenceLink.url,
+      referenceLink.publicationDate,
+    );
+
+    if (!label || !url) {
+      continue;
+    }
+
+    const pattern = new RegExp(`\\b${escapeRegExp(label)}\\b`, "gi");
+
+    nextContent = nextContent.replace(pattern, (match, offset: number, fullText: string) => {
+      const before = fullText.slice(Math.max(0, offset - 2), offset);
+      const after = fullText.slice(offset + match.length, offset + match.length + 2);
+
+      if (before.includes("[") || after.startsWith("](")) {
+        return match;
+      }
+
+      return `[${match}](${url})`;
+    });
+  }
+
+  return nextContent;
+}
+
+
+function getOfficialGazetteDocumentMetadata(chunk: OfficialGazetteContextChunkRow) {
+  const relation = chunk.governance_official_gazette_documents;
+  const documentMetadata = Array.isArray(relation) ? relation[0] : relation;
+
+  return {
+    editionNumber: documentMetadata?.edition_number ?? null,
+    publicationDate: documentMetadata?.publication_date ?? null,
+    publicUrl: String(documentMetadata?.public_url ?? "").trim(),
+    pdfUrl: String(documentMetadata?.pdf_url ?? "").trim(),
+    sourcePageUrl: String(documentMetadata?.source_page_url ?? "").trim(),
   };
+}
 
-  const temp = parseTemperature(temperature, 0.3);
+function buildOfficialGazetteContextText(params: {
+  chunks: OfficialGazetteContextChunkRow[];
+  question: string;
+  completeListMode?: boolean;
+}) {
+  const { chunks, question, completeListMode = false } = params;
 
-  if (!conversationId) {
-    return new Response(
-      sseEvent("error", { error: "conversationId é obrigatório." }),
-      {
-        status: 400,
-        headers: SSE_HEADERS,
-      }
-    );
+  if (chunks.length === 0) {
+    return "";
   }
 
-  if (!message?.trim()) {
-    return new Response(sseEvent("error", { error: "Mensagem vazia." }), {
-      status: 400,
-      headers: SSE_HEADERS,
+  let totalChars = 0;
+  const blocks: string[] = [];
+
+  for (const [index, chunk] of chunks.entries()) {
+    const title = String(chunk.title ?? "Ato do Diário Oficial").trim();
+    const sectionType = String(chunk.section_type ?? "não classificado").trim();
+    const pageNumber =
+      typeof chunk.page_number === "number" ? `Página ${chunk.page_number}` : "Página não informada";
+    const content = clampText(String(chunk.content ?? "").trim(), completeListMode ? 420 : 1600);
+    const { editionNumber, publicationDate, publicUrl, pdfUrl, sourcePageUrl } =
+      getOfficialGazetteDocumentMetadata(chunk);
+    const normalizedSourcePageUrl = normalizeOfficialGazetteUrl(
+      sourcePageUrl,
+      publicationDate,
+    );
+    const normalizedPublicUrl = normalizeOfficialGazetteUrl(publicUrl, publicationDate);
+    const normalizedPdfUrl = normalizeOfficialGazetteUrl(pdfUrl, publicationDate);
+    const officialUrl = pickOfficialGazetteUrl({
+      sourcePageUrl,
+      publicUrl,
+      pdfUrl,
+      publicationDate,
     });
+
+    const officialLinks = [
+      officialUrl ? `Link oficial para citar este ato: ${officialUrl}` : null,
+      normalizedSourcePageUrl
+        ? `Página oficial da edição: ${normalizedSourcePageUrl}`
+        : null,
+      normalizedPublicUrl ? `URL pública do documento: ${normalizedPublicUrl}` : null,
+      normalizedPdfUrl ? `PDF oficial do Diário Oficial: ${normalizedPdfUrl}` : null,
+    ].filter(Boolean);
+
+    const block = [
+      `ATO ${index + 1}`,
+      `Título: ${title}`,
+      `Tipo: ${sectionType}`,
+      `Documento: ${chunk.document_id}`,
+      editionNumber ? `Edição do Diário Oficial: ${editionNumber}` : null,
+      publicationDate ? `Data de publicação: ${publicationDate}` : null,
+      pageNumber,
+      ...officialLinks,
+      "",
+      content,
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n");
+
+    const maxContextChars = completeListMode
+      ? MAX_OFFICIAL_GAZETTE_COMPLETE_LIST_CONTEXT_CHARS
+      : MAX_OFFICIAL_GAZETTE_CONTEXT_CHARS;
+
+    if (totalChars + block.length > maxContextChars) {
+      break;
+    }
+
+    blocks.push(block);
+    totalChars += block.length;
   }
 
-  const normalizedPdfMode: PdfChatMode =
-    pdfMode === "active" || pdfMode === "selected" ? pdfMode : "all";
-
-  const normalizedSelectedPdfIds = Array.isArray(selectedPdfIds)
-    ? selectedPdfIds.map((id) => String(id ?? "").trim()).filter(Boolean)
-    : [];
-
-  const { data: authData } = await client.auth.getUser();
-  if (!authData?.user) {
-    return new Response(sseEvent("error", { error: "Não autenticado." }), {
-      status: 401,
-      headers: SSE_HEADERS,
-    });
+  if (blocks.length === 0) {
+    return "";
   }
 
-  const userId = authData.user.id;
+  return [
+    "CONTEXTO DO DIÁRIO OFICIAL MUNICIPAL",
+    "",
+    "Use os atos abaixo como base factual quando a pergunta envolver Diário Oficial, decretos, portarias, licitações, dispensas, resoluções, leis, editais, extratos ou atos publicados.",
+    "Não invente ato não listado. Se os atos recuperados não forem suficientes, diga que não localizou evidência suficiente nos atos indexados.",
+    completeListMode
+      ? "Quando a pergunta pedir contagem ou lista completa da edição, use exatamente o número informado em 'Atos recuperados'. Não reduza, não agrupe e não ignore blocos ATO. Cada bloco ATO representa um ato indexado."
+      : "Quando a pergunta pedir contagem, conte apenas os atos recuperados neste contexto e informe que o número depende dos atos já indexados no sistema.",
+    "Quando citar ato municipal recuperado deste contexto, transforme o próprio nome do ato em link Markdown usando o campo 'Link oficial para citar este ato'. Exemplo: [Decreto nº 042/2026](URL).",
+    "Não coloque URL bruta isolada no final quando o nome do ato puder ser linkado no próprio texto.",
+    "Use somente os links informados no próprio ato. Não crie link do Planalto para decreto, portaria, resolução, edital, dispensa, extrato ou outro ato municipal.",
+    "Se o ato recuperado não trouxer link oficial, cite o ato em texto simples, sem hyperlink presumido.",
+    "",
+    `Pergunta do usuário: ${question}`,
+    "",
+    completeListMode
+      ? `Atos recuperados: ${blocks.length} de ${chunks.length} atos indexados para o filtro solicitado`
+      : `Atos recuperados: ${blocks.length}`,
+    "",
+    blocks.join("\n\n---\n\n"),
+  ].join("\n");
+}
 
-  const accessSummary = await getAccessSummary(client, userId);
-  if (!accessSummary) {
-    return new Response(
-      sseEvent("error", {
-        error: "Não foi possível verificar seu acesso no momento.",
-      }),
-      {
-        status: 500,
-        headers: SSE_HEADERS,
-      }
-    );
+async function buildOfficialGazetteContext(params: {
+  client: any;
+  organizationId: string;
+  question: string;
+}): Promise<OfficialGazetteContextResult> {
+  const { client, organizationId, question } = params;
+
+  if (!shouldUseOfficialGazetteContext(question)) {
+    return {
+      contextText: "",
+      chunksUsed: 0,
+      totalChunksRead: 0,
+      enabled: false,
+      referenceLinks: [],
+    };
   }
 
-  const isAdmin = await getIsAdminUser(client, userId);
+  const searchTerms = extractOfficialGazetteSearchTerms(question);
 
-  const accessDecision = await syncEffectiveAccessStatus(client, accessSummary);
-  if (!accessDecision.allowed) {
-    return new Response(
-      sseEvent("error", {
-        error: accessDecision.message,
-        accessBlocked: true,
-        accessStatus: accessDecision.effectiveStatus,
-        reason: accessDecision.reason,
-      }),
-      {
-        status: 403,
-        headers: SSE_HEADERS,
-      }
-    );
-  }
-
-  const baseResponseModeAccess = resolveChatResponseModeAccess({
-    summary: accessSummary,
-    requestedResponseMode: responseMode,
-  });
-
-  const adminStrategicResponseModes: InternalResponseMode[] = [
-    "objective",
-    "summary",
-    "step_by_step",
-    "checklist",
-    "document_draft",
-    "manager_guidance",
-    "attention_points",
-  ];
-
-  const responseModeAccess = isAdmin
-    ? {
-        ...baseResponseModeAccess,
-        // Admin usa as regras e o prompt do Estratégico.
-        // Não usamos "governance" por enquanto, porque esse produto ainda não foi implementado.
-        productTier: "strategic" as const,
-        allowedModes: adminStrategicResponseModes,
-        requestedMode: baseResponseModeAccess.requestedMode,
-        effectiveMode:
-          baseResponseModeAccess.requestedMode &&
-          adminStrategicResponseModes.includes(
-            baseResponseModeAccess.requestedMode as InternalResponseMode
+  try {
+    const { data, error } = await client
+      .from("governance_official_gazette_chunks")
+      .select(
+        `
+          document_id,
+          organization_id,
+          page_number,
+          section_type,
+          title,
+          content,
+          governance_official_gazette_documents(
+            edition_number,
+            publication_date,
+            public_url,
+            pdf_url,
+            source_page_url
           )
-            ? (baseResponseModeAccess.requestedMode as InternalResponseMode)
-            : ("objective" as InternalResponseMode),
-        canUseResponseMode: true,
-        rejected: false,
-        rejectionReason: null,
+        `,
+      )
+      .eq("organization_id", organizationId)
+      .order("document_id", { ascending: false })
+      .order("page_number", { ascending: true, nullsFirst: false })
+      .order("title", { ascending: true, nullsFirst: false })
+      .limit(MAX_OFFICIAL_GAZETTE_CHUNKS);
+
+    if (error) {
+      console.warn("[governance/chat] Não foi possível carregar atos do Diário Oficial:", error);
+
+      return {
+        contextText: "",
+        chunksUsed: 0,
+        totalChunksRead: 0,
+        enabled: true,
+        referenceLinks: [],
+      };
+    }
+
+    const rows = ((data ?? []) as OfficialGazetteContextChunkRow[]).filter((row) =>
+      String(row.content ?? "").trim().length > 0,
+    );
+
+    const completeRows = selectCompleteOfficialGazetteRowsForQuestion(rows, question);
+
+    const scoredRows = completeRows
+      ? []
+      : rows
+          .map((row) => ({
+            row,
+            score: scoreOfficialGazetteChunk(row, question, searchTerms),
+          }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS)
+          .map((item) => item.row);
+
+    const selectedRows = completeRows ?? (scoredRows.length > 0 ? scoredRows : rows.slice(0, 20));
+    const completeListMode = Boolean(completeRows);
+    const contextText = buildOfficialGazetteContextText({
+      chunks: selectedRows,
+      question,
+      completeListMode,
+    });
+
+    return {
+      contextText,
+      chunksUsed: selectedRows.length,
+      totalChunksRead: rows.length,
+      enabled: true,
+      referenceLinks: buildOfficialGazetteReferenceLinks(selectedRows),
+    };
+  } catch (error) {
+    console.warn("[governance/chat] Erro inesperado ao montar contexto do Diário Oficial:", error);
+
+    return {
+      contextText: "",
+      chunksUsed: 0,
+      totalChunksRead: 0,
+      enabled: true,
+      referenceLinks: [],
+    };
+  }
+}
+
+
+function sseEvent(event: string, data: unknown) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+export async function POST(request: Request) {
+  try {
+    if (!openai) {
+      return NextResponse.json(
+        { error: "OpenAI não configurada. Verifique OPENAI_API_KEY." },
+        { status: 500 },
+      );
+    }
+
+    const supabase = createWritableSupabaseRouteClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return NextResponse.json(
+        { error: "Usuário não autenticado." },
+        { status: 401 },
+      );
+    }
+
+    const context = await getCurrentGovernanceOrganization(user.id);
+
+    if (!context) {
+      return NextResponse.json(
+        { error: "Usuário não vinculado a uma organização ativa." },
+        { status: 403 },
+      );
+    }
+
+    const body = (await request.json().catch(() => null)) as
+      | GovernanceChatRequestBody
+      | null;
+
+    const conversationId =
+      typeof body?.conversationId === "string"
+        ? body.conversationId.trim()
+        : "";
+
+    const rawContent =
+      typeof body?.content === "string" ? body.content : "";
+
+    const content = normalizeContent(rawContent);
+    const selectedPdfAttachmentNames = Array.isArray(body?.selectedPdfAttachmentNames)
+      ? body.selectedPdfAttachmentNames
+          .filter((name): name is string => typeof name === "string")
+          .map((name) => name.trim())
+          .filter(Boolean)
+      : [];
+
+    const selectedPdfFileIds = Array.isArray(body?.selectedPdfFileIds)
+      ? body.selectedPdfFileIds
+          .filter((id): id is string => typeof id === "string")
+          .map((id) => id.trim())
+          .filter((id) => uuidRe.test(id))
+      : [];
+
+    const requestedResponseMode = body?.responseMode;
+
+    const hasSelectedPdfAttachments =
+      selectedPdfAttachmentNames.length > 0 || selectedPdfFileIds.length > 0;
+
+    if (!conversationId) {
+      return NextResponse.json(
+        { error: "Conversa institucional não informada." },
+        { status: 400 },
+      );
+    }
+
+    if (!content) {
+      return NextResponse.json(
+        { error: "Mensagem vazia. Digite um conteúdo antes de enviar." },
+        { status: 400 },
+      );
+    }
+
+    if (rawContent.trim().length > MAX_USER_MESSAGE_LENGTH) {
+      return NextResponse.json(
+        {
+          error:
+            "Mensagem muito longa. Reduza o texto ou envie o conteúdo como documento na base institucional futuramente.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const { data: conversation, error: conversationError } = await supabase
+      .from("governance_conversations")
+      .select(
+        `
+          id,
+          organization_id,
+          user_id,
+          title,
+          category,
+          response_mode,
+          visibility,
+          status,
+          deleted_at
+        `,
+      )
+      .eq("id", conversationId)
+      .eq("organization_id", context.organization.id)
+      .is("deleted_at", null)
+      .neq("status", "deleted")
+      .maybeSingle<GovernanceConversationForChat>();
+
+    if (conversationError) {
+      console.error(
+        "[governance/chat] Erro ao validar conversa:",
+        conversationError,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível validar a conversa institucional." },
+        { status: 500 },
+      );
+    }
+
+    if (!conversation) {
+      return NextResponse.json(
+        { error: "Conversa institucional não encontrada para este órgão." },
+        { status: 404 },
+      );
+    }
+
+    if (conversation.status !== "active") {
+      return NextResponse.json(
+        { error: "Esta conversa não está ativa para novas mensagens." },
+        { status: 409 },
+      );
+    }
+
+    const effectiveResponseMode = normalizeResponseMode(
+      requestedResponseMode,
+      conversation.response_mode,
+    );
+
+    const forceWebFirst = shouldForceWebFirst(content);
+
+    const criticalKnowledge =
+      findGovernanceCriticalKnowledge(content);
+
+    const legalGuardrails = buildGovernanceLegalGuardrails(content);
+    const hasLegalGuardrails = legalGuardrails.trim().length > 0;
+
+    const criticalKnowledgeInstruction =
+      criticalKnowledge.length > 0
+        ? [
+            "BASE NORMATIVA OFICIAL DO PUBL.IA",
+            "",
+            "Os entendimentos abaixo são institucionais e devem prevalecer sobre interpretações alternativas.",
+            "Não apresente conclusão incompatível com essas teses.",
+            "",
+            ...criticalKnowledge.map(
+              (item) => `TEMA: ${item.title}\n\n${item.rule}`,
+            ),
+          ].join("\n")
+        : "";
+    const currentQuestionOnly =
+      hasSelectedPdfAttachments || hasLegalGuardrails;
+
+    if (effectiveResponseMode !== conversation.response_mode) {
+      const { error: updateResponseModeError } = await supabase
+        .from("governance_conversations")
+        .update({
+          response_mode: effectiveResponseMode,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", conversation.id)
+        .eq("organization_id", context.organization.id);
+
+      if (updateResponseModeError) {
+        console.warn(
+          "[governance/chat] Não foi possível atualizar o modo de resposta da conversa:",
+          updateResponseModeError,
+        );
+      } else {
+        conversation.response_mode = effectiveResponseMode;
       }
-    : baseResponseModeAccess;
+    }
 
-  if (responseModeAccess.rejected) {
-    const errorMessage =
-      responseModeAccess.rejectionReason ===
-      "response_mode_not_available_for_tier"
-        ? "O modo de resposta não está disponível para o seu plano atual."
-        : responseModeAccess.rejectionReason === "response_mode_not_allowed"
-          ? "O modo de resposta informado não é permitido para o seu plano atual."
-          : "O modo de resposta informado é inválido.";
+    const { data: userMessage, error: userMessageError } = await supabase
+      .from("governance_messages")
+      .insert({
+        organization_id: context.organization.id,
+        conversation_id: conversation.id,
+        user_id: user.id,
+        role: "user",
+        content,
+        metadata: {
+          source: "governance_chat",
+          product_tier: "governance",
+          response_mode: effectiveResponseMode,
+          selected_pdf_attachment_names: selectedPdfAttachmentNames,
+          selected_pdf_file_ids: selectedPdfFileIds,
+        },
+      })
+      .select(
+        `
+          id,
+          organization_id,
+          conversation_id,
+          user_id,
+          role,
+          content,
+          metadata,
+          created_at
+        `,
+      )
+      .single<GovernanceMessage>();
 
-    return new Response(
-      sseEvent("error", {
-        error: errorMessage,
-        responseModeBlocked: true,
-        productTier: responseModeAccess.productTier,
-        allowedResponseModes: responseModeAccess.allowedModes,
-        reason: responseModeAccess.rejectionReason,
+    if (userMessageError || !userMessage) {
+      console.error(
+        "[governance/chat] Erro ao salvar mensagem do usuário:",
+        userMessageError,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível salvar a mensagem do usuário." },
+        { status: 500 },
+      );
+    }
+
+    const conversationTitle = await updateConversationTitleFromMessage({
+      supabase,
+      conversation,
+      organizationId: context.organization.id,
+      content,
+    });
+
+    const pdfContextResult = await buildGovernancePdfContext({
+      client: supabase,
+      userId: user.id,
+      selectedPdfFileIds,
+      question: content,
+    });
+
+    const institutionalContextResult = await buildInstitutionalDocumentsContext({
+      client: supabase,
+      organizationId: context.organization.id,
+      question: content,
+    });
+
+    const officialGazetteContextResult = await buildOfficialGazetteContext({
+      client: supabase,
+      organizationId: context.organization.id,
+      question: content,
+    });
+
+    const officialSourcesContextResult = await loadActiveOfficialSourcesForChat({
+      client: supabase,
+      organizationId: context.organization.id,
+      question: content,
+    });
+
+    const responseSources: GovernanceChatSources = {
+      institutional: institutionalContextResult.sources,
+      officialGazette: officialGazetteContextResult.referenceLinks.map((referenceLink) => ({
+        id: `${referenceLink.editionNumber ?? "diario"}-${referenceLink.publicationDate ?? "sem-data"}`,
+        title: referenceLink.title || referenceLink.label || "Diário Oficial do Município",
+        url: referenceLink.url,
+        type: "Diário Oficial do Município",
+      })),
+      officialSources: officialSourcesContextResult.prioritizedSource
+        ? [
+            {
+              id: officialSourcesContextResult.prioritizedSource.source.id,
+              title:
+                String(officialSourcesContextResult.prioritizedSource.source.name ?? "").trim() ||
+                "Fonte oficial",
+              url: String(officialSourcesContextResult.prioritizedSource.source.url ?? "").trim() || null,
+              type: getOfficialSourceTypeLabel(
+                officialSourcesContextResult.prioritizedSource.source.source_type,
+              ),
+            },
+          ]
+        : [],
+    };
+
+    const responseReferences = buildGovernanceChatReferences({
+      institutionalSources: institutionalContextResult.sources,
+      officialGazetteReferences: officialGazetteContextResult.referenceLinks,
+      officialSources: officialSourcesContextResult.sources,
+      prioritizedOfficialSource: officialSourcesContextResult.prioritizedSource,
+      question: content,
+    });
+
+    const { data: recentHistoryData, error: historyError } = await supabase
+      .from("governance_messages")
+      .select(
+        `
+          id,
+          organization_id,
+          conversation_id,
+          user_id,
+          role,
+          content,
+          metadata,
+          created_at
+        `,
+      )
+      .eq("organization_id", context.organization.id)
+      .eq("conversation_id", conversation.id)
+      .order("created_at", { ascending: false })
+      .limit(MAX_HISTORY_MESSAGES);
+
+    if (historyError) {
+      console.error(
+        "[governance/chat] Erro ao carregar histórico:",
+        historyError,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível carregar o histórico da conversa." },
+        { status: 500 },
+      );
+    }
+
+    const history = ((recentHistoryData ?? []) as GovernanceMessage[]).reverse();
+
+    const previousUserQuestion = getPreviousUserQuestion(history, userMessage.id);
+    const conversationRelation = classifyConversationRelation({
+      previousUserQuestion,
+      currentUserQuestion: content,
+    });
+
+    console.log("[GOVERNANCA] Relation:", conversationRelation);
+    console.log("[GOVERNANCA] Mode:", effectiveResponseMode);
+
+    const scopedPrompt = buildProductScopedPrompt({
+      productTier: "governance",
+      responseMode: mapGovernanceModeToPromptMode(effectiveResponseMode),
+    });
+
+    const instructions = [
+      scopedPrompt,
+      "",
+      criticalKnowledgeInstruction,
+      "",
+      buildConversationContext({
+        organizationName: context.organization.name,
+        organizationId: context.organization.id,
+        conversation,
       }),
-      {
-        status: 403,
-        headers: SSE_HEADERS,
-      }
-    );
-  }
+      "",
+      buildConversationRelationInstruction({
+        relation: conversationRelation,
+        previousUserQuestion,
+        currentUserQuestion: content,
+      }),
+      "",
+      buildGovernanceModeInstruction(effectiveResponseMode),
+      "",
+      buildGovernanceConsultantStyleInstruction(
+        effectiveResponseMode,
+        content,
+        conversationRelation,
+      ),
+      "",
+      buildFinalConsultativeOverride(effectiveResponseMode, conversationRelation),
+      "",
+      [
+        "REGRA DE REFERÊNCIAS E LINGUAGEM:",
+        "Não escreva 'Não houve consulta web nesta resposta' nem variações semelhantes.",
+        "Não crie hyperlinks, URLs em texto, links Markdown ou seções separadas de Base Legal, Referências Oficiais ou Base Institucional.",
+        "A resposta deve conter apenas o conteúdo técnico/consultivo. O sistema exibirá 'Base legal e documentos consultados' com links estruturados abaixo da resposta.",
+        "Quando houver documento institucional recuperado, use-o como fonte principal. Não complete nomes, datas, cargos ou mandatos com conhecimento geral se o documento trouxer a informação ou se os trechos forem insuficientes.",
+        "Mencione documentos pelo título apenas quando isso ajudar a clareza, sem transformar em link.",
+      ].join("\n"),
+      "",
+      buildForcedExecutiveFollowUpInstruction({
+        relation: conversationRelation,
+        mode: effectiveResponseMode,
+      }),
+      "",
+      forceWebFirst
+        ? [
+            "ALERTA INTERNO WEB-FIRST / VALIDAÇÃO NORMATIVA",
+            "A pergunta atual envolve prazo, valor, limite, percentual, dispositivo legal, licitação, contrato, sanção ou tema normativo sensível.",
+            "Não responda por memória quando houver dado legal específico, volátil ou dependente de fonte oficial.",
+            "Se não houver ferramenta de consulta oficial disponível neste fluxo, preserve o tom consultivo, mas indique a necessidade de validação em fonte oficial antes de decisão administrativa.",
+          ].join("\n")
+        : "",
+      legalGuardrails,
+      institutionalContextResult.contextText
+        ? [
+            "REGRA PONTUAL PARA BASE INSTITUCIONAL:",
+            institutionalContextResult.contextText,
+          ].join("\n\n")
+        : "",
+      officialGazetteContextResult.contextText
+        ? [
+            "REGRA PONTUAL PARA DIÁRIO OFICIAL:",
+            officialGazetteContextResult.contextText,
+          ].join("\n\n")
+        : "",
+      officialSourcesContextResult.contextText
+        ? [
+            "REGRA PONTUAL PARA FONTES OFICIAIS:",
+            officialSourcesContextResult.contextText,
+          ].join("\n\n")
+        : "",
+      hasSelectedPdfAttachments
+        ? [
+            "REGRA PONTUAL PARA PDFS SELECIONADOS NESTA PERGUNTA:",
+            "Use prioritariamente o conteúdo textual recuperado dos PDFs selecionados nesta pergunta.",
+            "Ignore PDFs citados em mensagens anteriores desta conversa, salvo se o usuário pedir comparação ou histórico.",
+            selectedPdfAttachmentNames.length > 0
+              ? `Nomes informados pelo frontend: ${selectedPdfAttachmentNames.join(", ")}.`
+              : "",
+            pdfContextResult.selectedPdfFileIds.length > 0
+              ? `IDs dos PDFs selecionados: ${pdfContextResult.selectedPdfFileIds.join(", ")}.`
+              : "",
+            pdfContextResult.pdfContextAvailable
+              ? ["TRECHOS RECUPERADOS DOS PDFS SELECIONADOS:", pdfContextResult.pdfContextText].join("\n\n")
+              : "Nenhum trecho textual dos PDFs selecionados foi recuperado para esta pergunta.",
+            pdfContextResult.pdfContextWarnings.length > 0
+              ? ["Avisos de recuperação dos PDFs:", ...pdfContextResult.pdfContextWarnings.map((warning) => `- ${warning}`)].join("\n")
+              : "",
+            "Se não houver trechos recuperados suficientes, diga isso com clareza. Não invente conteúdo dos PDFs.",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : "",
+    ]
+      .join("\n\n")
+      .trim();
 
-  const effectiveResponseMode: InternalResponseMode =
-    responseModeAccess.effectiveMode;
+    const wantsStreaming = request.headers
+      .get("accept")
+      ?.includes("text/event-stream") === true;
 
-  const scopedPrompt = buildProductScopedPrompt({
-    productTier: responseModeAccess.productTier,
-    responseMode: mapResponseModeToPromptScope(effectiveResponseMode),
-  });
-
-  const maxMultiPdfsInContext = getMaxMultiPdfsInContext({
-    accessSummary,
-    productTier: responseModeAccess.productTier,
-  });
-
-  const { data: conv } = await client
-    .from("conversations")
-    .select("id")
-    .eq("id", conversationId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (!conv) {
-    return new Response(
-      sseEvent("error", { error: "Conversa inválida ou sem permissão." }),
-      {
-        status: 403,
-        headers: SSE_HEADERS,
-      }
-    );
-  }
-
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let closed = false;
-      let aborted = false;
-
-      let keepAliveTimer: NodeJS.Timeout | null = null;
-      let flushTimer: NodeJS.Timeout | null = null;
-
-      const FLUSH_MIN_CHARS = 900;
-      const FLUSH_MAX_DELAY_MS = 70;
-
-      let pending = "";
-
-      const cleanup = () => {
-        if (keepAliveTimer) {
-          clearInterval(keepAliveTimer);
-          keepAliveTimer = null;
-        }
-
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-      };
-
-      const safeEnqueueRaw = (raw: string) => {
-        if (closed || aborted) return false;
-
-        try {
-          controller.enqueue(encoder.encode(raw));
-          return true;
-        } catch {
-          closed = true;
-          cleanup();
-          return false;
-        }
-      };
-
-      const safeSend = (event: string, data: unknown) => {
-        return safeEnqueueRaw(sseEvent(event, data));
-      };
-
-      const safeClose = () => {
-        if (closed) return;
-
-        closed = true;
-        cleanup();
-
-        try {
-          controller.close();
-        } catch {}
-      };
-
-      const flush = () => {
-        if (!pending || closed || aborted) return;
-
-        const out = pending;
-        pending = "";
-
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-
-        safeSend("delta", { text: out });
-      };
-
-      const scheduleFlush = () => {
-        if (flushTimer || closed || aborted) return;
-
-        flushTimer = setTimeout(() => {
-          flushTimer = null;
-          flush();
-        }, FLUSH_MAX_DELAY_MS);
-      };
-
-      const pushDelta = (text: string) => {
-        if (!text || closed || aborted) return;
-
-        pending += text;
-
-        if (pending.length >= FLUSH_MIN_CHARS) {
-          flush();
-        } else {
-          scheduleFlush();
-        }
-      };
-
-      const onAbort = () => {
-        aborted = true;
-        cleanup();
-        safeClose();
-      };
-
-      req.signal.addEventListener("abort", onAbort, { once: true });
+    if (!wantsStreaming) {
+      let assistantText = "";
 
       try {
-        safeEnqueueRaw(":" + " ".repeat(2048) + "\n\n");
+        const response = await openai!.responses.create({
+          model: OPENAI_MODEL_GOVERNANCE,
+          instructions,
+          input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
+          temperature: 0.3,
+        } as any);
 
-        keepAliveTimer = setInterval(() => {
-          safeEnqueueRaw(":ka\n\n");
-        }, 15000);
+        assistantText = response.output_text?.trim() ?? "";
+      } catch (error) {
+        console.error("[governance/chat] Erro OpenAI:", error);
 
-        const forceWebFirstRequested = shouldForceWebFirst(message);
-        const forceOfficialLinksRequested = shouldForceOfficialLinks(message);
+        return NextResponse.json(
+          { error: "Erro ao gerar resposta da IA institucional." },
+          { status: 500 },
+        );
+      }
 
-        const { data: historyData } = await client
-          .from("messages")
-          .select("id, role, content, created_at")
-          .eq("conversation_id", conversationId)
-          .order("created_at", { ascending: false })
-          .limit(MAX_HISTORY);
+      if (!assistantText) {
+        return NextResponse.json(
+          { error: "A IA não retornou uma resposta válida." },
+          { status: 500 },
+        );
+      }
 
-        if (aborted || closed) {
-          safeClose();
-          return;
-        }
-
-        const historyRows: MessageRow[] = (historyData as MessageRow[] | null) ?? [];
-        historyRows.reverse();
-
-        const continuationAcceptance = parseContinuationAcceptance(message);
-        const continuationOfferText =
-          continuationAcceptance.accepted && historyRows.length > 0
-            ? lastAssistantOfferToContinue(historyRows)
-            : null;
-
-        const { data: userMessageRow, error: insertUserError } = await client
-          .from("messages")
+      const { data: assistantMessage, error: assistantMessageError } =
+        await supabase
+          .from("governance_messages")
           .insert({
-            conversation_id: conversationId,
-            role: "user",
-            content: message,
-          } as any)
-          .select("*")
-          .single();
+            organization_id: context.organization.id,
+            conversation_id: conversation.id,
+            user_id: null,
+            role: "assistant",
+            content: assistantText,
+            metadata: {
+              source: "openai",
+              product_tier: "governance",
+              model: OPENAI_MODEL_GOVERNANCE,
+              response_mode: effectiveResponseMode,
+              history_messages_used: currentQuestionOnly ? 1 : history.length,
+              selected_pdf_attachment_names: selectedPdfAttachmentNames,
+              selected_pdf_file_ids: selectedPdfFileIds,
+              current_message_only_for_pdf: hasSelectedPdfAttachments,
+              current_message_only_for_legal_guardrails: hasLegalGuardrails,
+              official_gazette_context_enabled: officialGazetteContextResult.enabled,
+              official_gazette_chunks_used: officialGazetteContextResult.chunksUsed,
+              official_gazette_chunks_read: officialGazetteContextResult.totalChunksRead,
+              official_gazette_reference_links: officialGazetteContextResult.referenceLinks,
+              sources: responseSources,
+              references: responseReferences,
+              institutional_sources_used: responseSources.institutional,
+              official_sources_context_enabled: officialSourcesContextResult.sources.length > 0,
+              official_sources_used: officialSourcesContextResult.sources.map((source) => ({
+                id: source.id,
+                name: source.name,
+                source_type: source.source_type,
+                priority: source.priority,
+                url: source.url,
+              })),
+              official_sources_prioritized_source: officialSourcesContextResult.prioritizedSource
+                ? {
+                    id: officialSourcesContextResult.prioritizedSource.source.id,
+                    name: officialSourcesContextResult.prioritizedSource.source.name,
+                    source_type: officialSourcesContextResult.prioritizedSource.source.source_type,
+                    priority: officialSourcesContextResult.prioritizedSource.source.priority,
+                    url: officialSourcesContextResult.prioritizedSource.source.url,
+                    score: officialSourcesContextResult.prioritizedSource.score,
+                    intent: officialSourcesContextResult.prioritizedSource.intent,
+                  }
+                : null,
+              official_sources_error: officialSourcesContextResult.error || null,
+              conversation_relation: conversationRelation,
+              previous_user_question: previousUserQuestion || null,
+              streaming: false,
+            },
+          })
+          .select(
+            `
+              id,
+              organization_id,
+              conversation_id,
+              user_id,
+              role,
+              content,
+              metadata,
+              created_at
+            `,
+          )
+          .single<GovernanceMessage>();
 
-        if (aborted || closed) {
-          safeClose();
-          return;
-        }
-
-        if (insertUserError || !userMessageRow) {
-          safeSend("error", {
-            error: "Não foi possível salvar a mensagem do usuário.",
-          });
-          safeClose();
-          return;
-        }
-
-        const userProfile = await getUserProfileContext(client, userId);
-
-        const pdfState = await getConversationPdfState(client, conversationId, userId);
-        const allPdfRows = await getPdfsForConversation(
-          client,
-          conversationId,
-          userId,
-          pdfState
+      if (assistantMessageError || !assistantMessage) {
+        console.error(
+          "[governance/chat] Erro ao salvar resposta da IA:",
+          assistantMessageError,
         );
 
-        if (aborted || closed) {
-          safeClose();
-          return;
-        }
-
-        const pdfRows = applyPdfChatMode({
-          pdfRows: allPdfRows,
-          pdfMode: normalizedPdfMode,
-          selectedPdfIds: normalizedSelectedPdfIds,
-          activePdfFileId: pdfState.active_pdf_file_id,
-        });
-
-        const pdfChatState = await resolvePdfChatState(
-          client,
-          pdfRows,
-          userId,
-          message,
-          pdfState.active_pdf_file_id,
-          maxMultiPdfsInContext
+        return NextResponse.json(
+          { error: "A resposta foi gerada, mas não pôde ser salva." },
+          { status: 500 },
         );
+      }
 
-        if (aborted || closed) {
-          safeClose();
-          return;
-        }
+      const { error: updateConversationError } = await supabase
+        .from("governance_conversations")
+        .update({
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", conversation.id)
+        .eq("organization_id", context.organization.id);
 
-        if (normalizedPdfMode === "selected" && allPdfRows.length > 0 && pdfRows.length === 0) {
-          safeSend("error", {
-            error: "Nenhum PDF foi selecionado para esta pergunta.",
-          });
-          safeClose();
-          return;
-        }
+      if (updateConversationError) {
+        console.warn(
+          "[governance/chat] Mensagens salvas, mas não foi possível atualizar a conversa:",
+          updateConversationError,
+        );
+      }
 
-        const forceWebFirst = forceWebFirstRequested && pdfChatState.kind === "none";
-        const shouldOfferWebTool =
-          (forceWebFirst || forceOfficialLinksRequested) && pdfChatState.kind === "none";
+      const suggestions = await generateGovernanceFollowUpSuggestions({
+        userContent: content,
+        assistantText,
+        responseMode: effectiveResponseMode,
+        hasSelectedPdfAttachments,
+        selectedPdfAttachmentNames,
+      });
 
-        safeSend("meta", {
-          userMessage: userMessageRow,
-          forceWebFirst,
-          pdfFound: pdfChatState.kind !== "none",
-          pdfCount: pdfChatState.pdfCount,
-          activePdfFileId: pdfChatState.activePdfFileId,
-          pdfMode: normalizedPdfMode,
-          pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
-          extractedTextStatus:
-            pdfChatState.pdfRows.length === 1
-              ? pdfChatState.pdfRows[0]?.extracted_text_status ?? null
-              : null,
-          vectorIndexStatus:
-            pdfChatState.pdfRows.length === 1
-              ? pdfChatState.pdfRows[0]?.vector_index_status ?? null
-              : null,
-          ocrUrl: OCR_URL,
-          productTier: responseModeAccess.productTier,
-          allowedResponseModes: responseModeAccess.allowedModes,
-          effectiveResponseMode,
-        });
+      return NextResponse.json({
+        userMessage,
+        assistantMessage,
+        conversationTitle,
+        suggestions,
+        sources: responseSources,
+        references: responseReferences,
+      });
+    }
 
-        if (
-          pdfChatState.kind === "processing" ||
-          pdfChatState.kind === "no_text" ||
-          pdfChatState.kind === "error" ||
-          pdfChatState.kind === "skipped_large"
-        ) {
-          safeSend("error", {
-            error: pdfChatState.userError,
-            ...(pdfChatState.ocrSuggested ? { ocrUrl: OCR_URL } : {}),
-          });
-          safeClose();
-          return;
-        }
+    const encoder = new TextEncoder();
 
-        let combinedText = message.trim();
-
-        if (historyRows.length > 0) {
-          const historyText = historyRows
-            .map(
-              (m: MessageRow) =>
-                `${m.role === "user" ? "Usuário" : "Publ.IA"}: ${clampText(
-                  m.content,
-                  1200
-                )}`
-            )
-            .join("\n\n");
-
-          combinedText =
-            "Histórico recente (use só como contexto):\n\n" +
-            clampText(historyText, 4500) +
-            "\n\nNova pergunta:\n" +
-            message.trim();
-        }
-
-        if (continuationOfferText) {
-          combinedText =
-            buildContinuationAcceptanceInstruction({
-              userMessage: message,
-              offerText: continuationOfferText,
-              refinement: continuationAcceptance.refinement,
-            }) +
-            "\n\n" +
-            combinedText;
-        }
-
-        const userProfileContextText = buildUserProfileContextText(userProfile);
-        if (userProfileContextText) {
-          combinedText =
-            userProfileContextText +
-            "\n\n" +
-            combinedText;
-        }
-
-        if (pdfChatState.kind === "ready_context" && pdfChatState.pdfContext) {
-          combinedText =
-            "CONTEXTO DOS PDFs ANEXADOS (trechos selecionados e identificados por arquivo):\n\n" +
-            pdfChatState.pdfContext +
-            "\n\nINSTRUÇÃO IMPORTANTE: ao comparar documentos, cite claramente o nome de cada PDF ao mencionar diferenças, convergências, riscos ou contradições.\n\n" +
-            combinedText;
-        }
-
-        combinedText =
-          buildResponseModeInstruction(effectiveResponseMode) + "\n\n" + combinedText;
-
-        if (forceOfficialLinksRequested) {
-          combinedText =
-            buildOfficialLinksInstruction() +
-            "\n\n" +
-            combinedText;
-        }
-
-        if (forceWebFirst) {
-          combinedText =
-            "WEB-FIRST recomendado: confirme em fonte oficial via web_search_preview.\n\n" +
-            combinedText;
-        }
-
-        combinedText = clampText(combinedText, MAX_TOTAL_CHARS);
-
-        const userContent: any[] = [{ type: "input_text", text: combinedText }];
-
-        if (pdfChatState.kind === "ready_file" && pdfChatState.openaiFileId) {
-          userContent.push({
-            type: "input_file",
-            file_id: pdfChatState.openaiFileId,
-          });
-        }
-
-        const input: any[] = [{ role: "user", content: userContent }];
-
-        const model =
-          pdfChatState.kind === "ready_file" && pdfChatState.openaiFileId
-            ? OPENAI_MODEL_WITH_PDF
-            : OPENAI_MODEL_NO_PDF;
-
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
         let assistantText = "";
-        let inputTokensUsed = 0;
-        let outputTokensUsed = 0;
+
+        function send(event: string, data: unknown) {
+          controller.enqueue(encoder.encode(sseEvent(event, data)));
+        }
+
+        send("userMessage", { userMessage });
 
         try {
-          const reqObj: any = {
-            model,
-            instructions: scopedPrompt,
-            input,
-            temperature: temp,
+          const openaiStream = await openai!.responses.create({
+            model: OPENAI_MODEL_GOVERNANCE,
+            instructions,
+            input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
+            temperature: 0.3,
             stream: true,
-          };
+          } as any);
 
-          if (shouldOfferWebTool) {
-            reqObj.tools = [{ type: "web_search_preview" }];
-          }
-
-          if (forceWebFirst) {
-            reqObj.tool_choice = { type: "web_search_preview" };
-          }
-
-          const resp = await openai.responses.create(reqObj);
-
-          for await (const event of resp as any) {
-            if (aborted || closed) break;
-
+          for await (const event of openaiStream as any) {
             if (event?.type === "response.output_text.delta") {
-              const delta = event.delta as string;
+              const delta = String(event.delta ?? "");
 
               if (delta) {
                 assistantText += delta;
-                pushDelta(delta);
+                send("delta", { delta });
               }
             }
-
-            if (event?.type === "response.completed") {
-              const usage = event?.response?.usage;
-
-              inputTokensUsed =
-                Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0) || 0;
-              outputTokensUsed =
-                Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0) || 0;
-            }
           }
-
-          flush();
-
-          assistantText = formatAssistantText({
-            text: assistantText,
-            forceWebFirst,
-            forceOfficialLinksRequested,
-          });
         } catch (error) {
-          console.error("Erro OpenAI em /api/chat:", error);
-          safeSend("error", { error: "Erro ao gerar resposta da IA." });
-          safeClose();
-          return;
-        }
-
-        if (!assistantText.trim()) {
-          safeSend("error", {
-            error: "Não foi possível obter uma resposta da IA.",
+          console.error("[governance/chat] Erro OpenAI streaming:", error);
+          send("error", {
+            error: "Erro ao gerar resposta da IA institucional.",
           });
-          safeClose();
+          controller.close();
           return;
         }
 
-        const { data: assistantMessageRow, error: insertAssistantError } =
-          await client
-            .from("messages")
+        assistantText = assistantText.trim();
+
+        if (!assistantText) {
+          send("error", {
+            error: "A IA não retornou uma resposta válida.",
+          });
+          controller.close();
+          return;
+        }
+
+        const { data: assistantMessage, error: assistantMessageError } =
+          await supabase
+            .from("governance_messages")
             .insert({
-              conversation_id: conversationId,
+              organization_id: context.organization.id,
+              conversation_id: conversation.id,
+              user_id: null,
               role: "assistant",
               content: assistantText,
-            } as any)
-            .select("*")
-            .single();
+              metadata: {
+                source: "openai",
+                product_tier: "governance",
+                model: OPENAI_MODEL_GOVERNANCE,
+                response_mode: effectiveResponseMode,
+                history_messages_used: currentQuestionOnly ? 1 : history.length,
+                selected_pdf_attachment_names: selectedPdfAttachmentNames,
+                selected_pdf_file_ids: selectedPdfFileIds,
+                current_message_only_for_pdf: hasSelectedPdfAttachments,
+                current_message_only_for_legal_guardrails: hasLegalGuardrails,
+                official_gazette_context_enabled: officialGazetteContextResult.enabled,
+                official_gazette_chunks_used: officialGazetteContextResult.chunksUsed,
+                official_gazette_chunks_read: officialGazetteContextResult.totalChunksRead,
+                official_gazette_reference_links: officialGazetteContextResult.referenceLinks,
+                sources: responseSources,
+                references: responseReferences,
+              institutional_sources_used: responseSources.institutional,
+              official_sources_context_enabled: officialSourcesContextResult.sources.length > 0,
+                official_sources_used: officialSourcesContextResult.sources.map((source) => ({
+                  id: source.id,
+                  name: source.name,
+                  source_type: source.source_type,
+                  priority: source.priority,
+                  url: source.url,
+                })),
+                official_sources_error: officialSourcesContextResult.error || null,
+                conversation_relation: conversationRelation,
+                previous_user_question: previousUserQuestion || null,
+                streaming: true,
+              },
+            })
+            .select(
+              `
+                id,
+                organization_id,
+                conversation_id,
+                user_id,
+                role,
+                content,
+                metadata,
+                created_at
+              `,
+            )
+            .single<GovernanceMessage>();
 
-        if (insertAssistantError || !assistantMessageRow) {
-          safeSend("error", {
-            error: "Não foi possível salvar a resposta da IA.",
+        if (assistantMessageError || !assistantMessage) {
+          console.error(
+            "[governance/chat] Erro ao salvar resposta da IA:",
+            assistantMessageError,
+          );
+
+          send("error", {
+            error: "A resposta foi gerada, mas não pôde ser salva.",
           });
-          safeClose();
+          controller.close();
           return;
         }
 
-        const usageEventType: "chat_message" | "pdf_question" =
-          pdfChatState.kind === "none" ? "chat_message" : "pdf_question";
+        const { error: updateConversationError } = await supabase
+          .from("governance_conversations")
+          .update({
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", conversation.id)
+          .eq("organization_id", context.organization.id);
 
-        await registerUsageEvent(client, {
-          userId,
-          conversationId,
-          eventType: usageEventType,
-          inputTokens: inputTokensUsed,
-          outputTokens: outputTokensUsed,
-          metadata: {
-            model,
-            hasPdf: pdfChatState.kind !== "none",
-            pdfKind: pdfChatState.kind,
-            pdfMode: normalizedPdfMode,
-            pdfCount: pdfChatState.pdfCount,
-            activePdfFileId: pdfChatState.activePdfFileId,
-            selectedPdfIds: normalizedSelectedPdfIds,
-            pdfNames: pdfChatState.pdfRows.map((pdf: PdfFileRow) => buildPdfLabel(pdf)),
-            forceWebFirst,
-            forceOfficialLinksRequested,
-            responseMode: effectiveResponseMode,
-            responseModeRequested: responseModeAccess.requestedMode,
-            responseModeAllowedForTier: responseModeAccess.canUseResponseMode,
-            productTier: responseModeAccess.productTier,
-            isAdmin,
-            userProfileContextApplied: !!userProfileContextText,
-            maxMultiPdfsInContext,
-            shortContinuationAccepted: !!continuationOfferText,
-            shortContinuationRefinement:
-              continuationOfferText && continuationAcceptance.refinement
-                ? continuationAcceptance.refinement
-                : null,
-          },
+        if (updateConversationError) {
+          console.warn(
+            "[governance/chat] Mensagens salvas, mas não foi possível atualizar a conversa:",
+            updateConversationError,
+          );
+        }
+
+        const suggestions = await generateGovernanceFollowUpSuggestions({
+          userContent: content,
+          assistantText,
+          responseMode: effectiveResponseMode,
+          hasSelectedPdfAttachments,
+          selectedPdfAttachmentNames,
         });
 
-        safeSend("done", { assistantMessage: assistantMessageRow });
-        safeClose();
-      } catch (error) {
-        console.error("Erro inesperado em /api/chat:", error);
-        safeSend("error", {
-          error: "Erro inesperado ao processar a requisição.",
+        if (suggestions.length > 0) {
+          send("suggestions", { suggestions });
+        }
+
+        send("done", {
+          userMessage,
+          assistantMessage,
+          conversationTitle,
+          suggestions,
+          sources: responseSources,
+          references: responseReferences,
         });
-        safeClose();
-      } finally {
-        req.signal.removeEventListener("abort", onAbort);
-      }
-    },
 
-    cancel() {
-      // cleanup principal feito via abort/safeClose
-    },
-  });
+        controller.close();
+      },
+    });
 
-  return new Response(stream, { headers: SSE_HEADERS });
+    return new Response(stream, { headers: SSE_HEADERS });
+  } catch (error) {
+    console.error("[governance/chat] Erro inesperado:", error);
+
+    return NextResponse.json(
+      { error: "Erro inesperado ao processar chat institucional." },
+      { status: 500 },
+    );
+  }
 }

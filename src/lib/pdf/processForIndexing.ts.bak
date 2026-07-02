@@ -310,7 +310,6 @@ export async function processPdfForIndexing({
         fileSizeBytes: fileSize,
         maxBytes,
         maxMbLabel: PDF_EXTRACT_MAX_MB,
-        preferOcr: true,
       });
 
       console.log("[processPdfForIndexing] extract result", {
