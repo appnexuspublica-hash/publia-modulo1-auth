@@ -1,4 +1,23 @@
 // src/app/api/governance/chat/route.ts
+/**
+ * CHAT INDIVIDUAL
+ *
+ * Usado pelos produtos:
+ * - Publ.IA Essencial
+ * - Publ.IA Estratégico
+ *
+ * IMPORTANTE:
+ * Esta rota NÃO deve usar organização.
+ * Não importar getCurrentGovernanceOrganization aqui.
+ *
+ * Banco usado:
+ * - conversations
+ * - messages
+ * - pdf_files
+ *
+ * Chave de isolamento:
+ * - user_id
+ */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
@@ -1515,48 +1534,116 @@ type GovernanceChatSources = {
   officialSources: GovernanceChatSource[];
 };
 
+type GovernanceChatReferenceKind = "institutional" | "official" | "legal";
+
 type GovernanceChatReference = {
   title: string;
   url: string | null;
-  kind: "institutional" | "official" | "legal";
+  kind: GovernanceChatReferenceKind;
+  sourceId?: string | null;
+  type?: string | null;
 };
 
-function buildGovernanceChatReferences(
-  sources: GovernanceChatSources,
-): GovernanceChatReference[] {
+function normalizeGovernanceReferenceTitle(value: string | null | undefined) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeGovernanceReferenceUrl(value: string | null | undefined) {
+  const url = String(value ?? "").trim();
+  return url || null;
+}
+
+function inferOfficialReferenceKind(source: GovernanceOfficialSourceForChat): GovernanceChatReferenceKind {
+  const searchable = normalizeOfficialSourceSearchText(
+    [source.name, source.source_type, source.notes, source.url].filter(Boolean).join(" "),
+  );
+
+  if (/legislacao|legislação|lei|leis|atos administrativos|lei organica|lei orgânica/.test(searchable)) {
+    return "legal";
+  }
+
+  return "official";
+}
+
+function dedupeGovernanceReferences(references: GovernanceChatReference[]) {
   const unique = new Map<string, GovernanceChatReference>();
 
-  function addReference(
-    source: GovernanceChatSource,
-    kind: GovernanceChatReference["kind"],
-  ) {
-    const title = String(source?.title ?? "").trim();
-    const url = String(source?.url ?? "").trim() || null;
+  for (const reference of references) {
+    const title = normalizeGovernanceReferenceTitle(reference.title);
+    const url = normalizeGovernanceReferenceUrl(reference.url);
 
     if (!title) {
-      return;
+      continue;
     }
 
-    const key = `${kind}::${title.toLowerCase()}::${url ?? ""}`;
+    const key = `${reference.kind}::${title.toLowerCase()}::${url ?? ""}`;
 
     if (!unique.has(key)) {
-      unique.set(key, { title, url, kind });
+      unique.set(key, {
+        ...reference,
+        title,
+        url,
+      });
     }
-  }
-
-  for (const source of sources.institutional ?? []) {
-    addReference(source, "institutional");
-  }
-
-  for (const source of sources.officialSources ?? []) {
-    addReference(source, "official");
-  }
-
-  for (const source of sources.officialGazette ?? []) {
-    addReference(source, "official");
   }
 
   return Array.from(unique.values());
+}
+
+function buildGovernanceChatReferences(params: {
+  institutionalSources: GovernanceChatSource[];
+  officialGazetteReferences: OfficialGazetteReferenceLink[];
+  officialSources: GovernanceOfficialSourceForChat[];
+  prioritizedOfficialSource: PrioritizedOfficialSourceForChat | null;
+  question: string;
+}): GovernanceChatReference[] {
+  const {
+    institutionalSources,
+    officialGazetteReferences,
+    officialSources,
+    prioritizedOfficialSource,
+    question,
+  } = params;
+
+  const references: GovernanceChatReference[] = [];
+
+  for (const source of institutionalSources) {
+    references.push({
+      title: source.title,
+      url: source.url,
+      kind: "institutional",
+      sourceId: source.id,
+      type: source.type,
+    });
+  }
+
+  const mandatoryOfficialSource = resolveMandatoryOfficialSourceForFinalAnswer({
+    sources: officialSources,
+    prioritizedSource: prioritizedOfficialSource,
+    question,
+  });
+
+  if (mandatoryOfficialSource) {
+    references.push({
+      title: String(mandatoryOfficialSource.name ?? "Fonte oficial").trim(),
+      url: normalizeGovernanceReferenceUrl(mandatoryOfficialSource.url),
+      kind: inferOfficialReferenceKind(mandatoryOfficialSource),
+      sourceId: mandatoryOfficialSource.id,
+      type: getOfficialSourceTypeLabel(mandatoryOfficialSource.source_type),
+    });
+  }
+
+  for (const referenceLink of officialGazetteReferences) {
+    references.push({
+      title: normalizeGovernanceReferenceTitle(referenceLink.title || referenceLink.label || "Diário Oficial do Município"),
+      url: normalizeGovernanceReferenceUrl(referenceLink.url),
+      kind: "official",
+      sourceId: null,
+      type: "Diário Oficial do Município",
+    });
+  }
+
+  return dedupeGovernanceReferences(references);
 }
 
 type InstitutionalContextResult = {
@@ -2072,10 +2159,11 @@ async function buildInstitutionalDocumentsContext(params: {
     "BASE INSTITUCIONAL DA ORGANIZAÇÃO",
     "",
     "Prioridade máxima: use estes trechos antes do Diário Oficial, das Fontes Oficiais e do conhecimento geral.",
+    "Regra anti-alucinação: quando estes trechos trouxerem nomes, datas, cargos, mandatos, números ou fatos, use somente o que estiver nos trechos recuperados.",
     "Use somente os documentos institucionais listados nos trechos abaixo para responder sobre Base Institucional.",
     "Quando responder com base nestes trechos, mencione o documento institucional utilizado pelo título, sem criar link manual no corpo da resposta.",
     "Não inclua seção 'Base institucional' no texto da resposta; o sistema exibirá essa fonte de forma estruturada e clicável abaixo da resposta.",
-    "Não misture documentos da Base Institucional com a seção 'Base legal'. Base legal deve conter apenas fundamentos normativos gerais; documentos cadastrados ficam na Base institucional estruturada.",
+    "Não crie seções de referências. Não escreva Base Legal, Referências Oficiais ou Base Institucional como blocos separados; o sistema consolidará tudo em \"Base legal e documentos consultados\".",
     "Não escreva frases como 'Não houve consulta web nesta resposta'. Se não houver referência oficial específica, simplesmente omita essa observação.",
     "Não invente conteúdo ausente. Se os trechos forem insuficientes, diga que a Base Institucional não trouxe informação suficiente.",
     "",
@@ -3507,11 +3595,35 @@ export async function POST(request: Request) {
 
     const responseSources: GovernanceChatSources = {
       institutional: institutionalContextResult.sources,
-      officialGazette: [],
-      officialSources: [],
+      officialGazette: officialGazetteContextResult.referenceLinks.map((referenceLink) => ({
+        id: `${referenceLink.editionNumber ?? "diario"}-${referenceLink.publicationDate ?? "sem-data"}`,
+        title: referenceLink.title || referenceLink.label || "Diário Oficial do Município",
+        url: referenceLink.url,
+        type: "Diário Oficial do Município",
+      })),
+      officialSources: officialSourcesContextResult.prioritizedSource
+        ? [
+            {
+              id: officialSourcesContextResult.prioritizedSource.source.id,
+              title:
+                String(officialSourcesContextResult.prioritizedSource.source.name ?? "").trim() ||
+                "Fonte oficial",
+              url: String(officialSourcesContextResult.prioritizedSource.source.url ?? "").trim() || null,
+              type: getOfficialSourceTypeLabel(
+                officialSourcesContextResult.prioritizedSource.source.source_type,
+              ),
+            },
+          ]
+        : [],
     };
 
-    const responseReferences = buildGovernanceChatReferences(responseSources);
+    const responseReferences = buildGovernanceChatReferences({
+      institutionalSources: institutionalContextResult.sources,
+      officialGazetteReferences: officialGazetteContextResult.referenceLinks,
+      officialSources: officialSourcesContextResult.sources,
+      prioritizedOfficialSource: officialSourcesContextResult.prioritizedSource,
+      question: content,
+    });
 
     const { data: recentHistoryData, error: historyError } = await supabase
       .from("governance_messages")
@@ -3590,9 +3702,10 @@ export async function POST(request: Request) {
       [
         "REGRA DE REFERÊNCIAS E LINGUAGEM:",
         "Não escreva 'Não houve consulta web nesta resposta' nem variações semelhantes.",
-        "Não gere hyperlinks inventados no corpo da resposta.",
-        "Não crie seções finais chamadas 'Base legal', 'Referências oficiais' ou 'Base institucional'.",
-        "Quando houver fontes estruturadas, o sistema exibirá os links oficiais abaixo da resposta no bloco 'Base legal e documentos consultados'.",
+        "Não crie hyperlinks, URLs em texto, links Markdown ou seções separadas de Base Legal, Referências Oficiais ou Base Institucional.",
+        "A resposta deve conter apenas o conteúdo técnico/consultivo. O sistema exibirá 'Base legal e documentos consultados' com links estruturados abaixo da resposta.",
+        "Quando houver documento institucional recuperado, use-o como fonte principal. Não complete nomes, datas, cargos ou mandatos com conhecimento geral se o documento trouxer a informação ou se os trechos forem insuficientes.",
+        "Mencione documentos pelo título apenas quando isso ajudar a clareza, sem transformar em link.",
       ].join("\n"),
       "",
       buildForcedExecutiveFollowUpInstruction({
@@ -3684,18 +3797,6 @@ export async function POST(request: Request) {
           { status: 500 },
         );
       }
-
-      assistantText = linkOfficialGazetteReferencesInAssistantText(
-        assistantText,
-        officialGazetteContextResult.referenceLinks,
-      );
-
-      assistantText = applyOfficialSourceCitationGuard({
-        assistantText,
-        sources: officialSourcesContextResult.sources,
-        prioritizedSource: officialSourcesContextResult.prioritizedSource,
-        question: content,
-      });
 
       const { data: assistantMessage, error: assistantMessageError } =
         await supabase
@@ -3857,26 +3958,6 @@ export async function POST(request: Request) {
           return;
         }
 
-        assistantText = linkOfficialGazetteReferencesInAssistantText(
-          assistantText,
-          officialGazetteContextResult.referenceLinks,
-        );
-
-        const assistantTextBeforeOfficialSourceGuard = assistantText;
-
-        assistantText = applyOfficialSourceCitationGuard({
-          assistantText,
-          sources: officialSourcesContextResult.sources,
-          prioritizedSource: officialSourcesContextResult.prioritizedSource,
-          question: content,
-        });
-
-        if (assistantText.length > assistantTextBeforeOfficialSourceGuard.length) {
-          send("delta", {
-            delta: assistantText.slice(assistantTextBeforeOfficialSourceGuard.length),
-          });
-        }
-
         const { data: assistantMessage, error: assistantMessageError } =
           await supabase
             .from("governance_messages")
@@ -3901,7 +3982,7 @@ export async function POST(request: Request) {
                 official_gazette_chunks_read: officialGazetteContextResult.totalChunksRead,
                 official_gazette_reference_links: officialGazetteContextResult.referenceLinks,
                 sources: responseSources,
-              references: responseReferences,
+                references: responseReferences,
               institutional_sources_used: responseSources.institutional,
               official_sources_context_enabled: officialSourcesContextResult.sources.length > 0,
                 official_sources_used: officialSourcesContextResult.sources.map((source) => ({

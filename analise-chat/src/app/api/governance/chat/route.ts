@@ -1,4 +1,20 @@
 // src/app/api/governance/chat/route.ts
+/**
+ * CHAT GOVERNANÇA
+ *
+ * Usado somente pelo produto:
+ * - Publ.IA Governança
+ *
+ * IMPORTANTE:
+ * Esta rota EXIGE organização ativa.
+ *
+ * Banco usado:
+ * - governance_conversations
+ * - governance_messages
+ *
+ * Chave de isolamento:
+ * - organization_id
+ */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
@@ -1767,6 +1783,67 @@ function getInstitutionalQueryPhrases(question: string) {
   return phrases;
 }
 
+function isLocalOfficeHolderQuestion(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+
+  if (!q) {
+    return false;
+  }
+
+  const asksPerson =
+    /\b(quem|qual|quais|nome|nomes|identifique|informe)\b/.test(q);
+
+  const hasLocalOffice =
+    /\b(prefeito|prefeita|vice prefeito|vice prefeita|viceprefeito|viceprefeita|secretario|secretaria|presidente da camara|vereador|vereadora|tomou posse|posse|empossado|empossada|mandato)\b/.test(q);
+
+  return asksPerson && hasLocalOffice;
+}
+
+function scoreLocalOfficeHolderDocument(
+  document: InstitutionalDocumentContextRow,
+  question: string,
+) {
+  if (!isLocalOfficeHolderQuestion(question)) {
+    return 0;
+  }
+
+  const q = normalizeInstitutionalSearchText(question);
+  const title = normalizeInstitutionalSearchText(document.title);
+  const type = normalizeInstitutionalSearchText(document.document_type);
+  const text = normalizeInstitutionalSearchText(
+    String(document.extracted_text ?? "").slice(0, 60000),
+  );
+
+  let score = 0;
+
+  if (title.includes("ata") && title.includes("posse")) score += 180;
+  if (title.includes("posse")) score += 120;
+  if (title.includes("gestao") && /\b2025\b/.test(title)) score += 90;
+  if (type.includes("ata")) score += 80;
+
+  if (/\b(prefeito|prefeita)\b/.test(q) && /\b(prefeito|prefeita)\b/.test(text)) {
+    score += 120;
+  }
+
+  if (/\bvice\b/.test(q) && /\bvice prefeito|vice prefeita|viceprefeito|viceprefeita\b/.test(text)) {
+    score += 130;
+  }
+
+  if (/\b(posse|tomou posse|empossado|empossada)\b/.test(q) && /\b(posse|empossad[oa]s?|mandato)\b/.test(text)) {
+    score += 100;
+  }
+
+  if (/\b2025\b/.test(q) && /\b2025\b/.test(text)) {
+    score += 45;
+  }
+
+  if (/\b2028\b/.test(q) && /\b2028\b/.test(text)) {
+    score += 35;
+  }
+
+  return score;
+}
+
 function scoreInstitutionalDocumentForQuestion(
   document: InstitutionalDocumentContextRow,
   question: string,
@@ -1851,6 +1928,8 @@ function scoreInstitutionalDocumentForQuestion(
     score += 130;
   }
 
+  score += scoreLocalOfficeHolderDocument(document, question);
+
   return score;
 }
 
@@ -1858,12 +1937,15 @@ function selectRelevantInstitutionalDocuments(
   rows: InstitutionalDocumentContextRow[],
   question: string,
 ) {
+  const isOfficeHolderQuestion = isLocalOfficeHolderQuestion(question);
+  const minimumScore = isOfficeHolderQuestion ? 18 : 28;
+
   const ranked = rows
     .map((document) => ({
       document,
       score: scoreInstitutionalDocumentForQuestion(document, question),
     }))
-    .filter((item) => item.score >= 28)
+    .filter((item) => item.score >= minimumScore)
     .sort((a, b) => b.score - a.score);
 
   if (ranked.length === 0) {
@@ -1871,8 +1953,11 @@ function selectRelevantInstitutionalDocuments(
   }
 
   const topScore = ranked[0]?.score ?? 0;
-  const minScore = Math.max(28, topScore >= 120 ? topScore * 0.5 : 28);
-  const maxDocuments = topScore >= 120 ? 2 : 3;
+  const minScore = Math.max(
+    minimumScore,
+    topScore >= 120 ? topScore * 0.45 : minimumScore,
+  );
+  const maxDocuments = isOfficeHolderQuestion ? 4 : topScore >= 120 ? 2 : 3;
 
   return ranked
     .filter((item) => item.score >= minScore)
@@ -2075,7 +2160,7 @@ async function buildInstitutionalDocumentsContext(params: {
     "Use somente os documentos institucionais listados nos trechos abaixo para responder sobre Base Institucional.",
     "Quando responder com base nestes trechos, mencione o documento institucional utilizado pelo título, sem criar link manual no corpo da resposta.",
     "Não inclua seção 'Base institucional' no texto da resposta; o sistema exibirá essa fonte de forma estruturada e clicável abaixo da resposta.",
-    "Não misture documentos da Base Institucional com a seção 'Base legal'. Base legal deve conter apenas fundamentos normativos gerais; documentos cadastrados ficam na Base institucional estruturada.",
+    "Não misture documentos da Base Institucional com a seção 'Base legal'. Não use o termo 'Base legal' para documentos cadastrados; documentos cadastrados ficam exclusivamente nas referências estruturadas da interface.",
     "Não escreva frases como 'Não houve consulta web nesta resposta'. Se não houver referência oficial específica, simplesmente omita essa observação.",
     "Não invente conteúdo ausente. Se os trechos forem insuficientes, diga que a Base Institucional não trouxe informação suficiente.",
     "",
@@ -3592,7 +3677,7 @@ export async function POST(request: Request) {
         "Não escreva 'Não houve consulta web nesta resposta' nem variações semelhantes.",
         "Não gere hyperlinks inventados no corpo da resposta.",
         "Não crie seções finais chamadas 'Base legal', 'Referências oficiais' ou 'Base institucional'.",
-        "Quando houver fontes estruturadas, o sistema exibirá os links oficiais abaixo da resposta no bloco 'Base legal e documentos consultados'.",
+        "Quando houver fontes estruturadas, o sistema exibirá os links oficiais abaixo da resposta no bloco 'Documentos consultados'.",
       ].join("\n"),
       "",
       buildForcedExecutiveFollowUpInstruction({

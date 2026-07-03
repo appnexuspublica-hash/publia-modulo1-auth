@@ -369,19 +369,6 @@ function getPdfBadge(att: AttachedPdf | null) {
   }
 }
 
-function isPdfBlockingChat(att: AttachedPdf | null) {
-  const status = classifyPdfUiStatus(att);
-  return status === "processing" || status === "indexing";
-}
-
-function getPdfBlockingMessage(count: number) {
-  if (count <= 1) {
-    return "Aguarde o processamento do PDF terminar antes de perguntar.";
-  }
-
-  return `Aguarde o processamento dos ${count} PDFs selecionados terminar antes de perguntar.`;
-}
-
 function getPdfHint(att: AttachedPdf | null) {
   const status = classifyPdfUiStatus(att);
 
@@ -796,28 +783,6 @@ export default function ChatPageClient({
       null
     );
   }, [attachedPdfs, activePdfId]);
-
-  const pdfsBlockingChat = useMemo(() => {
-    if (!attachedPdfs.length) return [];
-
-    const selectedSet = new Set(selectedPdfIds);
-    const candidates =
-      selectedSet.size > 0
-        ? attachedPdfs.filter((pdf) => selectedSet.has(pdf.id))
-        : attachedPdfs;
-
-    return candidates.filter((pdf) => isPdfBlockingChat(pdf));
-  }, [attachedPdfs, selectedPdfIds]);
-
-  const isPdfBlockingSend = isUploadingPdf || pdfsBlockingChat.length > 0;
-
-  const pdfBlockingMessage = useMemo(() => {
-    if (isUploadingPdf) {
-      return "Aguarde o envio do PDF terminar antes de perguntar.";
-    }
-
-    return getPdfBlockingMessage(pdfsBlockingChat.length);
-  }, [isUploadingPdf, pdfsBlockingChat.length]);
 
   const brand = useMemo(
     () =>
@@ -1282,8 +1247,8 @@ export default function ChatPageClient({
   const pollPdfUntilStable = useCallback(
     async (pdfFileId: string, conversationId: string) => {
       const start = Date.now();
-      const timeoutMs = 180000;
-      const intervalMs = 2000;
+      const timeoutMs = 25000;
+      const intervalMs = 1500;
 
       while (Date.now() - start < timeoutMs) {
         if (activeConversationIdRef.current !== conversationId) return;
@@ -1726,27 +1691,6 @@ export default function ChatPageClient({
 
     if (attachedPdfs.length > 0 && pdfSelection.selectedPdfIds.length === 0) {
       showToast("Selecione pelo menos 1 PDF para conversar no chat.", {
-        type: "warning",
-        persistent: true,
-      });
-      return;
-    }
-
-    if (isUploadingPdf) {
-      showToast("Aguarde o envio do PDF terminar antes de perguntar.", {
-        type: "warning",
-        persistent: true,
-      });
-      return;
-    }
-
-    const selectedPdfSet = new Set(pdfSelection.selectedPdfIds);
-    const blockingSelectedPdfs = attachedPdfs.filter(
-      (pdf) => selectedPdfSet.has(pdf.id) && isPdfBlockingChat(pdf)
-    );
-
-    if (blockingSelectedPdfs.length > 0) {
-      showToast(getPdfBlockingMessage(blockingSelectedPdfs.length), {
         type: "warning",
         persistent: true,
       });
@@ -3090,23 +3034,11 @@ export default function ChatPageClient({
                 </div>
               )}
 
-            {isPdfBlockingSend && (
-              <div
-                className={`mb-2 rounded-xl border px-3 py-2 text-[12px] ${
-                  isStrategic
-                    ? "border-yellow-400/40 bg-yellow-400/10 text-yellow-100"
-                    : "border-amber-300 bg-amber-100 text-amber-950"
-                }`}
-              >
-                {pdfBlockingMessage}
-              </div>
-            )}
-
             <ChatInput
               onSend={handleSend}
               isSending={isSending}
               onStop={handleStop}
-              disabled={isBlocked || accessLoading || isPdfBlockingSend}
+              disabled={isBlocked || accessLoading}
               responseMode={responseMode}
               onResponseModeChange={setResponseMode}
               showResponseModes={showResponseModes}

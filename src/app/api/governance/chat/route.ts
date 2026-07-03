@@ -1,4 +1,20 @@
 // src/app/api/governance/chat/route.ts
+/**
+ * CHAT GOVERNANÇA
+ *
+ * Usado somente pelo produto:
+ * - Publ.IA Governança
+ *
+ * IMPORTANTE:
+ * Esta rota EXIGE organização ativa.
+ *
+ * Banco usado:
+ * - governance_conversations
+ * - governance_messages
+ *
+ * Chave de isolamento:
+ * - organization_id
+ */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";

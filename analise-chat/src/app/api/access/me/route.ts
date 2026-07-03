@@ -1,0 +1,448 @@
+// src/app/api/access/me/route.ts
+
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+
+import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+import { reconcileUserAccessSnapshot } from "@/lib/access/reconcileUserAccessSnapshot";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { autoApplyPendingPaidSignupTokens } from "@/lib/access/applySignupTokenAccess";
+import {
+  getResolvedUiState,
+  toFrontendAccessStatus,
+} from "@/lib/access/access-helpers";
+import { getCapabilitiesForTier } from "@/lib/access-control";
+import type { BillingCycle, SubscriptionPlan } from "@/types/access";
+
+export const dynamic = "force-dynamic";
+
+type CurrentUserAccessResolved = Awaited<
+  ReturnType<typeof getCurrentUserAccess>
+>["resolved"];
+
+function normalizeSubscriptionPlan(value: unknown): SubscriptionPlan {
+  if (value === "monthly" || value === "annual") {
+    return value;
+  }
+
+  return null;
+}
+
+function getRelevantSubscriptionPlan(
+  resolved: CurrentUserAccessResolved
+): SubscriptionPlan {
+  const activePlan = normalizeSubscriptionPlan(
+    resolved.activeGrant?.subscriptionPlan
+  );
+
+  if (activePlan) {
+    return activePlan;
+  }
+
+  const effectiveTier = resolved.effectiveProductTier;
+
+  const grantsByRecency = [...resolved.grants].sort((a, b) => {
+    const aTime = new Date(
+      a.endsAt ?? a.updatedAt ?? a.createdAt ?? 0
+    ).getTime();
+    const bTime = new Date(
+      b.endsAt ?? b.updatedAt ?? b.createdAt ?? 0
+    ).getTime();
+
+    return bTime - aTime;
+  });
+
+  const sameTierSubscriptionGrant = grantsByRecency.find((grant) => {
+    const plan = normalizeSubscriptionPlan(grant.subscriptionPlan);
+
+    return (
+      (grant.grantKind === "subscription" || grant.grantKind === "upgrade") &&
+      grant.productTier === effectiveTier &&
+      plan !== null
+    );
+  });
+
+  const sameTierPlan = normalizeSubscriptionPlan(
+    sameTierSubscriptionGrant?.subscriptionPlan
+  );
+
+  if (sameTierPlan) {
+    return sameTierPlan;
+  }
+
+  const latestSubscriptionLikeGrant = grantsByRecency.find((grant) => {
+    const plan = normalizeSubscriptionPlan(grant.subscriptionPlan);
+
+    return (
+      (grant.grantKind === "subscription" || grant.grantKind === "upgrade") &&
+      plan !== null
+    );
+  });
+
+  return normalizeSubscriptionPlan(latestSubscriptionLikeGrant?.subscriptionPlan);
+}
+
+function getRelevantBillingCycle(params: {
+  accessStatus:
+    | "trial_active"
+    | "trial_expired"
+    | "subscription_active"
+    | "subscription_expired";
+  subscriptionPlan: SubscriptionPlan;
+  isAdmin?: boolean;
+}): BillingCycle {
+  if (params.isAdmin) {
+    return "none";
+  }
+
+  if (params.accessStatus === "trial_active") {
+    return "trial";
+  }
+
+  if (
+    params.accessStatus === "subscription_active" ||
+    params.accessStatus === "subscription_expired"
+  ) {
+    return params.subscriptionPlan ?? "none";
+  }
+
+  return "none";
+}
+
+
+function getMonthStart(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function countUserMessagesThisMonth(params: {
+  supabase: any;
+  userId: string;
+  now: Date;
+}): Promise<number> {
+  const monthStartIso = getMonthStart(params.now).toISOString();
+
+  const { data: conversations, error: conversationsError } = await params.supabase
+    .from("conversations")
+    .select("id")
+    .eq("user_id", params.userId);
+
+  if (conversationsError) {
+    console.error(
+      "[access/me] erro ao buscar conversas para contar mensagens:",
+      conversationsError
+    );
+    return 0;
+  }
+
+  const conversationIds = (conversations ?? [])
+    .map((conversation: any) => String(conversation?.id ?? "").trim())
+    .filter(Boolean);
+
+  if (!conversationIds.length) {
+    return 0;
+  }
+
+  let total = 0;
+
+  for (const idsChunk of chunkArray(conversationIds, 200)) {
+    const { count, error } = await params.supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .in("conversation_id", idsChunk)
+      .eq("role", "user")
+      .gte("created_at", monthStartIso);
+
+    if (error) {
+      console.error("[access/me] erro ao contar mensagens do mês:", error);
+      return total;
+    }
+
+    total += count ?? 0;
+  }
+
+  return total;
+}
+
+async function countUserPdfsThisMonth(params: {
+  supabase: any;
+  userId: string;
+  now: Date;
+}): Promise<number> {
+  const monthStartIso = getMonthStart(params.now).toISOString();
+
+  const { count, error } = await params.supabase
+    .from("pdf_files")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", params.userId)
+    .gte("created_at", monthStartIso);
+
+  if (error) {
+    console.error("[access/me] erro ao contar PDFs do mês:", error);
+    return 0;
+  }
+
+  return count ?? 0;
+}
+
+function getBlockedMessage(params: {
+  isActive: boolean;
+  accessStatus:
+    | "trial_active"
+    | "trial_expired"
+    | "subscription_active"
+    | "subscription_expired";
+  isAdmin?: boolean;
+}): string | null {
+  if (params.isAdmin) {
+    return null;
+  }
+
+  if (params.isActive) {
+    return null;
+  }
+
+  if (params.accessStatus === "subscription_expired") {
+    return "Sua assinatura expirou. Renove para voltar a usar os recursos da IA.";
+  }
+
+  if (params.accessStatus === "trial_expired") {
+    return "Seu período de teste expirou. Assine um plano para continuar usando os recursos da IA.";
+  }
+
+  return "Seu acesso está bloqueado no momento.";
+}
+
+export async function GET() {
+  try {
+    const cookieStore = cookies();
+
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return NextResponse.json(
+        { error: "Variáveis do Supabase não configuradas." },
+        { status: 500 }
+      );
+    }
+
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: CookieOptions) {
+          try {
+            cookieStore.set({ name, value, ...options });
+          } catch {}
+        },
+        remove(name: string, options: CookieOptions) {
+          try {
+            cookieStore.set({ name, value: "", ...options, maxAge: 0 });
+          } catch {}
+        },
+      },
+    });
+
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: "Usuário não autenticado." },
+        { status: 401 }
+      );
+    }
+
+    try {
+      const adminSupabase = createSupabaseAdminClient();
+
+      const autoApplyResult = await autoApplyPendingPaidSignupTokens({
+        supabase: adminSupabase,
+        userId: user.id,
+        now: new Date(),
+      });
+
+      if (autoApplyResult.applied > 0) {
+        console.info("[access/me] signup_tokens pagos pendentes conciliados:", {
+          userId: user.id,
+          tokenIds: autoApplyResult.tokenIds,
+        });
+      }
+
+      if (autoApplyResult.skipped.length > 0) {
+        console.info("[access/me] signup_tokens pagos pendentes ignorados:", {
+          userId: user.id,
+          skipped: autoApplyResult.skipped,
+        });
+      }
+    } catch (autoApplyError) {
+      console.error(
+        "[access/me] erro ao conciliar signup_tokens pagos pendentes:",
+        autoApplyError,
+      );
+    }
+
+    const currentAccess = await getCurrentUserAccess(supabase);
+    const resolved = currentAccess.resolved;
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("is_admin, role")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error("[access/me] erro ao consultar perfil admin:", profileError);
+    }
+
+    const isAdmin =
+      Boolean(profile?.is_admin) ||
+      String(profile?.role ?? "").toLowerCase() === "admin";
+
+    try {
+      await reconcileUserAccessSnapshot({
+        supabase,
+        userId: user.id,
+        now: new Date(),
+      });
+    } catch (snapshotError) {
+      console.error(
+        "[access/me] erro ao reconciliar snapshot user_access:",
+        snapshotError
+      );
+    }
+
+    const ui = getResolvedUiState(resolved);
+
+    const accessStatus = isAdmin
+      ? "subscription_active"
+      : toFrontendAccessStatus(resolved);
+
+    const productTier = isAdmin
+      ? "strategic"
+      : resolved.effectiveProductTier ?? "essential";
+
+    const subscriptionPlan = isAdmin
+      ? null
+      : getRelevantSubscriptionPlan(resolved);
+
+    const billingCycle = getRelevantBillingCycle({
+      accessStatus,
+      subscriptionPlan,
+      isAdmin,
+    });
+
+    const blockedMessage = getBlockedMessage({
+      isActive: isAdmin || ui.isActive,
+      accessStatus,
+      isAdmin,
+    });
+
+    const tierCapabilities = getCapabilitiesForTier(productTier);
+    const now = new Date();
+
+    const [messagesUsed, pdfsUsedThisMonth] = await Promise.all([
+      countUserMessagesThisMonth({
+        supabase,
+        userId: user.id,
+        now,
+      }),
+      countUserPdfsThisMonth({
+        supabase,
+        userId: user.id,
+        now,
+      }),
+    ]);
+
+    return NextResponse.json({
+      resolvedAccess: resolved,
+      ui: {
+        ...ui,
+        isActive: isAdmin || ui.isActive,
+      },
+
+      accessStatus,
+      access_status: accessStatus,
+      productTier,
+      billingCycle,
+      scopeType: isAdmin ? "organization" : "individual",
+      blockedMessage,
+      blocked_message: blockedMessage,
+      trialEndsAt: resolved.trialEndsAt,
+      subscriptionEndsAt: resolved.subscriptionEndsAt,
+      subscriptionPlan,
+      messagesUsed,
+      trialMessageLimit: resolved.snapshot?.trial_message_limit ?? null,
+      isAdmin,
+      capabilities: {
+        maxPdfsPerConversation: isAdmin ? 999 : tierCapabilities.maxPdfsPerConversation,
+        maxPdfUploadsPerAccount: null,
+        maxPdfUploadsPerMonth: null,
+        responseModes: isAdmin
+          ? [
+              "objective",
+              "summary",
+              "step_by_step",
+              "checklist",
+              "document_draft",
+              "manager_guidance",
+              "attention_points",
+            ]
+          : [],
+        canRenameConversation: true,
+        canSearchHistory: true,
+        canUsePdfChat: true,
+        canUseExport: true,
+        canUseLegalBase: true,
+        canUseTemplates: true,
+        canUseOrganizationFeatures: isAdmin,
+      },
+      brand: {
+        productName: isAdmin
+          ? "Publ.IA Admin"
+          : productTier === "strategic"
+            ? "Publ.IA Estratégico"
+            : "Publ.IA Essencial",
+        productLabel: isAdmin
+          ? "PUBL.IA ADMIN"
+          : productTier === "strategic"
+            ? "Publ.IA ESTRATÉGICO"
+            : "PUBL.IA ESSENCIAL",
+        versionLabel: isAdmin
+          ? ""
+          : productTier === "strategic"
+            ? "2.01"
+            : "1.7",
+        vendorLabel: "Nexus Pública",
+        accentVariant: productTier,
+      },
+      pdfUsage: {
+        limit: null,
+        used: pdfsUsedThisMonth,
+        remaining: null,
+        period: isAdmin ? "admin" : "month",
+      },
+    });
+  } catch (error) {
+    console.error("Erro em /api/access/me:", error);
+
+    return NextResponse.json(
+      { error: "Erro interno ao carregar acesso do usuário." },
+      { status: 500 }
+    );
+  }
+}
