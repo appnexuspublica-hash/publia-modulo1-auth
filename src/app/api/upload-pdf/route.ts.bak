@@ -471,8 +471,6 @@ export async function POST(request: NextRequest) {
       pendingStorageUploadFile = fileValue;
 
       body = {
-        // product="governance" separa a Governança do fluxo comercial
-        // compartilhado pelo Publ.IA Essencial/Estratégico.
         product: String(formData.get("product") ?? "").trim(),
         conversationId: conversationIdFromForm,
         fileName: fileValue.name,
@@ -555,35 +553,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // PUBL.IA GOVERNANÇA:
-    // Uploads iniciados pela Governança NÃO dependem da assinatura do
-    // Publ.IA Essencial/Estratégico. A autorização institucional já foi
-    // validada acima pela conversa de Governança do usuário.
-    //
-    // PUBL.IA ESSENCIAL/ESTRATÉGICO:
-    // Continuam usando a regra comercial normal de plano, limites e bloqueio.
-    const planValidation = isGovernanceUpload
-      ? ({
-          allowed: true,
-          limit: null,
-          used: 0,
-          remaining: null,
-          period: null,
-          blockedMessage: null,
-          accessStatus: "subscription_active",
-          isAdmin: false,
-          productTier: "governance",
-          capabilities: {
-            maxPdfsPerConversation: getConversationPdfLimit({
-              isAdmin: false,
-              productTier: "governance",
-              capabilities: { maxPdfsPerConversation: STRATEGIC_PDFS_PER_CONVERSATION },
-            }),
-            maxPdfUploadsPerAccount: null,
-            maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("governance"),
-          },
-        } satisfies PdfUploadPlanValidation)
-      : await validatePdfUploadByPlan(supabase, user.id);
+    const planValidation = await validatePdfUploadByPlan(supabase, user.id);
 
     if (!planValidation.allowed) {
       return NextResponse.json(
