@@ -2862,6 +2862,7 @@ export default function GovernanceChatClient({
           },
           body: JSON.stringify({
             pdfFileId,
+            product: "governance",
           }),
         });
 

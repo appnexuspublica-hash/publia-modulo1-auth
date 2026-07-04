@@ -12,6 +12,10 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
+const GOVERNANCE_PDF_MAX_MB = Number(
+  process.env.GOVERNANCE_PDF_INDEX_MAX_MB ?? "25",
+);
+
 const uuidRe =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -39,8 +43,17 @@ export async function POST(req: Request) {
     if (!contentType.includes("application/json")) {
       return NextResponse.json(
         { error: "Content-Type deve ser application/json." },
-        { status: 415 }
+        { status: 415 },
       );
+    }
+
+    const body = await req.json().catch(() => null);
+    const pdfFileId = String(body?.pdfFileId ?? "").trim();
+    const product = String(body?.product ?? "").trim().toLowerCase();
+    const isGovernanceIndexing = product === "governance";
+
+    if (!pdfFileId || !uuidRe.test(pdfFileId)) {
+      return NextResponse.json({ error: "pdfFileId inválido." }, { status: 400 });
     }
 
     const client = await createSupabaseServerClient();
@@ -56,49 +69,55 @@ export async function POST(req: Request) {
 
     const userId = user.id;
 
-    const accessSummary = await getAccessSummary(client, userId);
+    let pdfUploadMaxMb = GOVERNANCE_PDF_MAX_MB;
+    let productTier = "governance";
 
-    if (!accessSummary) {
-      return NextResponse.json(
-        { error: "Não foi possível verificar o acesso da sua conta no momento." },
-        { status: 500 }
+    if (!isGovernanceIndexing) {
+      const accessSummary = await getAccessSummary(client, userId);
+
+      if (!accessSummary) {
+        return NextResponse.json(
+          {
+            error:
+              "Não foi possível verificar o acesso da sua conta no momento.",
+          },
+          { status: 500 },
+        );
+      }
+
+      const accessDecision = await syncEffectiveAccessStatus(
+        client,
+        accessSummary,
       );
-    }
 
-    const accessDecision = await syncEffectiveAccessStatus(client, accessSummary);
+      if (!accessDecision.allowed) {
+        return NextResponse.json(
+          {
+            error:
+              accessDecision.message ??
+              "Seu plano atual não permite processar PDFs.",
+            accessBlocked: true,
+            accessStatus: accessDecision.effectiveStatus,
+            access_status: accessDecision.effectiveStatus,
+            reason: accessDecision.reason,
+          },
+          { status: 403 },
+        );
+      }
 
-    if (!accessDecision.allowed) {
-      return NextResponse.json(
-        {
-          error:
-            accessDecision.message ??
-            "Seu plano atual não permite processar PDFs.",
-          accessBlocked: true,
-          accessStatus: accessDecision.effectiveStatus,
-          access_status: accessDecision.effectiveStatus,
-          reason: accessDecision.reason,
-        },
-        { status: 403 }
-      );
-    }
+      const accessContext = buildAccessContext({
+        summary: accessSummary,
+        effectiveStatus: accessDecision.effectiveStatus,
+        isAdmin: accessDecision.reason === "admin_override",
+      });
 
-    const accessContext = buildAccessContext({
-      summary: accessSummary,
-      effectiveStatus: accessDecision.effectiveStatus,
-      isAdmin: accessDecision.reason === "admin_override",
-    });
-    const pdfUploadMaxMb = getPdfUploadMaxMbForTier(accessContext.productTier);
-
-    const body = await req.json().catch(() => null);
-    const pdfFileId = String(body?.pdfFileId ?? "").trim();
-
-    if (!pdfFileId || !uuidRe.test(pdfFileId)) {
-      return NextResponse.json({ error: "pdfFileId inválido." }, { status: 400 });
+      pdfUploadMaxMb = getPdfUploadMaxMbForTier(accessContext.productTier);
+      productTier = accessContext.productTier;
     }
 
     const { data: pdfRow, error: pdfErr } = await client
       .from("pdf_files")
-      .select("id, file_size, user_id")
+      .select("id, file_size, user_id, storage_path")
       .eq("id", pdfFileId)
       .eq("user_id", userId)
       .maybeSingle();
@@ -106,14 +125,14 @@ export async function POST(req: Request) {
     if (pdfErr) {
       return NextResponse.json(
         { error: "Erro ao validar PDF para indexação.", detail: pdfErr.message },
-        { status: 500 }
+        { status: 500 },
       );
     }
 
     if (!pdfRow) {
       return NextResponse.json(
         { error: "PDF inválido ou sem permissão." },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
@@ -130,12 +149,12 @@ export async function POST(req: Request) {
 
       return NextResponse.json(
         {
-          error: `PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB para o seu plano.`,
+          error: `PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB para este fluxo.`,
           code: "PDF_TOO_LARGE",
           uploadMaxMb: pdfUploadMaxMb,
-          productTier: accessContext.productTier,
+          productTier,
         },
-        { status: 413 }
+        { status: 413 },
       );
     }
 
@@ -160,7 +179,7 @@ export async function POST(req: Request) {
         detail: msg,
         ...(isDev ? { stack } : {}),
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
