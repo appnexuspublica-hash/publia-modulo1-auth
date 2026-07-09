@@ -16,6 +16,7 @@ import {
   Users,
 } from "lucide-react";
 
+import GovernanceHeader from "./components/GovernanceHeader";
 import GovernancePageFrame from "./components/GovernancePageFrame";
 import {
   getGovernanceHistoryRetentionPolicyLabel,

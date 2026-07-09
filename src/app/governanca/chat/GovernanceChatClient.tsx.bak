@@ -43,7 +43,6 @@ import {
 } from "lucide-react";
 
 import GovernanceHeader from "../components/GovernanceHeader";
-import GovernanceFooter from "../components/GovernanceFooter";
 import {
   getGovernanceFunctionalRoleLabel,
   getGovernanceResponseModeLabel,
@@ -4285,10 +4284,6 @@ export default function GovernanceChatClient({
               </div>
             </div>
           )}
-
-          <div className="shrink-0 border-t border-[#dedede] bg-[#f8f8f8] px-4 py-3">
-            <GovernanceFooter variant="chat" />
-          </div>
         </main>
       </div>
     </div>

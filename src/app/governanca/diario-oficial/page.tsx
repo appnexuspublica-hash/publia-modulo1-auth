@@ -1,18 +1,11 @@
 // src/app/governanca/diario-oficial/page.tsx
 import { redirect } from "next/navigation";
 
-import GovernanceHeader from "../components/GovernanceHeader";
-import GovernanceSidebar from "../components/GovernanceSidebar";
+import GovernancePageFrame from "../components/GovernancePageFrame";
 import {
   createReadonlySupabaseServerClient,
   getCurrentGovernanceOrganization,
 } from "@/lib/governance/get-current-organization";
-import {
-  getGovernanceFunctionalRoleLabel,
-  getGovernanceTechnicalRoleLabel,
-  getOrganizationStatusLabel,
-} from "@/types/governance";
-
 import OfficialGazetteClient from "./OfficialGazetteClient";
 
 export const dynamic = "force-dynamic";
@@ -74,38 +67,14 @@ export default async function GovernanceOfficialGazettePage() {
     redirect("/governanca");
   }
 
-  const { organization, membership } = context;
-
   const userLabel = await getGovernanceUserLabel({
     supabase,
     userId: user.id,
   });
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
-      <GovernanceHeader
-        userLabel={userLabel}
-        userEmail={null}
-        organizationName={organization.name}
-        organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
-      />
-
-      <div className="flex min-h-0 flex-1">
-        <GovernanceSidebar
-          organizationName={organization.name}
-          organizationLogoUrl={organization.logo_url}
-          functionalRoleLabel={getGovernanceFunctionalRoleLabel(
-            membership.functional_role,
-          )}
-          technicalRoleLabel={getGovernanceTechnicalRoleLabel(
-            membership.technical_role,
-          )}
-        />
-
-        <main className="min-w-0 flex-1 overflow-y-auto px-8 py-7">
-          <OfficialGazetteClient />
-        </main>
-      </div>
-    </div>
+    <GovernancePageFrame userLabel={userLabel} userEmail={null} context={context}>
+      <OfficialGazetteClient />
+    </GovernancePageFrame>
   );
 }

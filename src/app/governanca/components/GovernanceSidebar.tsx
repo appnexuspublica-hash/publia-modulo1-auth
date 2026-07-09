@@ -85,7 +85,6 @@ export default function GovernanceSidebar({
   organizationName,
   organizationLogoUrl,
   functionalRoleLabel,
-  technicalRoleLabel,
 }: GovernanceSidebarProps) {
   const pathname = usePathname();
 
@@ -120,10 +119,6 @@ export default function GovernanceSidebar({
             <span>{functionalRoleLabel}</span>
           </div>
 
-          <div className="rounded-2xl bg-[#f5f5f5] p-3 text-slate-800">
-            <span className="block font-semibold">Permissão técnica</span>
-            <span>{technicalRoleLabel}</span>
-          </div>
         </div>
       </div>
 

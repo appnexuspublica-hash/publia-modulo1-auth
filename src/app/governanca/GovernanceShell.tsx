@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   BarChart3,
   BookOpen,
+  Boxes,
   Building2,
   CalendarDays,
   FileSearch,
@@ -481,9 +482,15 @@ export default function GovernanceShell({
           </section>
 
           <section className="mt-7">
-            <h2 className="mb-5 text-lg font-bold text-slate-950">
-              Módulos
-            </h2>
+            <div className="mb-5 flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#0f3a4a] shadow-sm ring-1 ring-[#dedede]">
+                <Boxes size={24} />
+              </div>
+
+              <h2 className="text-2xl font-bold text-slate-950">
+                Módulos
+              </h2>
+            </div>
 
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {overviewCards.map((card) => {
