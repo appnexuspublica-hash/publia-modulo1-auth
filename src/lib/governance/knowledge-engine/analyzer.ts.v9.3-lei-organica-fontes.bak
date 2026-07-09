@@ -1,0 +1,305 @@
+import { normalizeGovernanceText } from "./normalize";
+
+export type GovernanceQueryTopic =
+  | "current_mayor"
+  | "current_vice_mayor"
+  | "lai"
+  | "lrf_personnel_expense"
+  | "magisterio_career"
+  | "career_progression"
+  | "administrative_structure"
+  | "licitacoes"
+  | "generic";
+
+export type GovernanceQueryNature =
+  | "legal_general"
+  | "municipal_records"
+  | "institutional"
+  | "mixed";
+
+export type GovernanceQueryAnalysis = {
+  topic: GovernanceQueryTopic;
+  queryNature: GovernanceQueryNature;
+  normalizedQuestion: string;
+  requiresCurrentDocument: boolean;
+  requiresLegalCatalog: boolean;
+  priorityTerms: string[];
+  excludedTerms: string[];
+  instructions: string[];
+};
+
+function includesAny(text: string, patterns: RegExp[]) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+
+function inferGovernanceQueryNature(normalizedQuestion: string): GovernanceQueryNature {
+  const q = normalizedQuestion;
+
+  const asksForMunicipalRecords =
+    includesAny(q, [
+      /\binforme\b/,
+      /\bliste\b/,
+      /\brelacione\b/,
+      /\bmostre\b/,
+      /\bquais\b/,
+      /\bquais foram\b/,
+      /\bocorreram\b/,
+      /\bpublicad[oa]s?\b/,
+      /\bpublicacoes\b/,
+      /\bpublicações\b/,
+      /\bno mes\b/,
+      /\bno mês\b/,
+      /\bem janeiro\b/,
+      /\bem fevereiro\b/,
+      /\bem marco\b/,
+      /\bem março\b/,
+      /\bem abril\b/,
+      /\bem maio\b/,
+      /\bem junho\b/,
+      /\bem julho\b/,
+      /\bem agosto\b/,
+      /\bem setembro\b/,
+      /\bem outubro\b/,
+      /\bem novembro\b/,
+      /\bem dezembro\b/,
+      /\bentre\b.+\be\b/,
+      /\bperiodo\b/,
+      /\bperíodo\b/,
+      /\bdiario oficial\b/,
+      /\bdiário oficial\b/,
+      /\bprocesso administrativo\b/,
+      /\baviso de dispensa\b/,
+      /\batas?\b/,
+      /\bdecretos?\b/,
+      /\bportarias?\b/,
+      /\blicitações realizadas\b/,
+      /\blicitações publicadas\b/,
+      /\bdispensas realizadas\b/,
+      /\bdispensas publicadas\b/,
+    ]) &&
+    includesAny(q, [
+      /\bmunicipio\b/,
+      /\bmunicípio\b/,
+      /\bprefeitura\b/,
+      /\bdiario oficial\b/,
+      /\bdiário oficial\b/,
+      /\blicitação\b/,
+      /\blicitações\b/,
+      /\blicita[cç]ao\b/,
+      /\blicita[cç]oes\b/,
+      /\bdispensa\b/,
+      /\binexigibilidade\b/,
+      /\bpregão\b/,
+      /\bpregao\b/,
+      /\bcontrata[cç][aã]o\b/,
+      /\bprocesso administrativo\b/,
+      /\bata\b/,
+      /\baviso\b/,
+    ]);
+
+  const asksInstitutionalDocument =
+    includesAny(q, [
+      /\bo municipio possui\b/,
+      /\bo município possui\b/,
+      /\ba prefeitura possui\b/,
+      /\bexiste\b/,
+      /\bha\b/,
+      /\bhá\b/,
+      /\btem\b/,
+      /\bqual\b/,
+      /\bcadê\b/,
+      /\bcade\b/,
+    ]) &&
+    includesAny(q, [
+      /\bplano\b/,
+      /\bestatuto\b/,
+      /\blei municipal\b/,
+      /\borganograma\b/,
+      /\bestrutura administrativa\b/,
+      /\bplano de carreira\b/,
+      /\bmagisterio\b/,
+      /\bmagistério\b/,
+      /\bservidores\b/,
+      /\bata de posse\b/,
+    ]);
+
+  const asksGeneralLegalRule =
+    includesAny(q, [
+      /\bquando\b/,
+      /\bquando pode\b/,
+      /\bem quais casos\b/,
+      /\bquais casos\b/,
+      /\bcomo funciona\b/,
+      /\bo que diz\b/,
+      /\bo que e\b/,
+      /\bo que é\b/,
+      /\bqual a regra\b/,
+      /\bqual o fundamento\b/,
+      /\bqual a base legal\b/,
+      /\bpode ocorrer\b/,
+      /\bpode ser feita\b/,
+      /\bpode contratar\b/,
+      /\bhipoteses\b/,
+      /\bhipóteses\b/,
+    ]) &&
+    includesAny(q, [
+      /\blei\b/,
+      /\bartigo\b/,
+      /\bart\./,
+      /\bdispensa\b/,
+      /\binexigibilidade\b/,
+      /\blicitação\b/,
+      /\blicitações\b/,
+      /\blicita[cç]ao\b/,
+      /\blicita[cç]oes\b/,
+      /\bcontrata[cç][aã]o direta\b/,
+      /\blrf\b/,
+      /\blai\b/,
+      /\blgpd\b/,
+      /\bresponsabilidade fiscal\b/,
+      /\btransparencia\b/,
+      /\btransparência\b/,
+    ]);
+
+  if (asksForMunicipalRecords && asksGeneralLegalRule) {
+    return "mixed";
+  }
+
+  if (asksForMunicipalRecords) {
+    return "municipal_records";
+  }
+
+  if (asksInstitutionalDocument) {
+    return "institutional";
+  }
+
+  if (asksGeneralLegalRule) {
+    return "legal_general";
+  }
+
+  return "mixed";
+}
+
+export function analyzeGovernanceQuery(question: string): GovernanceQueryAnalysis {
+  const q = normalizeGovernanceText(question);
+  const base: GovernanceQueryAnalysis = {
+    topic: "generic",
+    queryNature: inferGovernanceQueryNature(q),
+    normalizedQuestion: q,
+    requiresCurrentDocument: false,
+    requiresLegalCatalog: false,
+    priorityTerms: [],
+    excludedTerms: [],
+    instructions: [],
+  };
+
+  const asksVice = includesAny(q, [/\bvice prefeito\b/, /\bvice-prefeito\b/, /\bvice\b/]) && includesAny(q, [/\bquem\b/, /\bnome\b/, /\batual\b/, /\bgestao\b/]);
+  const asksMayor = includesAny(q, [/\bprefeito\b/, /\bchefe do executivo\b/]) && includesAny(q, [/\bquem\b/, /\bnome\b/, /\batual\b/, /\bgestao\b/]);
+
+  if (asksVice) {
+    return {
+      ...base,
+      topic: "current_vice_mayor",
+      requiresCurrentDocument: true,
+      priorityTerms: ["vice-prefeito", "vice prefeito", "ata de posse", "gestão 2025", "2025-2028", "prefeito e vice"],
+      excludedTerms: ["ex-prefeito", "2003", "2004", "2005", "2013"],
+      instructions: [
+        "Pergunta sobre vice-prefeito atual: priorize Ata de Posse, diplomação ou ato oficial do mandato 2025-2028.",
+        "Não use documentos antigos para afirmar titular atual do cargo.",
+        "Se houver divergência de OCR/grafia, diga que a grafia deve ser conferida no documento oficial usado.",
+      ],
+    };
+  }
+
+  if (asksMayor) {
+    return {
+      ...base,
+      topic: "current_mayor",
+      requiresCurrentDocument: true,
+      priorityTerms: ["prefeito", "ata de posse", "gestão 2025", "2025-2028", "chefe do executivo", "prefeito e vice"],
+      excludedTerms: ["ex-prefeito", "2003", "2004", "2005", "2013"],
+      instructions: [
+        "Pergunta sobre prefeito atual: priorize Ata de Posse, diplomação ou ato oficial do mandato 2025-2028.",
+        "Não use documentos antigos para afirmar titular atual do cargo.",
+        "Se a Ata de Posse 2025-2028 estiver no contexto, ela é a principal evidência para prefeito e vice.",
+      ],
+    };
+  }
+
+  if (includesAny(q, [/\blai\b/, /lei de acesso a informacao/, /acesso a informacao/, /pedido de informacao/, /pedidos de informacao/, /\bsic\b/, /\be-sic\b/])) {
+    return {
+      ...base,
+      topic: "lai",
+      requiresLegalCatalog: true,
+      priorityTerms: ["lai", "lei de acesso à informação", "lei 12527", "lgpd", "sic", "e-sic"],
+      instructions: [
+        "Tema LAI: use a Lei nº 12.527/2011 e a LGPD como fundamento federal mínimo.",
+        "Quando não houver norma municipal no contexto, explique que prazos/instâncias locais devem ser conferidos em decreto, portaria ou regulamento municipal.",
+      ],
+    };
+  }
+
+  if (includesAny(q, [/despesa com pessoal/, /\blrf\b/, /responsabilidade fiscal/, /limite prudencial/, /receita corrente liquida/, /\brcl\b/])) {
+    return {
+      ...base,
+      topic: "lrf_personnel_expense",
+      requiresLegalCatalog: true,
+      priorityTerms: ["lrf", "lei complementar 101", "despesa com pessoal", "limite prudencial", "arts. 18 a 23", "rcl"],
+      instructions: [
+        "Tema LRF/despesa com pessoal: use a Lei Complementar nº 101/2000, especialmente arts. 18 a 23.",
+        "Não invente percentual municipal atual sem RCL e dados contábeis do período.",
+      ],
+    };
+  }
+
+  if (includesAny(q, [/\blicitação\b/, /\blicitações\b/, /\blicita[cç]ao\b/, /\blicita[cç]oes\b/, /\bdispensa\b/, /\binexigibilidade\b/, /\bpregão\b/, /\bpregao\b/, /\bcontrata[cç][aã]o direta\b/, /\blei\s*n?[º°]?\s*14\.?133\b/, /\b14\.?133\/2021\b/])) {
+    return {
+      ...base,
+      topic: "licitacoes",
+      requiresLegalCatalog: true,
+      priorityTerms: ["lei 14.133", "licitação", "dispensa", "inexigibilidade", "pregão", "contratação direta"],
+      excludedTerms: ["estagiário", "estagiarios", "servidores", "magistério", "magisterio", "plano diretor"],
+      instructions: [
+        "Tema licitações/contratações: use a Lei nº 14.133/2021 como fundamento federal mínimo quando a pergunta for normativa.",
+        "Se a pergunta for jurídica geral, não use documentos municipais apenas porque foram recuperados.",
+        "Se a pergunta pedir atos do Município, priorize avisos, atas, editais ou processos administrativos diretamente ligados à licitação perguntada.",
+      ],
+    };
+  }
+
+  if (includesAny(q, [/magisterio/, /magistério/, /professor/, /professores/, /docente/, /educacao/]) && includesAny(q, [/plano/, /carreira/, /cargos/, /vencimentos/, /progressao/, /progressão/])) {
+    return {
+      ...base,
+      topic: "magisterio_career",
+      priorityTerms: ["magistério", "magisterio", "professor", "docente", "plano de cargos", "carreira", "remuneração do magistério"],
+      excludedTerms: ["plano diretor", "código tributário", "lei orgânica"],
+      instructions: [
+        "Tema plano de carreira do magistério: priorize documentos cujo título ou conteúdo mencione Magistério, Professor, Docente ou Educação.",
+        "Não conclua ausência de plano específico se houver documento do magistério recuperado no contexto.",
+      ],
+    };
+  }
+
+  if (includesAny(q, [/progressao/, /progressão/, /carreira/, /plano de cargos/, /pccs/, /vencimentos/])) {
+    return {
+      ...base,
+      topic: "career_progression",
+      priorityTerms: ["progressão", "plano de cargos", "carreira", "vencimentos", "interstício", "avaliação de desempenho"],
+      excludedTerms: ["plano diretor", "código tributário"],
+      instructions: ["Tema carreira/progressão: priorize Plano de Cargos, Estatuto e normas de RH."],
+    };
+  }
+
+  if (includesAny(q, [/estrutura administrativa/, /organograma/, /secretaria/, /departamento/, /administracao direta/])) {
+    return {
+      ...base,
+      topic: "administrative_structure",
+      priorityTerms: ["estrutura administrativa", "secretarias", "departamentos", "administração direta", "organograma"],
+      excludedTerms: ["plano diretor", "código tributário"],
+      instructions: ["Tema estrutura administrativa: priorize lei complementar ou norma municipal específica de organização administrativa."],
+    };
+  }
+
+  return base;
+}

@@ -1,0 +1,109 @@
+import type { GovernanceKnowledgeContext, GovernanceKnowledgeItem, GovernanceKnowledgeSource } from "./types";
+
+function sourceFromItem(item: GovernanceKnowledgeItem): GovernanceKnowledgeSource {
+  return {
+    id: item.id,
+    title: item.title,
+    url: item.url,
+    type: item.type,
+    provider: item.provider,
+  };
+}
+
+function uniqueSources(items: GovernanceKnowledgeItem[], provider: GovernanceKnowledgeSource["provider"]) {
+  const unique = new Map<string, GovernanceKnowledgeSource>();
+
+  for (const item of items.filter((entry) => entry.provider === provider)) {
+    const source = sourceFromItem(item);
+    const key = `${source.provider}:${source.id}:${source.url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, source);
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+export function buildKnowledgeContextText(params: {
+  question: string;
+  items: GovernanceKnowledgeItem[];
+  maxContextChars: number;
+}): GovernanceKnowledgeContext {
+  const selected: GovernanceKnowledgeItem[] = [];
+  let usedChars = 0;
+
+  for (const item of params.items) {
+    const block = [
+      `FONTE: ${item.title}`,
+      `ORIGEM: ${item.provider}`,
+      item.type ? `TIPO: ${item.type}` : "",
+      item.url ? `URL OFICIAL: ${item.url}` : "",
+      `SCORE: ${item.score}`,
+      item.evidence.length > 0 ? `EVIDÊNCIAS: ${item.evidence.join("; ")}` : "",
+      "TRECHO:",
+      item.excerpt,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    if (usedChars + block.length > params.maxContextChars && selected.length > 0) {
+      continue;
+    }
+
+    selected.push(item);
+    usedChars += block.length;
+  }
+
+  const contextText = selected.length
+    ? [
+        "MOTOR DE CONHECIMENTO DA GOVERNANÇA",
+        "",
+        "Use SOMENTE os trechos e fontes abaixo para responder quando a pergunta depender de dado jurídico, institucional, administrativo ou normativo.",
+        "Não cite lei, decreto, Constituição, Lei Orgânica, Diário Oficial ou fonte que não esteja listada abaixo.",
+        "Não invente links. Quando citar fonte, use apenas a URL OFICIAL informada no respectivo bloco.",
+        "Lei Complementar municipal, Lei Orgânica municipal, Plano de Cargos, Código Tributário municipal, Plano Diretor e Lei de Criação municipal/estadual devem usar somente URLs recuperadas do banco. Nunca gere link do Planalto para essas normas locais.",
+        "Quando os trechos forem suficientes, responda de forma completa e objetiva. Não economize a resposta e não mande o usuário clicar na lei para obter o detalhamento que já está no contexto.",
+        "Se os trechos não forem suficientes, diga exatamente o que faltou e recomende validação em fonte oficial.",
+        "",
+        "FONTES RECUPERADAS:",
+        selected
+          .map((item, index) =>
+            [
+              `#${index + 1} — ${item.title}`,
+              `Origem: ${item.provider}`,
+              item.type ? `Tipo: ${item.type}` : "",
+              item.url ? `URL oficial: ${item.url}` : "",
+              `Score: ${item.score}`,
+              item.evidence.length > 0 ? `Evidências: ${item.evidence.join("; ")}` : "",
+              "Trecho recuperado:",
+              item.excerpt,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          )
+          .join("\n\n---\n\n"),
+      ].join("\n")
+    : [
+        "MOTOR DE CONHECIMENTO DA GOVERNANÇA",
+        "",
+        "Nenhuma fonte interna suficientemente relevante foi localizada nas bases da Governança para esta pergunta.",
+        "Não invente dados locais, leis municipais, percentuais, prazos ou links.",
+        "Oriente a validação em fonte oficial externa quando a resposta depender de dado normativo específico.",
+      ].join("\n");
+
+  return {
+    contextText,
+    items: selected,
+    sources: {
+      institutional: uniqueSources(selected, "institutional"),
+      officialGazette: uniqueSources(selected, "official_gazette"),
+      officialSources: uniqueSources(selected, "official_sources"),
+    },
+    diagnostics: {
+      totalItems: params.items.length,
+      selectedItems: selected.length,
+      minScore: selected[selected.length - 1]?.score ?? 0,
+    },
+  };
+}

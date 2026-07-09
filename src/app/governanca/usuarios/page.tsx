@@ -9,8 +9,7 @@ import {
   UserX,
 } from "lucide-react";
 
-import GovernanceHeader from "../components/GovernanceHeader";
-import GovernanceSidebar from "../components/GovernanceSidebar";
+import GovernancePageFrame from "../components/GovernancePageFrame";
 import {
   createReadonlySupabaseServerClient,
   getCurrentGovernanceOrganization,
@@ -19,7 +18,6 @@ import {
   getGovernanceFunctionalRoleLabel,
   getGovernanceMemberStatusLabel,
   getGovernanceTechnicalRoleLabel,
-  getOrganizationStatusLabel,
   type GovernanceFunctionalRole,
   type GovernanceMemberStatus,
   type GovernanceTechnicalRole,
@@ -274,26 +272,7 @@ export default async function GovernanceUsersPage() {
   const canShowNewUserForm = canCreateUser(membership.technical_role);
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
-      <GovernanceHeader
-        userLabel={userLabel}
-        userEmail={null}
-        organizationName={organization.name}
-        organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
-      />
-
-      <div className="flex min-h-0 flex-1">
-        <GovernanceSidebar
-          organizationName={organization.name}
-          functionalRoleLabel={getGovernanceFunctionalRoleLabel(
-            membership.functional_role,
-          )}
-          technicalRoleLabel={getGovernanceTechnicalRoleLabel(
-            membership.technical_role,
-          )}
-        />
-
-        <main className="min-w-0 flex-1 overflow-y-auto px-8 py-7">
+    <GovernancePageFrame userLabel={userLabel} context={context}>
           <section className="mb-7 rounded-3xl border border-[#dedede] bg-white p-7 shadow-sm">
             <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -480,8 +459,6 @@ export default async function GovernanceUsersPage() {
               </div>
             )}
           </section>
-        </main>
-      </div>
-    </div>
+    </GovernancePageFrame>
   );
 }

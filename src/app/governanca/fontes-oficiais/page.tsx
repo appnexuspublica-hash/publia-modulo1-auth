@@ -88,6 +88,7 @@ export default async function GovernanceOfficialSourcesPage() {
       <div className="flex min-h-0 flex-1">
         <GovernanceSidebar
           organizationName={organization.name}
+          organizationLogoUrl={organization.logo_url}
           functionalRoleLabel={getGovernanceFunctionalRoleLabel(
             membership.functional_role,
           )}

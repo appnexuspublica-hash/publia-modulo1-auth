@@ -1,0 +1,1040 @@
+import { getCanonicalLegalSourcesFromText } from "./legal-catalog";
+
+type GovernanceResponseSource = {
+  id?: string;
+  title?: string | null;
+  url?: string | null;
+  type?: string | null;
+  articles?: string[] | null;
+};
+
+type GovernanceResponseSources = {
+  institutional?: GovernanceResponseSource[];
+  officialGazette?: GovernanceResponseSource[];
+  officialSources?: GovernanceResponseSource[];
+  externalSources?: GovernanceResponseSource[];
+};
+
+type GovernanceResponseReference = {
+  title?: string | null;
+  url?: string | null;
+  kind?: string | null;
+};
+
+export type BuildGovernanceFinalAnswerParams = {
+  answer: string;
+  question?: string;
+  sources?: GovernanceResponseSources | null;
+  references?: GovernanceResponseReference[] | null;
+};
+
+function cleanText(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+const MONTH_NAME_TO_NUMBER: Record<string, string> = {
+  janeiro: "01",
+  fevereiro: "02",
+  marco: "03",
+  março: "03",
+  abril: "04",
+  maio: "05",
+  junho: "06",
+  julho: "07",
+  agosto: "08",
+  setembro: "09",
+  outubro: "10",
+  novembro: "11",
+  dezembro: "12",
+};
+
+function isBrokenSupabaseGovernanceStorageUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url);
+
+    return (
+      parsedUrl.hostname.endsWith(".supabase.co") &&
+      parsedUrl.pathname.includes("/storage/v1/object/public/governance-documents/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOfficialGazetteFileName(fileName: string) {
+  return cleanText(fileName)
+    .replace(/^\d{10,}-/, "")
+    .replace(/-d4sign\.pdf$/i, "-D4Sign.pdf");
+}
+
+function inferOfficialGazetteYearMonthFromFileName(fileName: string) {
+  const normalized = cleanText(fileName)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const numericDateMatch = normalized.match(/(?:^|[^0-9])(\d{1,2})[-_]?(\d{1,2})[-_]?(\d{4})(?:[^0-9]|$)/);
+
+  if (numericDateMatch) {
+    return {
+      year: numericDateMatch[3],
+      month: numericDateMatch[2].padStart(2, "0"),
+    };
+  }
+
+  for (const [monthName, month] of Object.entries(MONTH_NAME_TO_NUMBER)) {
+    const plainMonthName = monthName.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const monthYearMatch = normalized.match(new RegExp(`${plainMonthName}\\D*(20\\d{2})`));
+
+    if (monthYearMatch) {
+      return {
+        year: monthYearMatch[1],
+        month,
+      };
+    }
+  }
+
+  return null;
+}
+
+function convertBrokenSupabaseOfficialGazetteUrl(url: string) {
+  if (!isBrokenSupabaseGovernanceStorageUrl(url)) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    const pathParts = parsedUrl.pathname.split("/").filter(Boolean);
+    const rawFileName = decodeURIComponent(pathParts[pathParts.length - 1] ?? "");
+    const fileName = normalizeOfficialGazetteFileName(rawFileName);
+
+    if (!fileName || !/\.pdf$/i.test(fileName)) {
+      return "";
+    }
+
+    const yearMonth = inferOfficialGazetteYearMonthFromFileName(fileName);
+
+    if (!yearMonth) {
+      return "";
+    }
+
+    return `https://santanadoitarare.pr.gov.br/diariooficial/wp-content/uploads/${yearMonth.year}/${yearMonth.month}/${encodeURIComponent(fileName).replace(/%2F/g, "/")}`;
+  } catch {
+    return "";
+  }
+}
+
+function normalizeUrl(value: unknown) {
+  const url = cleanText(value);
+
+  if (!url) {
+    return "";
+  }
+
+  if (!/^https?:\/\//i.test(url)) {
+    return "";
+  }
+
+  if (isBrokenSupabaseGovernanceStorageUrl(url)) {
+    return convertBrokenSupabaseOfficialGazetteUrl(url);
+  }
+
+  return url;
+}
+
+function uniqueByTitleAndUrl(items: GovernanceResponseSource[]) {
+  const unique = new Map<string, GovernanceResponseSource>();
+
+  for (const item of items) {
+    const title = cleanText(item.title);
+    const url = normalizeUrl(item.url) || null;
+
+    if (!title) {
+      continue;
+    }
+
+    const key = title.toLowerCase();
+    const existing = unique.get(key);
+
+    if (!existing) {
+      unique.set(key, {
+        ...item,
+        title,
+        url,
+        type: cleanText(item.type) || null,
+      });
+      continue;
+    }
+
+    if (!existing.url && url) {
+      unique.set(key, {
+        ...existing,
+        ...item,
+        title,
+        url,
+        type: cleanText(item.type) || existing.type || null,
+      });
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+function mergeSourceArticles(
+  existingArticles: string[] | null | undefined,
+  nextArticles: string[] | null | undefined,
+) {
+  return uniqueStrings([
+    ...(existingArticles ?? []),
+    ...(nextArticles ?? []),
+  ]);
+}
+
+function getCanonicalLegalSourceKey(source: GovernanceResponseSource) {
+  const normalizedTitle = normalizeLegalTextForKey(source.title);
+  const normalizedUrl = normalizeUrl(source.url).toLowerCase();
+
+  if (normalizedTitle.includes("constituicao")) {
+    return "constituicao-federal-1988";
+  }
+
+  if (sourceIsLei14133(source)) {
+    return "lei-14133-2021";
+  }
+
+  if (sourceIsDecreto12807(source)) {
+    return "decreto-12807-2025";
+  }
+
+  if (normalizedTitle.includes("12 527") || normalizedTitle.includes("lei de acesso a informacao") || normalizedTitle.includes("lai")) {
+    return "lei-12527-2011-lai";
+  }
+
+  if (normalizedTitle.includes("13 709") || normalizedTitle.includes("lei geral de protecao de dados") || normalizedTitle.includes("lgpd")) {
+    return "lei-13709-2018-lgpd";
+  }
+
+  if (normalizedTitle.includes("lei organica")) {
+    return "lei-organica-santana-do-itarare";
+  }
+
+  return normalizedUrl || normalizedTitle;
+}
+
+function uniqueLegalSources(items: GovernanceResponseSource[]) {
+  const unique = new Map<string, GovernanceResponseSource>();
+
+  for (const item of items) {
+    const title = cleanText(item.title);
+    if (!title) continue;
+
+    const url = normalizeUrl(item.url) || null;
+    const key = getCanonicalLegalSourceKey({ ...item, title, url });
+    const existing = unique.get(key);
+
+    if (!existing) {
+      unique.set(key, {
+        ...item,
+        title,
+        url,
+        type: cleanText(item.type) || null,
+        articles: uniqueStrings(item.articles ?? []),
+      });
+      continue;
+    }
+
+    const existingTitle = cleanText(existing.title);
+    const preferredTitle =
+      title.length > existingTitle.length || /de 1988|santana do itarar[eé]/i.test(title)
+        ? title
+        : existingTitle;
+
+    unique.set(key, {
+      ...existing,
+      ...item,
+      title: preferredTitle,
+      url: existing.url || url,
+      type: cleanText(item.type) || existing.type || null,
+      articles: mergeSourceArticles(existing.articles, item.articles),
+    });
+  }
+
+  return Array.from(unique.values());
+}
+
+function formatMarkdownLink(title: string, url?: string | null) {
+  const cleanTitle = cleanText(title);
+  const cleanUrl = normalizeUrl(url);
+
+  if (!cleanTitle) {
+    return "";
+  }
+
+  if (!cleanUrl) {
+    return cleanTitle;
+  }
+
+  return `[${cleanTitle}](${cleanUrl})`;
+}
+
+function sourceTitleAppearsInAnswer(source: GovernanceResponseSource, answer: string) {
+  const title = cleanText(source.title);
+  if (!title) return false;
+
+  const normalizedAnswer = cleanText(answer)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const normalizedTitle = title
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  if (normalizedAnswer.includes(normalizedTitle)) return true;
+
+  const importantWords = normalizedTitle
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length >= 5 && !["municipio", "municipal", "santana", "itarare"].includes(word));
+
+  return importantWords.length >= 2 && importantWords.filter((word) => normalizedAnswer.includes(word)).length >= 2;
+}
+
+function looksLikeLegalBasis(source: GovernanceResponseSource, answer: string) {
+  const text = `${source.title ?? ""} ${source.type ?? ""}`.toLowerCase();
+
+  if (!sourceTitleAppearsInAnswer(source, answer)) {
+    return false;
+  }
+
+  return (
+    /\blei\b/.test(text) ||
+    /\blei complementar\b/.test(text) ||
+    /\bdecreto\b/.test(text) ||
+    /\bportaria\b/.test(text) ||
+    /\bresolução\b/.test(text) ||
+    /\binstrução normativa\b/.test(text) ||
+    /\bconstituição\b/.test(text) ||
+    /\bato\b/.test(text)
+  );
+}
+
+
+function isLegalReferenceRelevantToText(
+  source: GovernanceResponseSource,
+  question: string,
+  answer: string,
+) {
+  if (sourceTitleAppearsInAnswer(source, answer)) {
+    return true;
+  }
+
+  const text = cleanText(`${question} ${answer} ${source.title ?? ""} ${source.url ?? ""}`)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const title = cleanText(source.title).toLowerCase();
+
+  if (!title) {
+    return false;
+  }
+
+  if (title.includes("14.133")) {
+    return /\b(14\.133|14133|licitacao|licitacoes|dispensa|inexigibilidade|pregao|contratacao direta)\b/.test(text);
+  }
+
+  if (title.includes("constituição") || title.includes("constituicao")) {
+    return /\b(constituicao|cf\/88|art\. 37|artigo 37|administracao publica|concurso publico)\b/.test(text);
+  }
+
+  if (title.includes("responsabilidade fiscal") || title.includes("101/2000")) {
+    return /\b(lrf|responsabilidade fiscal|despesa com pessoal|limite de pessoal|rreo|rgf|endividamento)\b/.test(text);
+  }
+
+  if (title.includes("acesso") || title.includes("12.527")) {
+    return /\b(lai|acesso a informacao|transparencia|pedido de informacao)\b/.test(text);
+  }
+
+  if (title.includes("proteção de dados") || title.includes("protecao de dados") || title.includes("13.709")) {
+    return /\b(lgpd|protecao de dados|dados pessoais|tratamento de dados)\b/.test(text);
+  }
+
+  if (title.includes("serviços públicos") || title.includes("servicos publicos") || title.includes("13.460")) {
+    return /\b(ouvidoria|carta de servicos|servicos publicos|usuario de servico publico)\b/.test(text);
+  }
+
+  return sourceTitleAppearsInAnswer(source, answer);
+}
+
+function stripAssistantReferenceSections(answer: string) {
+  let text = String(answer ?? "").trim();
+
+  const headings = [
+    "fundamento legal consultado",
+    "fundamento legal",
+    "base legal",
+    "documentos institucionais consultados",
+    "documentos consultados",
+    "diário oficial consultado",
+    "diario oficial consultado",
+    "fontes oficiais consultadas",
+    "fontes oficiais externas consultadas",
+    "referências oficiais",
+    "referencias oficiais",
+    "base institucional",
+  ];
+
+  for (const heading of headings) {
+    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(?:^|\\n)\\s*(?:\\*\\*)?${escaped}(?:\\*\\*)?\\s*:?\\s*[\\s\\S]*$`, "i");
+    text = text.replace(pattern, "").trim();
+  }
+
+  return text;
+}
+
+
+
+const PLANALTO_LEI_14133_URL =
+  "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm";
+
+const PLANALTO_DECRETO_12807_2025_URL =
+  "https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/decreto/d12807.htm";
+
+const TCE_PR_DISPENSA_INEXIGIBILIDADE_URL =
+  "https://www.tce.pr.gov.br/conteudo/dispensa-e-inexigibilidade.htm";
+
+function normalizeLegalTextForMatch(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function normalizeLegalTextForKey(value: unknown) {
+  return normalizeLegalTextForMatch(value)
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function uniqueStrings(values: string[]) {
+  const unique = new Map<string, string>();
+
+  for (const value of values) {
+    const clean = cleanText(value);
+    if (!clean) continue;
+
+    const key = clean
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/[º°]/g, "");
+
+    if (!unique.has(key)) {
+      unique.set(key, clean);
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+function mentionsUpdatedDispensaValues(text: string) {
+  return (
+    /\b130\.?984,20\b/.test(text) ||
+    /\b65\.?492,11\b/.test(text) ||
+    /\b12\.?807\/2025\b/.test(text) ||
+    /\bdecreto\s*(?:federal\s*)?n?[º°]?\s*12\.?807\b/.test(text) ||
+    /\batualizacao\s+dos\s+valores\b/.test(text) ||
+    /\bvalores\s+atualizados\b/.test(text) ||
+    /\blimites\s+(?:gerais\s+)?(?:de\s+)?dispensa\b/.test(text)
+  );
+}
+
+function normalizeLikelyInciso(value: string) {
+  const clean = cleanText(value).toUpperCase();
+
+  const allowed = new Set([
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "VII",
+    "VIII",
+    "IX",
+    "X",
+    "XI",
+    "XII",
+    "XIII",
+    "XIV",
+    "XV",
+  ]);
+
+  return allowed.has(clean) ? clean : "";
+}
+
+function getSupplementalCanonicalLegalSourcesFromText(
+  question: string,
+  answer: string,
+): GovernanceResponseSource[] {
+  const questionText = normalizeLegalTextForMatch(question);
+  const answerText = normalizeLegalTextForMatch(answer);
+  const text = `${questionText}\n${answerText}`;
+
+  const sources: GovernanceResponseSource[] = [];
+
+  const isLicitationQuestion =
+    /\b(14\.?133|14133|licitacao|licitacoes|dispensa|inexigibilidade|pregao|contratacao direta|lei de licitacoes|nova lei de licitacoes)\b/.test(
+      questionText,
+    );
+  const hasExplicitLicitationLegalBasis =
+    /\b14\.?133\/2021\b/.test(answerText) ||
+    /\blei\s*n?[º°]?\s*14\.?133\b/.test(answerText) ||
+    /\bnova lei de licitacoes\b/.test(answerText) ||
+    /\blei de licitacoes\b/.test(answerText) ||
+    /\bdispensa de licitacao\b/.test(answerText) ||
+    /\binexigibilidade\b/.test(answerText) ||
+    /\bcontratacao direta\b/.test(answerText);
+
+  /*
+    v9.4 — não usar menção incidental a "licitação e contratos" como
+    fundamento legal automático. A Lei 14.133 só entra quando a pergunta é
+    licitatória ou quando a própria resposta cita a norma como fundamento.
+  */
+  if (isLicitationQuestion || hasExplicitLicitationLegalBasis) {
+    sources.push({
+      title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+      url: PLANALTO_LEI_14133_URL,
+      type: "legislação federal",
+    });
+  }
+
+  if (
+    /\b12\.?807\/2025\b/.test(text) ||
+    /\bdecreto\s*(?:federal\s*)?n?[º°]?\s*12\.?807\b/.test(text) ||
+    /\bdecreto\s*(?:federal\s*)?12\.?807\b/.test(text) ||
+    mentionsUpdatedDispensaValues(text)
+  ) {
+    sources.push({
+      title: "Decreto Federal nº 12.807/2025 — Atualização dos valores da Lei nº 14.133/2021",
+      url: PLANALTO_DECRETO_12807_2025_URL,
+      type: "decreto federal",
+    });
+  }
+
+  if (
+    /\btce\s*[-–]?\s*pr\b/.test(text) ||
+    /\btribunal de contas do estado do parana\b/.test(text)
+  ) {
+    sources.push({
+      title: "Tribunal de Contas do Estado do Paraná (TCE-PR) — Dispensa e Inexigibilidade",
+      url: TCE_PR_DISPENSA_INEXIGIBILIDADE_URL,
+      type: "orientação oficial",
+    });
+  }
+
+  return sources;
+}
+
+function sourceIsLei14133(source: GovernanceResponseSource) {
+  const title = normalizeLegalTextForMatch(source.title);
+  return title.includes("14.133") || title.includes("14133") || title.includes("licitacoes");
+}
+
+function sourceIsDecreto12807(source: GovernanceResponseSource) {
+  const title = normalizeLegalTextForMatch(source.title);
+  return title.includes("12.807") || title.includes("12807");
+}
+
+function sourceIsConstituicao(source: GovernanceResponseSource) {
+  const title = normalizeLegalTextForMatch(source.title);
+  return title.includes("constituicao");
+}
+
+function sourceIsLrf(source: GovernanceResponseSource) {
+  const title = normalizeLegalTextForMatch(source.title);
+  return title.includes("responsabilidade fiscal") || title.includes("101/2000") || title.includes("lrf");
+}
+
+function extractLegalArticles(params: {
+  source: GovernanceResponseSource;
+  question: string;
+  answer: string;
+}) {
+  const text = `${params.question}\n${params.answer}`;
+  const normalizedText = normalizeLegalTextForMatch(text);
+  const articles: string[] = [];
+
+  const articlePattern =
+    /\bart(?:igo)?\.?\s*(\d+[a-z]?)\s*(?:,\s*(?:inciso\s*)?([ivxlcdm]+))?(?:\s*,?\s*(§+\s*\d+[º°]?))?/gi;
+
+  for (const match of text.matchAll(articlePattern)) {
+    const articleNumber = cleanText(match[1]);
+    const inciso = normalizeLikelyInciso(cleanText(match[2]));
+    const paragraph = cleanText(match[3]);
+
+    if (!articleNumber) continue;
+
+    if (sourceIsLei14133(params.source)) {
+      if (!["6", "37", "70", "72", "74", "75", "95", "184-A", "184a"].includes(articleNumber.toUpperCase())) {
+        continue;
+      }
+    } else if (sourceIsConstituicao(params.source)) {
+      if (!["5", "37", "169"].includes(articleNumber)) {
+        continue;
+      }
+    } else if (sourceIsLrf(params.source)) {
+      const numericArticle = Number(articleNumber);
+      if (!Number.isFinite(numericArticle) || numericArticle < 18 || numericArticle > 23) {
+        continue;
+      }
+    } else {
+      continue;
+    }
+
+    if (inciso && paragraph) {
+      articles.push(`art. ${articleNumber}, ${inciso}, ${paragraph}`);
+      continue;
+    }
+
+    if (inciso) {
+      articles.push(`art. ${articleNumber}, ${inciso}`);
+      continue;
+    }
+
+    if (paragraph) {
+      articles.push(`art. ${articleNumber}, ${paragraph}`);
+      continue;
+    }
+
+    articles.push(`art. ${articleNumber}`);
+  }
+
+  if (sourceIsLei14133(params.source)) {
+    const hasArt75IAndIIText =
+      /\bart(?:igo)?\.?\s*75\s*,?\s*(?:incisos?\s*)?i\s*(?:e|,|\/)\s*ii\b/i.test(text) ||
+      mentionsUpdatedDispensaValues(normalizedText);
+
+    if (hasArt75IAndIIText) {
+      articles.push("art. 75, I");
+      articles.push("art. 75, II");
+    }
+
+    if (/\bdispensa\b/.test(normalizedText) && !articles.some((article) => /\bart\.?\s*75\b/i.test(article))) {
+      articles.push("art. 75");
+    }
+
+    if (/\binexigibilidade\b/.test(normalizedText) && !articles.some((article) => /\bart\.?\s*74\b/i.test(article))) {
+      articles.push("art. 74");
+    }
+
+    if (/\bcontratacao direta\b/.test(normalizedText) && !articles.some((article) => /\bart\.?\s*72\b/i.test(article))) {
+      articles.push("art. 72");
+    }
+  }
+
+  if (sourceIsLrf(params.source) && /\bdespesa com pessoal\b/.test(normalizedText)) {
+    articles.push("arts. 18 a 23");
+  }
+
+  return uniqueStrings(articles).slice(0, 8);
+}
+
+function enrichLegalSourcesWithArticles(params: {
+  legalSources: GovernanceResponseSource[];
+  question: string;
+  answer: string;
+}) {
+  return params.legalSources.map((source) => ({
+    ...source,
+    articles: source.articles?.length
+      ? source.articles
+      : extractLegalArticles({
+          source,
+          question: params.question,
+          answer: params.answer,
+        }),
+  }));
+}
+
+function resolveOfficialLegalSourceUrl(source: GovernanceResponseSource) {
+  const existingUrl = normalizeUrl(source.url);
+
+  if (existingUrl) {
+    return existingUrl;
+  }
+
+  if (sourceIsLei14133(source)) {
+    return PLANALTO_LEI_14133_URL;
+  }
+
+  if (sourceIsDecreto12807(source)) {
+    return PLANALTO_DECRETO_12807_2025_URL;
+  }
+
+  const normalizedTitle = normalizeLegalTextForKey(source.title);
+
+  if (
+    normalizedTitle.includes("tribunal de contas do estado do parana") ||
+    normalizedTitle.includes("tce pr")
+  ) {
+    return TCE_PR_DISPENSA_INEXIGIBILIDADE_URL;
+  }
+
+  return null;
+}
+
+function sanitizeLegalBasisTitle(title: unknown) {
+  const clean = cleanText(title).replace(/\s+Artigos\s+utilizados\s*:.+$/i, "").trim();
+  const normalized = normalizeLegalTextForKey(clean);
+
+  if (normalized.includes("constituicao")) {
+    return "Constituição Federal de 1988";
+  }
+
+  if (normalized.includes("lei organica")) {
+    return "Lei Orgânica do Município de Santana do Itararé";
+  }
+
+  return clean;
+}
+
+function normalizeLegalArticleKey(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[º°]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*/g, ", ")
+    .trim();
+}
+
+function romanToNumber(value: string) {
+  const romans: Record<string, number> = {
+    I: 1,
+    V: 5,
+    X: 10,
+    L: 50,
+    C: 100,
+    D: 500,
+    M: 1000,
+  };
+
+  let total = 0;
+  let previous = 0;
+
+  for (const char of value.toUpperCase().split("").reverse()) {
+    const current = romans[char] ?? 0;
+    if (current < previous) {
+      total -= current;
+    } else {
+      total += current;
+      previous = current;
+    }
+  }
+
+  return total || Number.MAX_SAFE_INTEGER;
+}
+
+function formatIncisos(incisos: string[]) {
+  const uniqueIncisos = Array.from(new Set(incisos.map((inciso) => inciso.toUpperCase()))).sort(
+    (a, b) => romanToNumber(a) - romanToNumber(b),
+  );
+
+  if (uniqueIncisos.length === 0) {
+    return "";
+  }
+
+  if (uniqueIncisos.length === 1) {
+    return uniqueIncisos[0];
+  }
+
+  return `${uniqueIncisos.slice(0, -1).join(", ")} e ${uniqueIncisos.at(-1)}`;
+}
+
+function formatLegalArticlesForDisplay(articles: string[]) {
+  const grouped = new Map<
+    string,
+    {
+      articleNumber: string;
+      incisos: string[];
+      paragraphs: string[];
+      hasStandalone: boolean;
+      raw: string[];
+    }
+  >();
+
+  for (const rawArticle of articles) {
+    const cleanArticle = cleanText(rawArticle);
+    if (!cleanArticle) continue;
+
+    const match = cleanArticle.match(
+      /^art\.?\s*(\d+[a-z]?)\s*(?:,\s*(?:inciso\s*)?([ivxlcdm]+))?(?:,\s*(§+\s*\d+[º°]?))?$/i,
+    );
+
+    if (!match) {
+      const key = normalizeLegalArticleKey(cleanArticle);
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          articleNumber: cleanArticle,
+          incisos: [],
+          paragraphs: [],
+          hasStandalone: true,
+          raw: [cleanArticle],
+        });
+      }
+      continue;
+    }
+
+    const articleNumber = cleanText(match[1]);
+    const inciso = normalizeLikelyInciso(cleanText(match[2]));
+    const paragraph = cleanText(match[3]);
+    const key = articleNumber.toLowerCase();
+
+    const existing =
+      grouped.get(key) ??
+      ({
+        articleNumber,
+        incisos: [],
+        paragraphs: [],
+        hasStandalone: false,
+        raw: [],
+      } satisfies {
+        articleNumber: string;
+        incisos: string[];
+        paragraphs: string[];
+        hasStandalone: boolean;
+        raw: string[];
+      });
+
+    if (inciso) {
+      existing.incisos.push(inciso);
+    }
+
+    if (paragraph) {
+      existing.paragraphs.push(paragraph);
+    }
+
+    if (!inciso && !paragraph) {
+      existing.hasStandalone = true;
+    }
+
+    existing.raw.push(cleanArticle);
+    grouped.set(key, existing);
+  }
+
+  return Array.from(grouped.values())
+    .sort((a, b) => {
+      const articleA = Number.parseInt(a.articleNumber, 10);
+      const articleB = Number.parseInt(b.articleNumber, 10);
+
+      if (Number.isFinite(articleA) && Number.isFinite(articleB)) {
+        return articleA - articleB;
+      }
+
+      return a.articleNumber.localeCompare(b.articleNumber, "pt-BR", { numeric: true });
+    })
+    .map((item) => {
+      const incisos = formatIncisos(item.incisos);
+      const paragraphs = uniqueStrings(item.paragraphs);
+
+      if (incisos && paragraphs.length > 0) {
+        return `art. ${item.articleNumber}, ${incisos}, ${paragraphs.join(", ")}`;
+      }
+
+      if (incisos) {
+        return `art. ${item.articleNumber}, ${incisos}`;
+      }
+
+      if (paragraphs.length > 0) {
+        return `art. ${item.articleNumber}, ${paragraphs.join(", ")}`;
+      }
+
+      return item.raw[0]?.startsWith("art") ? item.raw[0] : `art. ${item.articleNumber}`;
+    });
+}
+
+function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
+  if (legalBasis.length === 0) {
+    return "";
+  }
+
+  const blocks = legalBasis
+    .slice(0, 6)
+    .map((source) => {
+      const title = sanitizeLegalBasisTitle(source.title);
+      const url = sourceIsLei14133({ ...source, title })
+        ? PLANALTO_LEI_14133_URL
+        : resolveOfficialLegalSourceUrl({ ...source, title });
+      const link = formatMarkdownLink(`✓ ${title}`, url);
+      const articles = formatLegalArticlesForDisplay(uniqueStrings(source.articles ?? []));
+
+      if (!link) {
+        return "";
+      }
+
+      if (articles.length === 0) {
+        return link;
+      }
+
+      return [
+        link,
+        `Artigos utilizados: ${articles.join("; ")}`,
+      ].join("\n");
+    })
+    .filter(Boolean);
+
+  if (blocks.length === 0) {
+    return "";
+  }
+
+  return [
+    "**Base Legal:**",
+    "",
+    blocks.join("\n\n"),
+  ].join("\n");
+}
+
+function shouldIgnoreLegalReference(source: GovernanceResponseSource, question: string, answer: string) {
+  const title = normalizeLegalTextForMatch(source.title);
+  const text = normalizeLegalTextForMatch(`${question} ${answer}`);
+
+  if (sourceIsConstituicao(source)) {
+    return !(
+      /\bconstituicao\b/.test(text) ||
+      /\bcf\/?88\b/.test(text) ||
+      /\bart\.?\s*37\b/.test(text) ||
+      /\bartigo\s*37\b/.test(text) ||
+      /\bart\.?\s*169\b/.test(text) ||
+      /\bartigo\s*169\b/.test(text) ||
+      /\bart\.?\s*5[º°]?\s*,?\s*(?:xxxiii|33)\b/.test(text)
+    );
+  }
+
+  if (title.includes("13.460") || title.includes("servicos publicos") || title.includes("serviços públicos")) {
+    return !/\b(ouvidoria|carta de servicos|carta de serviços|usuario de servico publico|usuário de serviço público)\b/.test(text);
+  }
+
+  return false;
+}
+
+function linkTextOutsideExistingMarkdown(content: string, labelPattern: RegExp, url: string) {
+  let nextContent = "";
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(labelPattern)) {
+    const index = match.index ?? 0;
+    const label = match[0];
+
+    const before = content.slice(Math.max(0, index - 2), index);
+    const after = content.slice(index + label.length, index + label.length + 2);
+
+    if (before.includes("[") || after.startsWith("](")) {
+      continue;
+    }
+
+    nextContent += content.slice(lastIndex, index);
+    nextContent += `[${label}](${url})`;
+    lastIndex = index + label.length;
+  }
+
+  nextContent += content.slice(lastIndex);
+
+  return nextContent;
+}
+
+function linkLegalReferencesInAnswer(answer: string, legalBasis: GovernanceResponseSource[]) {
+  let nextAnswer = String(answer ?? "");
+
+  const sorted = [...legalBasis].sort((a, b) => cleanText(b.title).length - cleanText(a.title).length);
+
+  for (const source of sorted) {
+    const url = resolveOfficialLegalSourceUrl(source);
+    if (!url) continue;
+
+    if (sourceIsLei14133(source)) {
+      nextAnswer = linkTextOutsideExistingMarkdown(
+        nextAnswer,
+        /\bLei\s*n[º°]?\s*14\.?133\/2021\b|\bLei\s*n[º°]?\s*14\.?133\b|\bLei\s*14\.?133\/2021\b|\bLei\s*14\.?133\b/gi,
+        url,
+      );
+      continue;
+    }
+
+    if (sourceIsDecreto12807(source)) {
+      nextAnswer = linkTextOutsideExistingMarkdown(
+        nextAnswer,
+        /\bDecreto\s*(?:Federal\s*)?n[º°]?\s*12\.?807\/2025\b|\bDecreto\s*(?:Federal\s*)?12\.?807\/2025\b/gi,
+        url,
+      );
+      continue;
+    }
+
+    const normalizedTitle = normalizeLegalTextForKey(source.title);
+    if (normalizedTitle.includes("tribunal de contas do estado do parana") || normalizedTitle.includes("tce pr")) {
+      nextAnswer = linkTextOutsideExistingMarkdown(
+        nextAnswer,
+        /\bTribunal de Contas do Estado do Paraná\s*\(TCE-PR\)|\bTCE-PR\b/gi,
+        url,
+      );
+    }
+  }
+
+  return nextAnswer;
+}
+
+export function buildGovernanceFinalAnswer(params: BuildGovernanceFinalAnswerParams) {
+  const sources = params.sources ?? {};
+  const references = params.references ?? [];
+  const rawAnswer = stripAssistantReferenceSections(params.answer);
+  const question = cleanText(params.question);
+
+  const institutionalSources = uniqueByTitleAndUrl(sources.institutional ?? []);
+  const officialGazetteSources = uniqueByTitleAndUrl(sources.officialGazette ?? []);
+  const officialSources = uniqueByTitleAndUrl(sources.officialSources ?? []);
+  const externalSources = uniqueByTitleAndUrl(sources.externalSources ?? []);
+
+  const legalSourcesFromReferences = references
+    .filter((reference) => cleanText(reference.kind).toLowerCase() === "legal")
+    .map((reference) => ({
+      title: reference.title ?? "",
+      url: reference.url ?? null,
+      type: "fundamento legal",
+    }))
+    .filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer))
+    .filter((source) => isLegalReferenceRelevantToText(source, question, rawAnswer));
+
+  const canonicalLegalSources = [
+    ...getCanonicalLegalSourcesFromText(question, rawAnswer).map((item) => ({
+      title: item.title,
+      url: item.url,
+      type: item.type,
+    })),
+    ...getSupplementalCanonicalLegalSourcesFromText(question, rawAnswer),
+  ].filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer));
+
+  const legalSourcesFromKnowledge = [
+    ...institutionalSources,
+    ...officialGazetteSources,
+    ...officialSources,
+    ...externalSources,
+  ]
+    .filter((source) => looksLikeLegalBasis(source, rawAnswer))
+    .filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer));
+
+  const legalBasis = uniqueLegalSources(enrichLegalSourcesWithArticles({
+    legalSources: uniqueLegalSources([
+      ...canonicalLegalSources,
+      ...legalSourcesFromReferences,
+      ...legalSourcesFromKnowledge,
+    ]),
+    question,
+    answer: rawAnswer,
+  }));
+
+  const answer = linkLegalReferencesInAnswer(rawAnswer, legalBasis);
+  const legalSection = buildCompactLegalBasisSection(legalBasis);
+
+  return [answer, legalSection].filter(Boolean).join("\n\n").trim();
+}

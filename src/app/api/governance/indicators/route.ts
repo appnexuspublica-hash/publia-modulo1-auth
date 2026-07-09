@@ -100,6 +100,9 @@ export async function GET() {
       documentsPendingIndexing,
       sourcesTotal,
       sourcesActive,
+      gazettesTotal,
+      gazettesActive,
+      gazetteDocumentsTotal,
       auditEventsTotal,
       auditEventsLast30Days,
     ] = await Promise.all([
@@ -126,6 +129,11 @@ export async function GET() {
       countRows(supabase, "official_sources", organizationId, (query) =>
         query.eq("status", "active"),
       ),
+      countRows(supabase, "governance_official_gazettes", organizationId),
+      countRows(supabase, "governance_official_gazettes", organizationId, (query) =>
+        query.eq("active", true),
+      ),
+      countRows(supabase, "governance_official_gazette_documents", organizationId),
       countRows(supabase, "organization_audit_logs", organizationId),
       countRows(supabase, "organization_audit_logs", organizationId, (query) =>
         query.gte("created_at", thirtyDaysAgo.toISOString()),
@@ -159,6 +167,11 @@ export async function GET() {
         official_sources: {
           total: sourcesTotal,
           active: sourcesActive,
+        },
+        official_gazette: {
+          total: gazettesTotal,
+          active: gazettesActive,
+          documents_total: gazetteDocumentsTotal,
         },
         audit: {
           events_total: auditEventsTotal,

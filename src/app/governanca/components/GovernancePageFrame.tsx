@@ -1,0 +1,64 @@
+// src/app/governanca/components/GovernancePageFrame.tsx
+"use client";
+
+import type { ReactNode } from "react";
+
+import {
+  getGovernanceFunctionalRoleLabel,
+  getGovernanceTechnicalRoleLabel,
+  getOrganizationStatusLabel,
+  type GovernanceContext,
+} from "@/types/governance";
+
+import GovernanceFooter from "./GovernanceFooter";
+import GovernanceHeader from "./GovernanceHeader";
+import GovernanceSidebar from "./GovernanceSidebar";
+
+type GovernancePageFrameProps = {
+  userLabel: string;
+  userEmail?: string | null;
+  context: GovernanceContext;
+  children: ReactNode;
+  contentClassName?: string;
+};
+
+export default function GovernancePageFrame({
+  userLabel,
+  userEmail = null,
+  context,
+  children,
+  contentClassName = "px-8 py-7",
+}: GovernancePageFrameProps) {
+  const { organization, membership } = context;
+
+  return (
+    <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
+      <GovernanceHeader
+        userLabel={userLabel}
+        userEmail={userEmail}
+        organizationName={organization.name}
+        organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
+      />
+
+      <div className="flex min-h-0 flex-1">
+        <GovernanceSidebar
+          organizationName={organization.name}
+          organizationLogoUrl={organization.logo_url}
+          functionalRoleLabel={getGovernanceFunctionalRoleLabel(
+            membership.functional_role,
+          )}
+          technicalRoleLabel={getGovernanceTechnicalRoleLabel(
+            membership.technical_role,
+          )}
+        />
+
+        <main className={`min-w-0 flex-1 overflow-y-auto ${contentClassName}`}>
+          <div className="flex min-h-full flex-col">
+            <div className="flex-1">{children}</div>
+            <GovernanceFooter />
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}

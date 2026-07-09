@@ -300,6 +300,11 @@ export type GovernanceAuditLog = {
   entity_id: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
+  actor_name?: string | null;
+  actor_email?: string | null;
+  actor_cpf_cnpj?: string | null;
+  entity_label?: string | null;
+  entity_description?: string | null;
 };
 
 /* ==========================================================

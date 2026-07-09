@@ -1,0 +1,1052 @@
+// src/app/governanca/fontes-oficiais/OfficialSourcesClient.tsx
+"use client";
+
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  Edit3,
+  ExternalLink,
+  FileSearch,
+  Landmark,
+  Link2,
+  PlusCircle,
+  Power,
+  Save,
+  Trash2,
+  X,
+} from "lucide-react";
+
+import type {
+  GovernanceOfficialSource,
+  GovernanceOfficialSourceType,
+} from "@/types/governance";
+import { getGovernanceOfficialSourceTypeLabel } from "@/types/governance";
+
+type OfficialSourcesClientProps = {
+  organizationName: string;
+  canManage: boolean;
+};
+
+type OfficialSourcePriority = "high" | "medium" | "low";
+type OfficialSourceStatus = "pending_review" | "active" | "inactive" | "archived";
+
+type OfficialSource = Omit<GovernanceOfficialSource, "status"> & {
+  status: OfficialSourceStatus;
+  priority?: OfficialSourcePriority | null;
+};
+
+type FormState = {
+  name: string;
+  sourceType: GovernanceOfficialSourceType;
+  url: string;
+  priority: OfficialSourcePriority;
+  notes: string;
+};
+
+type SourceGroup = {
+  title: string;
+  description: string;
+  emptyMessage: string;
+  sources: OfficialSource[];
+};
+
+const initialFormState: FormState = {
+  name: "",
+  sourceType: "municipal_website",
+  url: "",
+  priority: "high",
+  notes: "",
+};
+
+const sourceTypeOptions: Array<{
+  value: GovernanceOfficialSourceType;
+  label: string;
+}> = [
+  { value: "municipal_website", label: "Site municipal" },
+  { value: "official_gazette", label: "Diário oficial" },
+  { value: "transparency_portal", label: "Portal da transparência" },
+  { value: "institutional_repository", label: "Repositório institucional" },
+  { value: "other", label: "Outra fonte" },
+];
+
+const priorityOptions: Array<{
+  value: OfficialSourcePriority;
+  label: string;
+}> = [
+  { value: "high", label: "Alta" },
+  { value: "medium", label: "Média" },
+  { value: "low", label: "Baixa" },
+];
+
+const municipalSourceTypes = new Set<GovernanceOfficialSourceType>([
+  "municipal_website",
+  "official_gazette",
+  "transparency_portal",
+  "institutional_repository",
+]);
+
+const priorityOrder: Record<OfficialSourcePriority, number> = {
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function formatDate(value: string | null) {
+  if (!value) return "Não informado";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Não informado";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+  }).format(date);
+}
+
+function normalizeUrl(value: string) {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return "";
+  }
+
+  if (/^https?:\/\//i.test(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  return `https://${trimmedValue}`;
+}
+
+function isMunicipalSource(source: OfficialSource) {
+  return municipalSourceTypes.has(source.source_type);
+}
+
+function getStatusLabel(status: OfficialSourceStatus) {
+  const labels: Record<OfficialSourceStatus, string> = {
+    pending_review: "Pendente",
+    active: "Ativa",
+    inactive: "Inativa",
+    archived: "Excluída",
+  };
+
+  return labels[status] ?? "Ativa";
+}
+
+function getPriorityLabel(priority: OfficialSourcePriority | null | undefined) {
+  const labels: Record<OfficialSourcePriority, string> = {
+    high: "Alta",
+    medium: "Média",
+    low: "Baixa",
+  };
+
+  return labels[priority ?? "medium"];
+}
+
+function sortSources(sources: OfficialSource[]) {
+  return [...sources].sort((first, second) => {
+    const firstPriority = priorityOrder[first.priority ?? "medium"];
+    const secondPriority = priorityOrder[second.priority ?? "medium"];
+
+    if (firstPriority !== secondPriority) {
+      return firstPriority - secondPriority;
+    }
+
+    return (
+      new Date(second.created_at).getTime() - new Date(first.created_at).getTime()
+    );
+  });
+}
+
+function SourceCard({
+  source,
+  canManage,
+  isEditing,
+  editState,
+  isActionRunning,
+  onStartEdit,
+  onCancelEdit,
+  onEditChange,
+  onSaveEdit,
+  onToggleStatus,
+  onDelete,
+}: {
+  source: OfficialSource;
+  canManage: boolean;
+  isEditing: boolean;
+  editState: FormState;
+  isActionRunning: boolean;
+  onStartEdit: (source: OfficialSource) => void;
+  onCancelEdit: () => void;
+  onEditChange: (value: FormState) => void;
+  onSaveEdit: (event: FormEvent<HTMLFormElement>) => void;
+  onToggleStatus: (source: OfficialSource) => void;
+  onDelete: (source: OfficialSource) => void;
+}) {
+  if (isEditing) {
+    return (
+      <form
+        onSubmit={onSaveEdit}
+        className="rounded-3xl border border-[#0f3a4a] bg-white p-5"
+      >
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+              Nome
+            </label>
+            <input
+              type="text"
+              value={editState.name}
+              onChange={(event) =>
+                onEditChange({ ...editState, name: event.target.value })
+              }
+              className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+            />
+          </div>
+
+          <div>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+              Tipo
+            </label>
+            <select
+              value={editState.sourceType}
+              onChange={(event) =>
+                onEditChange({
+                  ...editState,
+                  sourceType: event.target.value as GovernanceOfficialSourceType,
+                })
+              }
+              className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+            >
+              {sourceTypeOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+              Prioridade
+            </label>
+            <select
+              value={editState.priority}
+              onChange={(event) =>
+                onEditChange({
+                  ...editState,
+                  priority: event.target.value as OfficialSourcePriority,
+                })
+              }
+              className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+            >
+              {priorityOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+              URL
+            </label>
+            <input
+              type="url"
+              value={editState.url}
+              onChange={(event) =>
+                onEditChange({ ...editState, url: event.target.value })
+              }
+              className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+            Observações
+          </label>
+          <textarea
+            value={editState.notes}
+            onChange={(event) =>
+              onEditChange({ ...editState, notes: event.target.value })
+            }
+            rows={3}
+            className="w-full resize-none rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="submit"
+            disabled={isActionRunning}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[#0f3a4a] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#123f51] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Save size={15} />
+            Salvar
+          </button>
+
+          <button
+            type="button"
+            onClick={onCancelEdit}
+            disabled={isActionRunning}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[#dedede] bg-white px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <X size={15} />
+            Cancelar
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  return (
+    <div className="rounded-3xl border border-[#dedede] bg-[#f8f8f8] p-5">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
+              {getGovernanceOfficialSourceTypeLabel(source.source_type)}
+            </span>
+
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+              {getStatusLabel(source.status)}
+            </span>
+
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+              Prioridade: {getPriorityLabel(source.priority)}
+            </span>
+          </div>
+
+          <h3 className="break-words text-base font-bold text-slate-950">
+            {source.name}
+          </h3>
+
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-2 inline-flex max-w-full items-center gap-2 break-all text-sm font-semibold text-[#0f3a4a] hover:underline"
+          >
+            <Link2 size={15} />
+            {source.url}
+            <ExternalLink size={14} />
+          </a>
+
+          {source.notes ? (
+            <p className="mt-3 text-sm leading-6 text-slate-600">
+              {source.notes}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="shrink-0 rounded-2xl bg-white px-4 py-3 text-xs leading-5 text-slate-700">
+          <p>
+            <strong>Cadastrada:</strong> {formatDate(source.created_at)}
+          </p>
+          <p>
+            <strong>Revisada:</strong> {formatDate(source.reviewed_at)}
+          </p>
+        </div>
+      </div>
+
+      {canManage ? (
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-[#dedede] pt-4">
+          <button
+            type="button"
+            onClick={() => onStartEdit(source)}
+            disabled={isActionRunning}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[#dedede] bg-white px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Edit3 size={15} />
+            Editar
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleStatus(source)}
+            disabled={isActionRunning}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[#dedede] bg-white px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Power size={15} />
+            {source.status === "active" ? "Desativar" : "Ativar"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onDelete(source)}
+            disabled={isActionRunning}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Trash2 size={15} />
+            Excluir
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SourceGroupSection({
+  group,
+  canManage,
+  editingSourceId,
+  editState,
+  isActionRunning,
+  onStartEdit,
+  onCancelEdit,
+  onEditChange,
+  onSaveEdit,
+  onToggleStatus,
+  onDelete,
+}: {
+  group: SourceGroup;
+  canManage: boolean;
+  editingSourceId: string | null;
+  editState: FormState;
+  isActionRunning: boolean;
+  onStartEdit: (source: OfficialSource) => void;
+  onCancelEdit: () => void;
+  onEditChange: (value: FormState) => void;
+  onSaveEdit: (event: FormEvent<HTMLFormElement>) => void;
+  onToggleStatus: (source: OfficialSource) => void;
+  onDelete: (source: OfficialSource) => void;
+}) {
+  return (
+    <section className="rounded-3xl border border-[#dedede] bg-white p-5">
+      <div className="mb-4">
+        <h3 className="text-base font-bold text-slate-950">{group.title}</h3>
+        <p className="mt-1 text-sm leading-6 text-slate-600">
+          {group.description}
+        </p>
+      </div>
+
+      {group.sources.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-[#cfcfcf] bg-[#f8f8f8] p-5 text-sm text-slate-600">
+          {group.emptyMessage}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {group.sources.map((source) => (
+            <SourceCard
+              key={source.id}
+              source={source}
+              canManage={canManage}
+              isEditing={editingSourceId === source.id}
+              editState={editState}
+              isActionRunning={isActionRunning}
+              onStartEdit={onStartEdit}
+              onCancelEdit={onCancelEdit}
+              onEditChange={onEditChange}
+              onSaveEdit={onSaveEdit}
+              onToggleStatus={onToggleStatus}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+export default function OfficialSourcesClient({
+  organizationName,
+  canManage,
+}: OfficialSourcesClientProps) {
+  const [sources, setSources] = useState<OfficialSource[]>([]);
+  const [formState, setFormState] = useState<FormState>(initialFormState);
+  const [editState, setEditState] = useState<FormState>(initialFormState);
+  const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isActionRunning, setIsActionRunning] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const activeSourcesCount = useMemo(() => {
+    return sources.filter((source) => source.status === "active").length;
+  }, [sources]);
+
+  const inactiveSourcesCount = useMemo(() => {
+    return sources.filter((source) => source.status === "inactive").length;
+  }, [sources]);
+
+  const municipalSources = useMemo(() => {
+    return sortSources(sources.filter((source) => isMunicipalSource(source)));
+  }, [sources]);
+
+  const externalSources = useMemo(() => {
+    return sortSources(sources.filter((source) => !isMunicipalSource(source)));
+  }, [sources]);
+
+  const sourceGroups = useMemo<SourceGroup[]>(
+    () => [
+      {
+        title: "Fontes municipais",
+        description:
+          "Sites e portais do próprio município: site oficial, diário oficial, transparência e repositórios institucionais.",
+        emptyMessage:
+          "Nenhuma fonte municipal cadastrada. Comece pelo site oficial, diário oficial ou portal da transparência do município.",
+        sources: municipalSources,
+      },
+      {
+        title: "Fontes externas e complementares",
+        description:
+          "Outras fontes oficiais ou complementares usadas como referência, como portais estaduais, federais, tribunais e órgãos de controle.",
+        emptyMessage:
+          "Nenhuma fonte externa cadastrada. Use esta área para fontes como Planalto, TCU, CGU, tribunais ou outros portais oficiais.",
+        sources: externalSources,
+      },
+    ],
+    [externalSources, municipalSources],
+  );
+
+  async function loadSources() {
+    setIsLoading(true);
+    setErrorMessage("");
+
+    try {
+      const response = await fetch("/api/governance/official-sources", {
+        method: "GET",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Não foi possível listar as fontes.");
+      }
+
+      setSources(data.sources ?? []);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível listar as fontes oficiais.",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadSources();
+  }, []);
+
+  function replaceSource(updatedSource: OfficialSource) {
+    setSources((currentSources) =>
+      currentSources.map((source) =>
+        source.id === updatedSource.id ? updatedSource : source,
+      ),
+    );
+  }
+
+  function startEdit(source: OfficialSource) {
+    setSuccessMessage("");
+    setErrorMessage("");
+    setEditingSourceId(source.id);
+    setEditState({
+      name: source.name,
+      sourceType: source.source_type,
+      url: source.url,
+      priority: source.priority ?? "medium",
+      notes: source.notes ?? "",
+    });
+  }
+
+  function cancelEdit() {
+    setEditingSourceId(null);
+    setEditState(initialFormState);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setSuccessMessage("");
+    setErrorMessage("");
+
+    if (!canManage) {
+      setErrorMessage("Seu perfil não pode gerenciar fontes oficiais.");
+      return;
+    }
+
+    const normalizedUrl = normalizeUrl(formState.url);
+
+    if (!formState.name.trim()) {
+      setErrorMessage("Informe o nome da fonte oficial.");
+      return;
+    }
+
+    if (!normalizedUrl) {
+      setErrorMessage("Informe a URL da fonte oficial.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const response = await fetch("/api/governance/official-sources", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: formState.name.trim(),
+          sourceType: formState.sourceType,
+          url: normalizedUrl,
+          priority: formState.priority,
+          notes: formState.notes.trim() || null,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Não foi possível cadastrar a fonte.");
+      }
+
+      setSources((currentSources) => [data.source, ...currentSources]);
+      setFormState(initialFormState);
+      setSuccessMessage("Fonte oficial cadastrada com sucesso.");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível cadastrar a fonte oficial.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleSaveEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!editingSourceId) {
+      return;
+    }
+
+    setSuccessMessage("");
+    setErrorMessage("");
+
+    const normalizedUrl = normalizeUrl(editState.url);
+
+    if (!editState.name.trim()) {
+      setErrorMessage("Informe o nome da fonte oficial.");
+      return;
+    }
+
+    if (!normalizedUrl) {
+      setErrorMessage("Informe a URL da fonte oficial.");
+      return;
+    }
+
+    setIsActionRunning(true);
+
+    try {
+      const response = await fetch("/api/governance/official-sources", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: editingSourceId,
+          name: editState.name.trim(),
+          sourceType: editState.sourceType,
+          url: normalizedUrl,
+          priority: editState.priority,
+          notes: editState.notes.trim() || null,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Não foi possível atualizar a fonte.");
+      }
+
+      replaceSource(data.source);
+      cancelEdit();
+      setSuccessMessage("Fonte oficial atualizada com sucesso.");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível atualizar a fonte oficial.",
+      );
+    } finally {
+      setIsActionRunning(false);
+    }
+  }
+
+  async function handleToggleStatus(source: OfficialSource) {
+    if (!canManage) {
+      setErrorMessage("Seu perfil não pode gerenciar fontes oficiais.");
+      return;
+    }
+
+    setSuccessMessage("");
+    setErrorMessage("");
+    setIsActionRunning(true);
+
+    const nextStatus = source.status === "active" ? "inactive" : "active";
+
+    try {
+      const response = await fetch("/api/governance/official-sources", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: source.id,
+          status: nextStatus,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Não foi possível alterar o status.");
+      }
+
+      replaceSource(data.source);
+      setSuccessMessage(
+        nextStatus === "active"
+          ? "Fonte oficial ativada com sucesso."
+          : "Fonte oficial desativada com sucesso.",
+      );
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível alterar o status da fonte oficial.",
+      );
+    } finally {
+      setIsActionRunning(false);
+    }
+  }
+
+  async function handleDelete(source: OfficialSource) {
+    if (!canManage) {
+      setErrorMessage("Seu perfil não pode gerenciar fontes oficiais.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Excluir a fonte oficial "${source.name}"? Esta ação remove a fonte da listagem, mas preserva o histórico no banco.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setSuccessMessage("");
+    setErrorMessage("");
+    setIsActionRunning(true);
+
+    try {
+      const response = await fetch("/api/governance/official-sources", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: source.id,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Não foi possível excluir a fonte.");
+      }
+
+      setSources((currentSources) =>
+        currentSources.filter((currentSource) => currentSource.id !== data.id),
+      );
+      setSuccessMessage("Fonte oficial excluída com sucesso.");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível excluir a fonte oficial.",
+      );
+    } finally {
+      setIsActionRunning(false);
+    }
+  }
+
+  return (
+    <div className="space-y-7">
+      <section className="rounded-3xl border border-[#dedede] bg-white p-7 shadow-sm">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
+              <FileSearch size={14} />
+              Fontes oficiais
+            </div>
+
+            <h1 className="text-3xl font-bold tracking-tight text-slate-950">
+              Fontes oficiais
+            </h1>
+
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
+              Cadastre portais, diários oficiais, repositórios e sites
+              institucionais utilizados como referência oficial pelo órgão.
+              Todos os registros ficam isolados pelo organization_id da
+              organização atual.
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm text-slate-700">
+            <p className="font-semibold text-[#0f3a4a]">{organizationName}</p>
+            <p className="mt-1">{sources.length} fonte(s) cadastrada(s)</p>
+            <p className="mt-1">{activeSourcesCount} fonte(s) ativa(s)</p>
+            <p className="mt-1">{inactiveSourcesCount} fonte(s) inativa(s)</p>
+            <p className="mt-1">
+              {municipalSources.length} fonte(s) municipal(is)
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid items-start gap-6 xl:grid-cols-[0.75fr_1.25fr]">
+        <article className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
+          <div className="mb-5 flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
+              <PlusCircle size={22} />
+            </div>
+
+            <div>
+              <h2 className="text-lg font-bold text-slate-950">
+                Cadastrar fonte
+              </h2>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                Registre uma fonte oficial para curadoria institucional e uso
+                futuro pelo Chat Governança.
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-5 rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4 text-sm leading-6 text-slate-700">
+            <p className="font-semibold text-[#0f3a4a]">
+              Organização sugerida
+            </p>
+            <p className="mt-1">
+              Use Site municipal, Diário oficial, Portal da transparência e
+              Repositório institucional para fontes do próprio município.
+              Use Outra fonte para portais externos, tribunais e órgãos de
+              controle.
+            </p>
+          </div>
+
+          {successMessage ? (
+            <div className="mb-5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+              {successMessage}
+            </div>
+          ) : null}
+
+          {errorMessage ? (
+            <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {errorMessage}
+            </div>
+          ) : null}
+
+          {!canManage ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+              Seu perfil pode consultar as fontes oficiais, mas não pode
+              cadastrar novas fontes.
+            </div>
+          ) : (
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div>
+                <label
+                  htmlFor="source-name"
+                  className="mb-2 block text-sm font-semibold text-slate-950"
+                >
+                  Nome da fonte *
+                </label>
+                <input
+                  id="source-name"
+                  type="text"
+                  value={formState.name}
+                  onChange={(event) =>
+                    setFormState((currentState) => ({
+                      ...currentState,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="Ex.: Portal da Transparência"
+                  className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#0f3a4a]"
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label
+                    htmlFor="source-type"
+                    className="mb-2 block text-sm font-semibold text-slate-950"
+                  >
+                    Tipo *
+                  </label>
+                  <select
+                    id="source-type"
+                    value={formState.sourceType}
+                    onChange={(event) =>
+                      setFormState((currentState) => ({
+                        ...currentState,
+                        sourceType: event.target
+                          .value as GovernanceOfficialSourceType,
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+                  >
+                    {sourceTypeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="source-priority"
+                    className="mb-2 block text-sm font-semibold text-slate-950"
+                  >
+                    Prioridade *
+                  </label>
+                  <select
+                    id="source-priority"
+                    value={formState.priority}
+                    onChange={(event) =>
+                      setFormState((currentState) => ({
+                        ...currentState,
+                        priority: event.target
+                          .value as OfficialSourcePriority,
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
+                  >
+                    {priorityOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="source-url"
+                  className="mb-2 block text-sm font-semibold text-slate-950"
+                >
+                  URL *
+                </label>
+                <input
+                  id="source-url"
+                  type="url"
+                  value={formState.url}
+                  onChange={(event) =>
+                    setFormState((currentState) => ({
+                      ...currentState,
+                      url: event.target.value,
+                    }))
+                  }
+                  placeholder="https://..."
+                  className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#0f3a4a]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="source-notes"
+                  className="mb-2 block text-sm font-semibold text-slate-950"
+                >
+                  Observações
+                </label>
+                <textarea
+                  id="source-notes"
+                  value={formState.notes}
+                  onChange={(event) =>
+                    setFormState((currentState) => ({
+                      ...currentState,
+                      notes: event.target.value,
+                    }))
+                  }
+                  rows={4}
+                  placeholder="Ex.: Fonte oficial usada para consultas de legislação municipal."
+                  className="w-full resize-none rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#0f3a4a]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="inline-flex w-full items-center justify-center rounded-2xl bg-[#0f3a4a] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#123f51] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSubmitting ? "Cadastrando..." : "Cadastrar fonte oficial"}
+              </button>
+            </form>
+          )}
+        </article>
+
+        <article className="flex max-h-[calc(100vh-220px)] min-h-[560px] flex-col rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
+          <div className="mb-5 flex shrink-0 items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
+              <Landmark size={22} />
+            </div>
+
+            <div>
+              <h2 className="text-lg font-bold text-slate-950">
+                Fontes cadastradas
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                {sources.length} fonte(s) oficial(is) cadastrada(s),
+                organizadas por uso municipal ou externo.
+              </p>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto pr-2">
+            {isLoading ? (
+              <div className="rounded-3xl border border-dashed border-[#cfcfcf] bg-[#f8f8f8] p-8 text-center text-sm text-slate-600">
+                Carregando fontes oficiais...
+              </div>
+            ) : sources.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-[#cfcfcf] bg-[#f8f8f8] p-8 text-center">
+                <p className="font-bold text-slate-950">
+                  Nenhuma fonte oficial cadastrada
+                </p>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Cadastre a primeira fonte para estruturar a curadoria oficial
+                  do órgão.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {sourceGroups.map((group) => (
+                  <SourceGroupSection
+                    key={group.title}
+                    group={group}
+                    canManage={canManage}
+                    editingSourceId={editingSourceId}
+                    editState={editState}
+                    isActionRunning={isActionRunning}
+                    onStartEdit={startEdit}
+                    onCancelEdit={cancelEdit}
+                    onEditChange={setEditState}
+                    onSaveEdit={handleSaveEdit}
+                    onToggleStatus={handleToggleStatus}
+                    onDelete={handleDelete}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </article>
+      </section>
+    </div>
+  );
+}

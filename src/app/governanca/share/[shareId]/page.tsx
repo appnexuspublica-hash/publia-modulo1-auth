@@ -333,6 +333,10 @@ function planaltoUrlForLegalReference(rawText: string) {
 
   const lcMatch = text.match(/lei\s+complementar\s+(?:n[ºo]\s*)?([\d.]+)\s*\/\s*(\d{4})/i);
   if (lcMatch) {
+    if (!/\bfederal\b/i.test(text)) {
+      return null;
+    }
+
     const number = onlyDigits(lcMatch[1]);
     return `https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp${number}.htm`;
   }

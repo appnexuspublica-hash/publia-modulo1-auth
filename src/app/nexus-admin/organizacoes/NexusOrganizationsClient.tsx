@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
+import Image from "next/image";
 import {
   Building2,
   CheckCircle2,
@@ -1181,8 +1182,15 @@ export default function NexusOrganizationsClient() {
       <main className="flex min-h-screen items-center justify-center bg-[#f5f5f5] px-5 py-10 text-slate-900">
         <section className="w-full max-w-md rounded-3xl border border-[#dedede] bg-white p-7 shadow-sm">
           <div className="mb-6 flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#0f3a4a] text-white">
-              <ShieldCheck size={24} />
+            <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl bg-white">
+              <Image
+                src="/logos/nexus.png"
+                alt="Nexus"
+                width={48}
+                height={48}
+                priority
+                className="h-12 w-12 object-contain"
+              />
             </div>
 
             <div>
@@ -1282,35 +1290,72 @@ export default function NexusOrganizationsClient() {
   return (
     <main className="min-h-screen bg-[#f5f5f5] text-slate-900">
       <header className="sticky top-0 z-20 border-b border-[#dedede] bg-white/95 px-6 py-4 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#0f3a4a] text-white">
-              <Building2 size={22} />
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#0f3a4a]">
-                Nexus Admin
-              </p>
-              <h1 className="text-xl font-bold text-slate-950">
-                Gestão de Organizações
-              </h1>
-            </div>
+        <div className="mx-auto flex max-w-7xl items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl bg-white">
+            <Image
+              src="/logos/nexus.png"
+              alt="Nexus"
+              width={44}
+              height={44}
+              priority
+              className="h-11 w-11 object-contain"
+            />
           </div>
 
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white"
-          >
-            <LogOut size={16} />
-            Sair
-          </button>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#0f3a4a]">
+              Nexus Admin
+            </p>
+            <h1 className="text-xl font-bold text-slate-950">
+              Gestão de Organizações
+            </h1>
+          </div>
         </div>
       </header>
 
-      <div className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-7">
-        <section className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
+      <div className="mx-auto grid max-w-7xl gap-6 px-6 py-7 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="lg:sticky lg:top-24 lg:self-start">
+          <nav className="rounded-3xl border border-[#dedede] bg-white p-3 shadow-sm">
+            <div className="px-3 pb-3 pt-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#0f3a4a]">
+                Menu
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Administração das organizações do Publ.IA Governança.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <a
+                href="#cadastrar-organizacao"
+                className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-[#f8f8f8] hover:text-[#0f3a4a]"
+              >
+                <Plus size={17} />
+                Cadastrar prefeitura/órgão
+              </a>
+
+              <a
+                href="#organizacoes-cadastradas"
+                className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-[#f8f8f8] hover:text-[#0f3a4a]"
+              >
+                <Building2 size={17} />
+                Organizações cadastradas
+              </a>
+
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex w-full items-center gap-3 rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-left text-sm font-semibold text-slate-700 transition hover:bg-white hover:text-[#0f3a4a]"
+              >
+                <LogOut size={17} />
+                Sair
+              </button>
+            </div>
+          </nav>
+        </aside>
+
+        <div className="min-w-0 space-y-6">
+        <section id="cadastrar-organizacao" className="scroll-mt-28 rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
           <div className="mb-5">
             <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
               <Plus size={14} />
@@ -1878,7 +1923,7 @@ export default function NexusOrganizationsClient() {
           </form>
         </section>
 
-        <section className="min-w-0 rounded-3xl border border-[#dedede] bg-white shadow-sm">
+        <section id="organizacoes-cadastradas" className="min-w-0 scroll-mt-28 rounded-3xl border border-[#dedede] bg-white shadow-sm">
           <div className="border-b border-[#dedede] p-6">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -2791,6 +2836,7 @@ export default function NexusOrganizationsClient() {
             </div>
           )}
         </section>
+        </div>
       </div>
     </main>
   );

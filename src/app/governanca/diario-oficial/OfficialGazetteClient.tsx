@@ -220,6 +220,9 @@ export default function OfficialGazetteClient() {
     string | null
   >(null);
   const [documentActionKey, setDocumentActionKey] = useState<string | null>(null);
+  const [documentFeedbackById, setDocumentFeedbackById] = useState<
+    Record<string, { type: "success" | "error"; message: string }>
+  >({});
 
   const selectedGazette = useMemo(
     () => gazettes.find((gazette) => gazette.id === form.id) ?? null,
@@ -592,8 +595,11 @@ export default function OfficialGazetteClient() {
   }
 
   async function handleReprocessDocument(document: OfficialGazetteDocumentRow) {
-    setDocumentErrorMessage(null);
-    setDocumentSuccessMessage(null);
+    setDocumentFeedbackById((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[document.id];
+      return nextFeedbacks;
+    });
     setDocumentActionKey(`reprocess:${document.id}`);
 
     try {
@@ -626,14 +632,27 @@ export default function OfficialGazetteClient() {
       );
 
       await loadChunksForDocuments([updatedDocument]);
-      setDocumentSuccessMessage("Edição reprocessada com sucesso.");
+
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [updatedDocument.id]: {
+          type: "success",
+          message: "Edição reprocessada com sucesso.",
+        },
+      }));
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
           : "Erro inesperado ao reprocessar a edição.";
 
-      setDocumentErrorMessage(message);
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "error",
+          message,
+        },
+      }));
     } finally {
       setDocumentActionKey(null);
     }
@@ -648,8 +667,11 @@ export default function OfficialGazetteClient() {
       return;
     }
 
-    setDocumentErrorMessage(null);
-    setDocumentSuccessMessage(null);
+    setDocumentFeedbackById((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[document.id];
+      return nextFeedbacks;
+    });
     setDocumentActionKey(`delete:${document.id}`);
 
     try {
@@ -669,28 +691,47 @@ export default function OfficialGazetteClient() {
         throw new Error(payload?.error ?? "Não foi possível excluir a edição.");
       }
 
-      setDocuments((currentDocuments) =>
-        currentDocuments.filter(
-          (currentDocument) => currentDocument.id !== document.id,
-        ),
-      );
-      setChunksByDocumentId((currentChunks) => {
-        const nextChunks = { ...currentChunks };
-        delete nextChunks[document.id];
-        return nextChunks;
-      });
-      setExpandedDocumentIds((currentIds) =>
-        currentIds.filter((currentId) => currentId !== document.id),
-      );
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "success",
+          message: "Edição excluída com sucesso.",
+        },
+      }));
 
-      setDocumentSuccessMessage("Edição excluída com sucesso.");
+      window.setTimeout(() => {
+        setDocuments((currentDocuments) =>
+          currentDocuments.filter(
+            (currentDocument) => currentDocument.id !== document.id,
+          ),
+        );
+        setChunksByDocumentId((currentChunks) => {
+          const nextChunks = { ...currentChunks };
+          delete nextChunks[document.id];
+          return nextChunks;
+        });
+        setExpandedDocumentIds((currentIds) =>
+          currentIds.filter((currentId) => currentId !== document.id),
+        );
+        setDocumentFeedbackById((currentFeedbacks) => {
+          const nextFeedbacks = { ...currentFeedbacks };
+          delete nextFeedbacks[document.id];
+          return nextFeedbacks;
+        });
+      }, 1200);
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
           : "Erro inesperado ao excluir a edição.";
 
-      setDocumentErrorMessage(message);
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "error",
+          message,
+        },
+      }));
     } finally {
       setDocumentActionKey(null);
     }
@@ -711,23 +752,16 @@ export default function OfficialGazetteClient() {
             </h1>
 
             <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-              Cadastre a URL oficial onde o município publica o Diário Oficial e
-              registre manualmente os PDFs das edições. A leitura automática será
-              implementada em etapa posterior.
+              Informe o endereço web (URL) principal do Diário Oficial ou a
+              página onde as edições são publicadas de forma contínua.
+              Certifique-se de que a URL seja pública, esteja acessível e
+              estável ao longo do tempo.
             </p>
           </div>
-
-          <button
-            type="button"
-            onClick={handleNewGazette}
-            className="inline-flex items-center justify-center rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-white"
-          >
-            Nova fonte
-          </button>
         </div>
       </section>
 
-      <section className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_430px]">
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_430px] xl:items-start">
         <div className="space-y-6">
           <div className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-950">
@@ -977,16 +1011,12 @@ export default function OfficialGazetteClient() {
 
         </div>
 
-        <aside className="min-h-0 xl:sticky xl:top-6 xl:self-start">
-          <section className="flex h-[72vh] min-h-[520px] w-full flex-col overflow-hidden rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm xl:h-[calc(100vh-9rem)] xl:max-h-[860px]">
+        <aside className="min-h-0 xl:self-start">
+          <section className="flex h-[72vh] min-h-[520px] max-h-[calc(100vh-12rem)] w-full flex-col overflow-hidden rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
             <div className="mb-5">
               <h2 className="text-lg font-bold text-slate-950">
                 Edições cadastradas
               </h2>
-
-              <p className="mt-1 text-sm text-slate-600">
-                PDFs cadastrados manualmente para processamento posterior.
-              </p>
             </div>
 
             {isLoadingDocuments ? (
@@ -1004,6 +1034,7 @@ export default function OfficialGazetteClient() {
                   const chunks = getDocumentChunks(document.id);
                   const isExpanded = expandedDocumentIds.includes(document.id);
                   const isLoadingChunks = chunksLoadingKey === document.id;
+                  const documentFeedback = documentFeedbackById[document.id];
 
                   return (
                     <article
@@ -1115,6 +1146,18 @@ export default function OfficialGazetteClient() {
                             Excluir
                           </button>
                         </div>
+
+                        {documentFeedback ? (
+                          <div
+                            className={`rounded-2xl border px-4 py-3 text-sm ${
+                              documentFeedback.type === "success"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                : "border-red-200 bg-red-50 text-red-700"
+                            }`}
+                          >
+                            {documentFeedback.message}
+                          </div>
+                        ) : null}
                       </div>
                     </article>
                   );

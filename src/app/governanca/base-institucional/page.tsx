@@ -164,6 +164,7 @@ export default async function GovernanceInstitutionalBasePage() {
       <div className="flex min-h-0 flex-1">
         <GovernanceSidebar
           organizationName={organization.name}
+          organizationLogoUrl={organization.logo_url}
           functionalRoleLabel={getGovernanceFunctionalRoleLabel(
             membership.functional_role,
           )}
@@ -187,9 +188,7 @@ export default async function GovernanceInstitutionalBasePage() {
 
                 <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
                   Envie e organize leis, decretos, portarias, pareceres,
-                  regulamentos, normas internas e manuais do órgão. Todos os
-                  registros ficam isolados pelo organization_id da organização
-                  atual.
+                  regulamentos, normas internas e manuais do órgão.
                 </p>
               </div>
 

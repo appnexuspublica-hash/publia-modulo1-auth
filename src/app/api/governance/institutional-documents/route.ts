@@ -39,28 +39,31 @@ const DOCUMENT_SELECT = `
 `;
 
 const allowedDocumentTypes = new Set([
-  "lei",
-  "decreto",
-  "portaria",
-  "instrucao_normativa",
-  "manual",
-  "parecer_modelo",
-  "regulamento",
-  "contrato",
-  "edital",
   "ata",
+  "codigo",
+  "contrato",
+  "decreto",
+  "edital",
+  "estatuto",
+  "instrucao_normativa",
+  "lei",
+  "manual",
+  "organograma",
   "outro",
+  "parecer_juridico",
+  "parecer_modelo",
+  "plano",
+  "portaria",
+  "recomendacoes_mp",
+  "regulamento",
+  "resolucao",
 ]);
 
 const documentTypeAliases: Record<string, string> = {
-  codigo: "lei",
   decreto_consolidado: "decreto",
-  estatuto: "regulamento",
   lei_organica: "lei",
-  organograma: "outro",
-  parecer: "parecer_modelo",
-  plano: "outro",
   norma_interna: "instrucao_normativa",
+  parecer: "parecer_juridico",
 };
 
 const allowedReviewStatuses = new Set([
@@ -171,7 +174,7 @@ async function extractInstitutionalDocumentText(options: {
 
   if (isPdf) {
     const result = await extractPdfTextFromBuffer(options.buffer, {
-      preferOcr: true,
+      preferOcr: false,
       fileSizeBytes: options.buffer.length,
     });
 
@@ -661,6 +664,13 @@ export async function PATCH(request: Request) {
     };
 
     if (action === "approve") {
+      if (currentDocument.indexing_status !== "indexed") {
+        return NextResponse.json(
+          { error: "Reprocesse ou aguarde a indexação antes de ativar este documento." },
+          { status: 400 },
+        );
+      }
+
       updateData.review_status = "approved";
       updateData.reviewed_by = userId;
       updateData.reviewed_at = new Date().toISOString();
@@ -775,6 +785,13 @@ export async function DELETE(request: Request) {
       return NextResponse.json(
         { error: "Documento institucional não encontrado." },
         { status: 404 },
+      );
+    }
+
+    if (currentDocument.review_status !== "archived") {
+      return NextResponse.json(
+        { error: "Arquive o documento antes de excluir definitivamente." },
+        { status: 400 },
       );
     }
 

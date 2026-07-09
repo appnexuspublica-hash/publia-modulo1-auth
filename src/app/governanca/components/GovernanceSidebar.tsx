@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   BookOpen,
+  Building2,
   FileSearch,
   FileText,
   Landmark,
@@ -17,6 +18,7 @@ import {
 
 type GovernanceSidebarProps = {
   organizationName: string;
+  organizationLogoUrl?: string | null;
   functionalRoleLabel: string;
   technicalRoleLabel: string;
 };
@@ -42,7 +44,7 @@ const navigationItems = [
     enabled: true,
   },
   {
-    label: "Base institucional",
+    label: "Documentos institucionais",
     icon: BookOpen,
     href: "/governanca/base-institucional",
     enabled: true,
@@ -50,16 +52,15 @@ const navigationItems = [
   {
     label: "Fontes oficiais",
     icon: FileSearch,
-  FileText,
     href: "/governanca/fontes-oficiais",
     enabled: true,
   },
-    {
-      label: "Diário Oficial",
-      icon: FileText,
-      href: "/governanca/diario-oficial",
-      enabled: true,
-    },
+  {
+    label: "Diário Oficial",
+    icon: FileText,
+    href: "/governanca/diario-oficial",
+    enabled: true,
+  },
   {
     label: "Auditoria",
     icon: ShieldCheck,
@@ -76,12 +77,13 @@ const navigationItems = [
     label: "Configurações",
     icon: Settings,
     href: "/governanca/configuracoes",
-    enabled: false,
+    enabled: true,
   },
 ];
 
 export default function GovernanceSidebar({
   organizationName,
+  organizationLogoUrl,
   functionalRoleLabel,
   technicalRoleLabel,
 }: GovernanceSidebarProps) {
@@ -94,9 +96,23 @@ export default function GovernanceSidebar({
           Órgão
         </p>
 
-        <h2 className="mt-2 line-clamp-2 text-base font-bold text-slate-950">
-          {organizationName}
-        </h2>
+        <div className="mt-3 flex items-start gap-3">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-[#dedede] bg-[#f8f8f8] text-[#0f3a4a]">
+            {organizationLogoUrl ? (
+              <img
+                src={organizationLogoUrl}
+                alt={`Logo de ${organizationName}`}
+                className="h-full w-full object-contain p-1"
+              />
+            ) : (
+              <Building2 size={24} />
+            )}
+          </div>
+
+          <h2 className="line-clamp-3 min-w-0 text-base font-bold text-slate-950">
+            {organizationName}
+          </h2>
+        </div>
 
         <div className="mt-4 space-y-2 text-xs">
           <div className="rounded-2xl bg-[#e6e6e6] p-3 text-[#0f3a4a]">
@@ -154,14 +170,6 @@ export default function GovernanceSidebar({
           );
         })}
       </nav>
-
-      <div className="mt-auto rounded-3xl border border-[#dedede] bg-white p-4 text-xs leading-5 text-slate-600 shadow-sm">
-        <strong className="text-slate-950">Painel Governança</strong>
-        <p className="mt-1">
-          Gestão institucional do órgão, usuários autorizados e acesso ao Chat
-          Governança.
-        </p>
-      </div>
     </aside>
   );
 }

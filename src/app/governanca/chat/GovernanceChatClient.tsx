@@ -1055,6 +1055,54 @@ function getPlanaltoPeriodPath(year: number) {
   return "";
 }
 
+function isKnownFederalPlanaltoReference(
+  rawNumber: string,
+  year: number,
+  normalizedReference: string,
+) {
+  const isLei = /\bLei(?:\s+Federal)?\b/i.test(normalizedReference);
+  const isLeiComplementar = /Lei\s+Complementar/i.test(normalizedReference);
+  const isDecreto = /\bDecreto\b/i.test(normalizedReference);
+
+  return (
+    (isLei && rawNumber === "14133" && year === 2021) ||
+    (isLei && rawNumber === "12527" && year === 2011) ||
+    (isLei && rawNumber === "13709" && year === 2018) ||
+    (isLeiComplementar && rawNumber === "101" && year === 2000) ||
+    (isDecreto && rawNumber === "12807" && year === 2025)
+  );
+}
+
+function getKnownFederalPlanaltoUrl(
+  rawNumber: string,
+  year: number,
+  normalizedReference: string,
+) {
+  if (!isKnownFederalPlanaltoReference(rawNumber, year, normalizedReference)) {
+    return null;
+  }
+
+  if (/Lei\s+Complementar/i.test(normalizedReference)) {
+    return `https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp${rawNumber}.htm`;
+  }
+
+  const periodPath = getPlanaltoPeriodPath(year);
+
+  if (/\bDecreto\b/i.test(normalizedReference)) {
+    if (periodPath) {
+      return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/decreto/d${rawNumber}.htm`;
+    }
+
+    return `https://www.planalto.gov.br/ccivil_03/decreto/d${rawNumber}.htm`;
+  }
+
+  if (periodPath) {
+    return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/lei/l${rawNumber}.htm`;
+  }
+
+  return `https://www.planalto.gov.br/ccivil_03/leis/l${rawNumber}.htm`;
+}
+
 function buildOfficialLegalUrl(reference: string) {
   const normalized = reference.replace(/\s+/g, " ").trim();
 
@@ -1062,7 +1110,10 @@ function buildOfficialLegalUrl(reference: string) {
     return "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm";
   }
 
-  const numberYear = normalized.match(/([\d.]+)\/(\d{4})/);
+  const numberYear = normalized.match(
+    /(?:n[ºo.]?\s*)?(\d{1,6}(?:[./-]\d{1,6})?)\s*(?:\/|de\s+\d{1,2}\s+de\s+[a-zç]+\s+de\s+)(\d{4})/i,
+  );
+
   if (!numberYear) {
     return null;
   }
@@ -1070,10 +1121,21 @@ function buildOfficialLegalUrl(reference: string) {
   const rawNumber = numberYear[1].replace(/\D/g, "");
   const year = Number(numberYear[2]);
   const periodPath = getPlanaltoPeriodPath(year);
-  const isExplicitMunicipal = /\bMunicipal\b/i.test(normalized);
+  const isExplicitFederal = /\bFederal\b/i.test(normalized);
+  const isExplicitMunicipal = /\bMunicipal\b/i.test(normalized) || /\bMunicípio\b/i.test(normalized);
+  const isExplicitState = /\bEstadual\b/i.test(normalized) || /\bEstado\b/i.test(normalized);
+  const knownFederalPlanaltoUrl = getKnownFederalPlanaltoUrl(rawNumber, year, normalized);
+
+  if (isExplicitMunicipal || isExplicitState) {
+    return null;
+  }
+
+  if (knownFederalPlanaltoUrl) {
+    return knownFederalPlanaltoUrl;
+  }
 
   if (/Lei\s+Complementar/i.test(normalized)) {
-    if (isExplicitMunicipal || rawNumber.length < 3) {
+    if (!isExplicitFederal) {
       return null;
     }
 
@@ -1081,12 +1143,7 @@ function buildOfficialLegalUrl(reference: string) {
   }
 
   if (/Lei(?:\s+Federal)?/i.test(normalized)) {
-    const looksLikeFederalOrdinaryLaw =
-      /\bFederal\b/i.test(normalized) ||
-      rawNumber.length >= 4 ||
-      numberYear[1].includes(".");
-
-    if (!looksLikeFederalOrdinaryLaw || isExplicitMunicipal) {
+    if (!isExplicitFederal) {
       return null;
     }
 
@@ -1098,9 +1155,7 @@ function buildOfficialLegalUrl(reference: string) {
   }
 
   if (/Decreto/i.test(normalized)) {
-    const looksLikeFederalDecree = rawNumber.length >= 4 || numberYear[1].includes(".");
-
-    if (!looksLikeFederalDecree || isExplicitMunicipal) {
+    if (!isExplicitFederal) {
       return null;
     }
 
@@ -1109,10 +1164,6 @@ function buildOfficialLegalUrl(reference: string) {
     }
 
     return `https://www.planalto.gov.br/ccivil_03/decreto/d${rawNumber}.htm`;
-  }
-
-  if (/Medida Provisória/i.test(normalized) && periodPath) {
-    return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/mpv/mpv${rawNumber}.htm`;
   }
 
   return null;
@@ -1161,16 +1212,62 @@ function getInstitutionalSourceByHint(
   });
 }
 
+type ProtectedMarkdownRange = {
+  start: number;
+  end: number;
+};
+
+function collectProtectedMarkdownRanges(content: string): ProtectedMarkdownRange[] {
+  const source = String(content ?? "");
+  const ranges: ProtectedMarkdownRange[] = [];
+
+  const patterns = [
+    // Links Markdown já existentes: [texto](url) ou ![alt](url)
+    /!?\[[^\]\n]+\]\([^\s)]+(?:\s+"[^"]*")?\)/g,
+    // Links HTML já existentes.
+    /<a\b[^>]*>[\s\S]*?<\/a>/gi,
+    // URLs cruas, para evitar substituição dentro de endereços já presentes.
+    /https?:\/\/[^\s)\]]+/gi,
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+
+    while ((match = pattern.exec(source)) !== null) {
+      ranges.push({
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    }
+  }
+
+  return ranges.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+function isOffsetInsideProtectedMarkdownRange(
+  offset: number,
+  length: number,
+  ranges: ProtectedMarkdownRange[],
+) {
+  const end = offset + length;
+
+  return ranges.some((range) => offset >= range.start && end <= range.end);
+}
+
 function linkMarkdownReference(content: string, labelPattern: RegExp, url: string) {
   if (!url) {
     return content;
   }
 
-  return content.replace(labelPattern, (reference, _match, offset, fullText) => {
-    const before = fullText.slice(Math.max(0, offset - 2), offset);
-    const after = fullText.slice(offset + reference.length, offset + reference.length + 2);
+  const protectedRanges = collectProtectedMarkdownRanges(content);
 
-    if (before.includes("[") || after.startsWith("](")) {
+  return content.replace(labelPattern, (reference, _match, offset) => {
+    if (
+      isOffsetInsideProtectedMarkdownRange(
+        Number(offset),
+        String(reference).length,
+        protectedRanges,
+      )
+    ) {
       return reference;
     }
 
@@ -1220,6 +1317,20 @@ function linkifyInstitutionalReferences(
   const planoDiretorUrl = getSourceUrl(planoDiretorSource);
   const leiOrganicaUrl = getSourceUrl(leiOrganicaSource);
   const codigoTributarioUrl = getSourceUrl(codigoTributarioSource);
+  const administrativeStructureUrl =
+    getAdministrativeStructureSourceUrl(institutionalSources);
+
+  if (administrativeStructureUrl) {
+    const lc047Pattern =
+      /\b(Lei\s+Complementar\s+n[º°]?\s*0*47\/2024|LC\s+n[º°]?\s*0*47\/2024)\b/gi;
+
+    output = replaceExistingMarkdownLinkByText(
+      output,
+      lc047Pattern,
+      administrativeStructureUrl,
+    );
+    output = linkMarkdownReference(output, lc047Pattern, administrativeStructureUrl);
+  }
 
   if (planoDiretorUrl) {
     const planoPattern =
@@ -1261,34 +1372,94 @@ function linkifyInstitutionalReferences(
   return output;
 }
 
+
+function sanitizeUnsupportedPlanaltoMarkdownLinks(content: string) {
+  const paranaCreationLawUrl =
+    "https://www.legislacao.pr.gov.br/legislacao/pesquisarAto.do?action=exibir&codAto=12935&indice=1&totalRegistros=1";
+
+  return String(content ?? "").replace(
+    /\[([^\]]+)\]\((https?:\/\/(?:www\.)?planalto\.gov\.br\/[^)]+)\)/gi,
+    (full, label) => {
+      const normalizedLabel = String(label ?? "");
+
+      if (/4\.?338(?:\/1961)?/i.test(normalizedLabel)) {
+        return `[${label}](${paranaCreationLawUrl})`;
+      }
+
+      const numberYear = normalizedLabel.match(
+        /(?:n[ºo.]?\s*)?(\d{1,6}(?:[./-]\d{1,6})?)\s*(?:\/|de\s+\d{1,2}\s+de\s+[a-zç]+\s+de\s+)(\d{4})/i,
+      );
+      const rawNumber = numberYear?.[1]?.replace(/\D/g, "") ?? "";
+      const year = Number(numberYear?.[2] ?? 0);
+      const isFederal =
+        /\bFederal\b/i.test(normalizedLabel) ||
+        /Constitui[cç][aã]o Federal/i.test(normalizedLabel) ||
+        isKnownFederalPlanaltoReference(rawNumber, year, normalizedLabel);
+
+      if (isFederal) {
+        return full;
+      }
+
+      return String(label ?? "");
+    },
+  );
+}
+
+function getAdministrativeStructureSourceUrl(
+  institutionalSources: GovernanceChatSource[],
+) {
+  const source = institutionalSources.find((item) => {
+    const title = normalizeTextForSearch(item?.title ?? "");
+    const url = getSourceUrl(item);
+
+    return Boolean(url) && (
+      title.includes("estrutura administrativa") ||
+      title.includes("administrativa da prefeitura")
+    );
+  });
+
+  return getSourceUrl(source);
+}
+
 function linkifyLegalReferences(
   content: string,
   institutionalSources: GovernanceChatSource[] = [],
 ) {
+  const contentWithoutBadPlanaltoLinks =
+    sanitizeUnsupportedPlanaltoMarkdownLinks(content);
+
   const contentWithInstitutionalLinks = linkifyInstitutionalReferences(
-    content,
+    contentWithoutBadPlanaltoLinks,
     institutionalSources,
   );
 
   const legalReferencePattern =
     /\b(Constituição Federal(?: de 1988)?(?:\s*[—–-]\s*art\.?\s*\d+[º°]?)?|Lei(?:\s+Federal|\s+Complementar)?\s+n[º°]?\s*[\d.]+\/\d{4}|Decreto\s+n[º°]?\s*[\d.]+\/\d{4}|Medida Provisória\s+n[º°]?\s*[\d.]+\/\d{4}|Portaria\s+n[º°]?\s*[\d.]+\/\d{4}|Instrução Normativa\s+n[º°]?\s*[\d.]+\/\d{4}|Resolução\s+n[º°]?\s*[\d.]+\/\d{4}|Emenda Constitucional\s+n[º°]?\s*[\d.]+)\b/gi;
 
-  return contentWithInstitutionalLinks.replace(legalReferencePattern, (reference, _match, offset, fullText) => {
-    const before = fullText.slice(Math.max(0, offset - 2), offset);
-    const after = fullText.slice(offset + reference.length, offset + reference.length + 2);
+  const protectedRanges = collectProtectedMarkdownRanges(contentWithInstitutionalLinks);
 
-    if (before.includes("[") || after.startsWith("](")) {
-      return reference;
-    }
+  return contentWithInstitutionalLinks.replace(
+    legalReferencePattern,
+    (reference, _match, offset) => {
+      if (
+        isOffsetInsideProtectedMarkdownRange(
+          Number(offset),
+          String(reference).length,
+          protectedRanges,
+        )
+      ) {
+        return reference;
+      }
 
-    const officialUrl = buildOfficialLegalUrl(reference);
+      const officialUrl = buildOfficialLegalUrl(reference);
 
-    if (!officialUrl) {
-      return reference;
-    }
+      if (!officialUrl) {
+        return reference;
+      }
 
-    return `[${reference}](${officialUrl})`;
-  });
+      return `[${reference}](${officialUrl})`;
+    },
+  );
 }
 
 function splitAssistantInlineSuggestion(content: string): {
@@ -3020,7 +3191,7 @@ export default function GovernanceChatClient({
     return (
       <div className="mt-5 border-t border-[#dedede] pt-4 text-sm">
         <p className="mb-2 font-black text-[#0f3a4a]">
-          Documentos consultados
+          Fontes consultadas
         </p>
 
         <ul className="space-y-1.5">

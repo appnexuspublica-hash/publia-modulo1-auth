@@ -49,6 +49,11 @@ type SourceGroup = {
   sources: OfficialSource[];
 };
 
+type SourceCardFeedback = {
+  type: "success" | "error";
+  message: string;
+};
+
 const initialFormState: FormState = {
   name: "",
   sourceType: "municipal_website",
@@ -170,6 +175,7 @@ function SourceCard({
   onSaveEdit,
   onToggleStatus,
   onDelete,
+  actionFeedback,
 }: {
   source: OfficialSource;
   canManage: boolean;
@@ -182,6 +188,7 @@ function SourceCard({
   onSaveEdit: (event: FormEvent<HTMLFormElement>) => void;
   onToggleStatus: (source: OfficialSource) => void;
   onDelete: (source: OfficialSource) => void;
+  actionFeedback?: SourceCardFeedback;
 }) {
   if (isEditing) {
     return (
@@ -384,6 +391,18 @@ function SourceCard({
           </button>
         </div>
       ) : null}
+
+      {actionFeedback ? (
+        <div
+          className={`mt-3 rounded-2xl border px-4 py-3 text-sm ${
+            actionFeedback.type === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border-red-200 bg-red-50 text-red-700"
+          }`}
+        >
+          {actionFeedback.message}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -400,6 +419,7 @@ function SourceGroupSection({
   onSaveEdit,
   onToggleStatus,
   onDelete,
+  sourceFeedbacks,
 }: {
   group: SourceGroup;
   canManage: boolean;
@@ -412,6 +432,7 @@ function SourceGroupSection({
   onSaveEdit: (event: FormEvent<HTMLFormElement>) => void;
   onToggleStatus: (source: OfficialSource) => void;
   onDelete: (source: OfficialSource) => void;
+  sourceFeedbacks: Record<string, SourceCardFeedback>;
 }) {
   return (
     <section className="rounded-3xl border border-[#dedede] bg-white p-5">
@@ -442,6 +463,7 @@ function SourceGroupSection({
               onSaveEdit={onSaveEdit}
               onToggleStatus={onToggleStatus}
               onDelete={onDelete}
+              actionFeedback={sourceFeedbacks[source.id]}
             />
           ))}
         </div>
@@ -463,6 +485,9 @@ export default function OfficialSourcesClient({
   const [isActionRunning, setIsActionRunning] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [sourceFeedbacks, setSourceFeedbacks] = useState<
+    Record<string, SourceCardFeedback>
+  >({});
 
   const activeSourcesCount = useMemo(() => {
     return sources.filter((source) => source.status === "active").length;
@@ -544,6 +569,11 @@ export default function OfficialSourcesClient({
   function startEdit(source: OfficialSource) {
     setSuccessMessage("");
     setErrorMessage("");
+    setSourceFeedbacks((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[source.id];
+      return nextFeedbacks;
+    });
     setEditingSourceId(source.id);
     setEditState({
       name: source.name,
@@ -667,7 +697,13 @@ export default function OfficialSourcesClient({
 
       replaceSource(data.source);
       cancelEdit();
-      setSuccessMessage("Fonte oficial atualizada com sucesso.");
+      setSourceFeedbacks((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [editingSourceId]: {
+          type: "success",
+          message: "Fonte oficial atualizada com sucesso.",
+        },
+      }));
     } catch (error) {
       setErrorMessage(
         error instanceof Error
@@ -687,6 +723,11 @@ export default function OfficialSourcesClient({
 
     setSuccessMessage("");
     setErrorMessage("");
+    setSourceFeedbacks((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[source.id];
+      return nextFeedbacks;
+    });
     setIsActionRunning(true);
 
     const nextStatus = source.status === "active" ? "inactive" : "active";
@@ -710,17 +751,27 @@ export default function OfficialSourcesClient({
       }
 
       replaceSource(data.source);
-      setSuccessMessage(
-        nextStatus === "active"
-          ? "Fonte oficial ativada com sucesso."
-          : "Fonte oficial desativada com sucesso.",
-      );
+      setSourceFeedbacks((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [source.id]: {
+          type: "success",
+          message:
+            nextStatus === "active"
+              ? "Fonte oficial ativada com sucesso."
+              : "Fonte oficial desativada com sucesso.",
+        },
+      }));
     } catch (error) {
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível alterar o status da fonte oficial.",
-      );
+      setSourceFeedbacks((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [source.id]: {
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Não foi possível alterar o status da fonte oficial.",
+        },
+      }));
     } finally {
       setIsActionRunning(false);
     }
@@ -742,6 +793,11 @@ export default function OfficialSourcesClient({
 
     setSuccessMessage("");
     setErrorMessage("");
+    setSourceFeedbacks((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[source.id];
+      return nextFeedbacks;
+    });
     setIsActionRunning(true);
 
     try {
@@ -762,15 +818,34 @@ export default function OfficialSourcesClient({
       }
 
       setSources((currentSources) =>
-        currentSources.filter((currentSource) => currentSource.id !== data.id),
+        currentSources.map((currentSource) =>
+          currentSource.id === data.id
+            ? {
+                ...currentSource,
+                status: "archived",
+                reviewed_at: new Date().toISOString(),
+              }
+            : currentSource,
+        ),
       );
-      setSuccessMessage("Fonte oficial excluída com sucesso.");
+      setSourceFeedbacks((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [source.id]: {
+          type: "success",
+          message: "Fonte oficial excluída com sucesso.",
+        },
+      }));
     } catch (error) {
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível excluir a fonte oficial.",
-      );
+      setSourceFeedbacks((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [source.id]: {
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Não foi possível excluir a fonte oficial.",
+        },
+      }));
     } finally {
       setIsActionRunning(false);
     }
@@ -793,8 +868,6 @@ export default function OfficialSourcesClient({
             <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
               Cadastre portais, diários oficiais, repositórios e sites
               institucionais utilizados como referência oficial pelo órgão.
-              Todos os registros ficam isolados pelo organization_id da
-              organização atual.
             </p>
           </div>
 
@@ -822,22 +895,11 @@ export default function OfficialSourcesClient({
                 Cadastrar fonte
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                Registre uma fonte oficial para curadoria institucional e uso
-                futuro pelo Chat Governança.
+                Cadastre fontes oficiais como: Site Municipal, Diário Oficial do
+                Município, Portal Transparência e outras fontes próprias do
+                município para uso futuro pelo Chat Governança.
               </p>
             </div>
-          </div>
-
-          <div className="mb-5 rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4 text-sm leading-6 text-slate-700">
-            <p className="font-semibold text-[#0f3a4a]">
-              Organização sugerida
-            </p>
-            <p className="mt-1">
-              Use Site municipal, Diário oficial, Portal da transparência e
-              Repositório institucional para fontes do próprio município.
-              Use Outra fonte para portais externos, tribunais e órgãos de
-              controle.
-            </p>
           </div>
 
           {successMessage ? (
@@ -1040,6 +1102,7 @@ export default function OfficialSourcesClient({
                     onSaveEdit={handleSaveEdit}
                     onToggleStatus={handleToggleStatus}
                     onDelete={handleDelete}
+                    sourceFeedbacks={sourceFeedbacks}
                   />
                 ))}
               </div>

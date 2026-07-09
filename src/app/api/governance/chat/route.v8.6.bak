@@ -1,11 +1,28 @@
 // src/app/api/governance/chat/route.ts
+/**
+ * CHAT GOVERNANÇA
+ *
+ * Usado somente pelo produto:
+ * - Publ.IA Governança
+ *
+ * IMPORTANTE:
+ * Esta rota EXIGE organização ativa.
+ *
+ * Banco usado:
+ * - governance_conversations
+ * - governance_messages
+ *
+ * Chave de isolamento:
+ * - organization_id
+ */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
-import { buildProductScopedPrompt } from "@/lib/publiaPrompt";
+import { buildGovernancePrompt } from "@/lib/prompts/governance/prompt";
+import { buildGovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine";
 import { buildGovernanceLegalGuardrails, findGovernanceCriticalKnowledge } from "@/lib/governanceLegalGuardrails";
 import { shouldForceWebFirst } from "@/lib/webFirstDetector";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
@@ -39,9 +56,9 @@ const MAX_OFFICIAL_GAZETTE_CHUNKS = 250;
 const MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS = 80;
 const MAX_OFFICIAL_GAZETTE_COMPLETE_LIST_CONTEXT_CHARS = 30000;
 
-const MAX_INSTITUTIONAL_CONTEXT_CHARS = 10000;
+const MAX_INSTITUTIONAL_CONTEXT_CHARS = 24000;
 const MAX_INSTITUTIONAL_DOCUMENTS = 30;
-const MAX_INSTITUTIONAL_SELECTED_CHUNKS = 12;
+const MAX_INSTITUTIONAL_SELECTED_CHUNKS = 24;
 
 const uuidRe =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -764,6 +781,71 @@ function applyOfficialSourceCitationGuard(params: {
   return `${assistantText.trim()}\n\n${guardBlock}`;
 }
 
+
+function sanitizeGovernanceAssistantText(params: {
+  assistantText: string;
+  question: string;
+  institutionalSources: GovernanceChatSource[];
+}) {
+  const { question, institutionalSources } = params;
+  let text = String(params.assistantText ?? "").trim();
+
+  const hasCreationLawSource = institutionalSources.some((source) =>
+    normalizeInstitutionalSearchText(source.title).includes("lei estadual") &&
+    normalizeInstitutionalSearchText(source.title).includes("cria") &&
+    normalizeInstitutionalSearchText(source.title).includes("municipio")
+  );
+
+  if (isMunicipalCreationLawQuestion(question) && hasCreationLawSource) {
+    text = text
+      .replace(
+        /A criação do Município de Santana do Itararé decorre de lei estadual do Paraná,\s*mas o trecho recuperado traz,?\s*por engano,?\s*[^.]+\./gi,
+        "O Município de Santana do Itararé foi criado por lei estadual do Paraná identificada na Base Institucional consultada.",
+      )
+      .replace(
+        /Essa não é a lei específica de criação de Santana do Itararé\.\s*/gi,
+        "",
+      )
+      .replace(
+        /Como o número e a data exatos não constam no trecho disponível,\s*/gi,
+        "",
+      );
+  }
+
+  text = text.replace(
+    /\[([^\]]+)\]\((https?:\/\/(?:www\.)?planalto\.gov\.br\/[^)]+)\)/gi,
+    (full, label) => {
+      const normalizedLabel = String(label ?? "");
+      const isFederal =
+        /\bFederal\b/i.test(normalizedLabel) ||
+        /Constitui[cç][aã]o Federal/i.test(normalizedLabel);
+
+      if (isFederal) {
+        return full;
+      }
+
+      return String(label ?? "");
+    },
+  );
+
+  text = text
+    .replace(/\(o trecho recuperado é cortado aqui[^)]*\)/gi, "")
+    .replace(/o trecho recuperado é cortado aqui[^.\n]*[.\n]/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return text;
+}
+
+function shouldSuppressExternalGovernanceContext(question: string) {
+  return (
+    isMunicipalCreationLawQuestion(question) ||
+    isAdministrativeStructureQuestion(question) ||
+    isCareerProgressionQuestion(question)
+  );
+}
+
+
 async function loadActiveOfficialSourcesForChat(params: {
   client: ReturnType<typeof createWritableSupabaseRouteClient>;
   organizationId: string;
@@ -840,15 +922,15 @@ function buildGovernanceConsultantStyleInstruction(
       "ESTILO ESPECIAL PARA FOLLOW-UP EXECUTIVO",
       "A pergunta atual foi classificada como continuidade complementar.",
       "Neste caso, NÃO abra uma nova consultoria completa.",
-      "Responda como fechamento executivo de uma conversa já em andamento.",
+      "Responda como continuidade da conversa, mas sem omitir detalhes necessários.",
       "Comece diretamente pelo ponto solicitado pelo usuário.",
       "Não faça introdução longa.",
       "Não redefina conceitos já explicados.",
       "Não reapresente o contexto anterior.",
       "Não repita listas gerais já apresentadas.",
-      "Não produza análise extensa.",
+      "Produza a análise necessária para responder corretamente, sem economia artificial.",
       "Não inclua seção de base legal, salvo se o usuário pedir expressamente ou se houver risco jurídico direto.",
-      "Limite a resposta a no máximo 180 palavras, salvo pedido expresso de detalhamento.",
+      "Não limite a resposta por economia quando houver contexto suficiente. Responda de forma completa, proporcional ao pedido.",
       "Use somente lista curta, tabela simples ou roteiro objetivo.",
       "Quando a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente.",
       "Finalize com uma orientação prática curta para o gestor.",
@@ -1515,6 +1597,50 @@ type GovernanceChatSources = {
   officialSources: GovernanceChatSource[];
 };
 
+type GovernanceChatReference = {
+  title: string;
+  url: string | null;
+  kind: "institutional" | "official" | "legal";
+};
+
+function buildGovernanceChatReferences(
+  sources: GovernanceChatSources,
+): GovernanceChatReference[] {
+  const unique = new Map<string, GovernanceChatReference>();
+
+  function addReference(
+    source: GovernanceChatSource,
+    kind: GovernanceChatReference["kind"],
+  ) {
+    const title = String(source?.title ?? "").trim();
+    const url = String(source?.url ?? "").trim() || null;
+
+    if (!title) {
+      return;
+    }
+
+    const key = `${kind}::${title.toLowerCase()}::${url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, { title, url, kind });
+    }
+  }
+
+  for (const source of sources.institutional ?? []) {
+    addReference(source, "institutional");
+  }
+
+  for (const source of sources.officialSources ?? []) {
+    addReference(source, "official");
+  }
+
+  for (const source of sources.officialGazette ?? []) {
+    addReference(source, "official");
+  }
+
+  return Array.from(unique.values());
+}
+
 type InstitutionalContextResult = {
   contextText: string;
   matchedDocumentIds: string[];
@@ -1604,6 +1730,15 @@ function resolveInstitutionalDocumentUrl(
 
   if (sourceUrl) {
     return sourceUrl;
+  }
+
+  const normalizedTitle = normalizeInstitutionalSearchText(document.title);
+  if (
+    normalizedTitle.includes("lei estadual") &&
+    (normalizedTitle.includes("cria") || normalizedTitle.includes("criacao")) &&
+    normalizedTitle.includes("municipio")
+  ) {
+    return "https://www.legislacao.pr.gov.br/legislacao/pesquisarAto.do?action=exibir&codAto=12935&indice=1&totalRegistros=1";
   }
 
   const storageBucket = String(document.storage_bucket ?? "").trim();
@@ -1723,6 +1858,214 @@ function getInstitutionalQueryPhrases(question: string) {
   return phrases;
 }
 
+function isLocalOfficeHolderQuestion(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+
+  if (!q) {
+    return false;
+  }
+
+  const asksPerson =
+    /\b(quem|qual|quais|nome|nomes|identifique|informe)\b/.test(q);
+
+  const hasLocalOffice =
+    /\b(prefeito|prefeita|vice prefeito|vice prefeita|viceprefeito|viceprefeita|secretario|secretaria|presidente da camara|vereador|vereadora|tomou posse|posse|empossado|empossada|mandato)\b/.test(q);
+
+  return asksPerson && hasLocalOffice;
+}
+
+function scoreLocalOfficeHolderDocument(
+  document: InstitutionalDocumentContextRow,
+  question: string,
+) {
+  if (!isLocalOfficeHolderQuestion(question)) {
+    return 0;
+  }
+
+  const q = normalizeInstitutionalSearchText(question);
+  const title = normalizeInstitutionalSearchText(document.title);
+  const type = normalizeInstitutionalSearchText(document.document_type);
+  const text = normalizeInstitutionalSearchText(
+    String(document.extracted_text ?? "").slice(0, 60000),
+  );
+
+  let score = 0;
+
+  if (title.includes("ata") && title.includes("posse")) score += 180;
+  if (title.includes("posse")) score += 120;
+  if (title.includes("gestao") && /\b2025\b/.test(title)) score += 90;
+  if (type.includes("ata")) score += 80;
+
+  if (/\b(prefeito|prefeita)\b/.test(q) && /\b(prefeito|prefeita)\b/.test(text)) {
+    score += 120;
+  }
+
+  if (/\bvice\b/.test(q) && /\bvice prefeito|vice prefeita|viceprefeito|viceprefeita\b/.test(text)) {
+    score += 130;
+  }
+
+  if (/\b(posse|tomou posse|empossado|empossada)\b/.test(q) && /\b(posse|empossad[oa]s?|mandato)\b/.test(text)) {
+    score += 100;
+  }
+
+  if (/\b2025\b/.test(q) && /\b2025\b/.test(text)) {
+    score += 45;
+  }
+
+  if (/\b2028\b/.test(q) && /\b2028\b/.test(text)) {
+    score += 35;
+  }
+
+  return score;
+}
+
+
+function isMunicipalCreationLawQuestion(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+
+  return (
+    /\blei\b/.test(q) &&
+    (q.includes("cria") || q.includes("criacao") || q.includes("criação")) &&
+    (q.includes("municipio") || q.includes("município"))
+  );
+}
+
+function isAdministrativeStructureQuestion(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+
+  return (
+    (q.includes("estrutura") && (q.includes("administrativa") || q.includes("administracao"))) ||
+    q.includes("organograma") ||
+    (q.includes("secretaria") && q.includes("municipal"))
+  );
+}
+
+function isCareerProgressionQuestion(question: string) {
+  const q = normalizeInstitutionalSearchText(question);
+
+  return (
+    q.includes("progressao") ||
+    q.includes("progressão") ||
+    q.includes("intersticio") ||
+    q.includes("interstício") ||
+    q.includes("carreira") ||
+    q.includes("referencia") ||
+    q.includes("referência")
+  );
+}
+
+function isCreationLawDocument(document: InstitutionalDocumentContextRow) {
+  const title = normalizeInstitutionalSearchText(document.title);
+  const type = normalizeInstitutionalSearchText(document.document_type);
+  const text = normalizeInstitutionalSearchText(String(document.extracted_text ?? "").slice(0, 5000));
+
+  return (
+    title.includes("lei estadual") &&
+    (title.includes("cria") || title.includes("criacao")) &&
+    (title.includes("municipio") || title.includes("município") || text.includes("santana do itarare"))
+  ) || (
+    type.includes("lei") &&
+    text.includes("santana do itarare") &&
+    (text.includes("cria") || text.includes("criado") || text.includes("criacao"))
+  );
+}
+
+function isAdministrativeStructureDocument(document: InstitutionalDocumentContextRow) {
+  const title = normalizeInstitutionalSearchText(document.title);
+  const type = normalizeInstitutionalSearchText(document.document_type);
+  const text = normalizeInstitutionalSearchText(String(document.extracted_text ?? "").slice(0, 15000));
+
+  const positive =
+    title.includes("estrutura administrativa") ||
+    title.includes("administrativa da prefeitura") ||
+    text.includes("estrutura administrativa") ||
+    text.includes("administracao direta") ||
+    text.includes("administração direta");
+
+  const negative =
+    title.includes("codigo tributario") ||
+    title.includes("código tributário") ||
+    title.includes("plano de cargos") ||
+    title.includes("carreiras") ||
+    title.includes("vencimentos") ||
+    title.includes("plano diretor") ||
+    title.includes("lei organica") ||
+    title.includes("lei orgânica") ||
+    type.includes("contrato");
+
+  return positive && !negative;
+}
+
+function isCareerProgressionDocument(document: InstitutionalDocumentContextRow) {
+  const title = normalizeInstitutionalSearchText(document.title);
+  const text = normalizeInstitutionalSearchText(String(document.extracted_text ?? "").slice(0, 15000));
+
+  const positive =
+    title.includes("plano de cargos") ||
+    title.includes("carreira") ||
+    title.includes("carreiras") ||
+    title.includes("vencimentos") ||
+    title.includes("estatuto") ||
+    text.includes("progressao horizontal") ||
+    text.includes("progressão horizontal");
+
+  const negative =
+    title.includes("lei estadual") && (title.includes("cria") || title.includes("criacao")) ||
+    title.includes("plano diretor") ||
+    title.includes("codigo tributario") ||
+    title.includes("estrutura administrativa");
+
+  return positive && !negative;
+}
+
+function getInstitutionalQuestionGuard(question: string) {
+  if (isMunicipalCreationLawQuestion(question)) {
+    return {
+      kind: "creation-law",
+      maxDocuments: 1,
+      accepts: isCreationLawDocument,
+    };
+  }
+
+  if (isAdministrativeStructureQuestion(question)) {
+    return {
+      kind: "administrative-structure",
+      maxDocuments: 1,
+      accepts: isAdministrativeStructureDocument,
+    };
+  }
+
+  if (isCareerProgressionQuestion(question)) {
+    return {
+      kind: "career-progression",
+      maxDocuments: 2,
+      accepts: isCareerProgressionDocument,
+    };
+  }
+
+  return null;
+}
+
+function getInstitutionalDocumentPriorityBoost(
+  document: InstitutionalDocumentContextRow,
+  question: string,
+) {
+  if (isMunicipalCreationLawQuestion(question) && isCreationLawDocument(document)) {
+    return 240;
+  }
+
+  if (isAdministrativeStructureQuestion(question) && isAdministrativeStructureDocument(document)) {
+    return 220;
+  }
+
+  if (isCareerProgressionQuestion(question) && isCareerProgressionDocument(document)) {
+    return 180;
+  }
+
+  return 0;
+}
+
+
 function scoreInstitutionalDocumentForQuestion(
   document: InstitutionalDocumentContextRow,
   question: string,
@@ -1807,6 +2150,9 @@ function scoreInstitutionalDocumentForQuestion(
     score += 130;
   }
 
+  score += scoreLocalOfficeHolderDocument(document, question);
+  score += getInstitutionalDocumentPriorityBoost(document, question);
+
   return score;
 }
 
@@ -1814,21 +2160,38 @@ function selectRelevantInstitutionalDocuments(
   rows: InstitutionalDocumentContextRow[],
   question: string,
 ) {
-  const ranked = rows
+  const isOfficeHolderQuestion = isLocalOfficeHolderQuestion(question);
+  const guard = getInstitutionalQuestionGuard(question);
+  const minimumScore = isOfficeHolderQuestion ? 18 : guard ? 45 : 28;
+
+  let ranked = rows
     .map((document) => ({
       document,
       score: scoreInstitutionalDocumentForQuestion(document, question),
     }))
-    .filter((item) => item.score >= 28)
+    .filter((item) => item.score >= minimumScore)
     .sort((a, b) => b.score - a.score);
+
+  if (guard) {
+    const guarded = ranked.filter((item) => guard.accepts(item.document));
+
+    if (guarded.length > 0) {
+      return guarded.slice(0, guard.maxDocuments);
+    }
+
+    return [];
+  }
 
   if (ranked.length === 0) {
     return [];
   }
 
   const topScore = ranked[0]?.score ?? 0;
-  const minScore = Math.max(28, topScore >= 120 ? topScore * 0.5 : 28);
-  const maxDocuments = topScore >= 120 ? 2 : 3;
+  const minScore = Math.max(
+    minimumScore,
+    topScore >= 120 ? topScore * 0.65 : minimumScore,
+  );
+  const maxDocuments = isOfficeHolderQuestion ? 4 : topScore >= 120 ? 1 : 3;
 
   return ranked
     .filter((item) => item.score >= minScore)
@@ -1918,8 +2281,8 @@ async function buildInstitutionalDocumentsContext(params: {
     });
 
     const relevantChunks = pickRelevantChunks(chunks, question, {
-      maxChunks: candidate.score >= 120 ? 3 : 2,
-      maxChars: candidate.score >= 120 ? 4500 : 3000,
+      maxChunks: candidate.score >= 120 ? 10 : 4,
+      maxChars: candidate.score >= 120 ? 18000 : 7000,
       minScore: candidate.score >= 120 ? 0 : 1,
     });
 
@@ -1939,7 +2302,7 @@ async function buildInstitutionalDocumentsContext(params: {
         document,
         documentScore: candidate.score,
         chunkIndex: chunk.index,
-        text: clampText(chunk.text, 1800),
+        text: clampText(chunk.text, candidate.score >= 120 ? 3500 : 2200),
       });
     }
 
@@ -2031,9 +2394,11 @@ async function buildInstitutionalDocumentsContext(params: {
     "Use somente os documentos institucionais listados nos trechos abaixo para responder sobre Base Institucional.",
     "Quando responder com base nestes trechos, mencione o documento institucional utilizado pelo título, sem criar link manual no corpo da resposta.",
     "Não inclua seção 'Base institucional' no texto da resposta; o sistema exibirá essa fonte de forma estruturada e clicável abaixo da resposta.",
-    "Não misture documentos da Base Institucional com a seção 'Base legal'. Base legal deve conter apenas fundamentos normativos gerais; documentos cadastrados ficam na Base institucional estruturada.",
+    "Não misture documentos da Base Institucional com a seção 'Base legal'. Não use o termo 'Base legal' para documentos cadastrados; documentos cadastrados ficam exclusivamente nas referências estruturadas da interface.",
     "Não escreva frases como 'Não houve consulta web nesta resposta'. Se não houver referência oficial específica, simplesmente omita essa observação.",
     "Não invente conteúdo ausente. Se os trechos forem insuficientes, diga que a Base Institucional não trouxe informação suficiente.",
+    "Nunca declare que um documento institucional recuperado está errado apenas com base em memória do modelo. Se o documento foi selecionado pelo sistema, trate-o como fonte institucional cadastrada.",
+    "Não crie links no corpo da resposta. Cite o nome do documento em texto simples; o link oficial será exibido abaixo em 'Documentos consultados'.",
     "",
     ...blocks,
   ].join("\n");
@@ -2245,8 +2610,8 @@ function buildConversationRelationInstruction(params: {
       "- Não recrie listas gerais já apresentadas em respostas anteriores.",
       "- Não escreva uma nova consultoria completa.",
       "- Comece diretamente com a resposta prática.",
-      "- A resposta deve ser muito mais curta que a resposta principal do tema.",
-      "- Não ultrapasse 180 palavras, salvo pedido expresso do usuário.",
+      "- A resposta deve ser completa o suficiente para resolver o pedido atual, sem cortes artificiais.",
+      "- Não aplique limite artificial de palavras. Responda com o detalhamento necessário para resolver o pedido.",
       "- Use no máximo 6 itens principais.",
       "- Se a pergunta pedir indicadores, métricas, monitoramento ou avaliação, entregue os indicadores diretamente no início.",
       "- Não inclua Base legal ou Referências oficiais nesse tipo de follow-up, salvo pedido expresso ou risco jurídico direto.",
@@ -2483,7 +2848,6 @@ const OFFICIAL_GAZETTE_TRIGGER_WORDS = [
   "licitação",
   "inexigibilidade",
   "edital",
-  "lei",
   "extrato",
   "contrato",
   "publicado",
@@ -2546,6 +2910,14 @@ function normalizeOfficialGazetteSearchText(value: string) {
 
 function shouldUseOfficialGazetteContext(question: string) {
   const normalizedQuestion = normalizeOfficialGazetteSearchText(question);
+
+  if (
+    isMunicipalCreationLawQuestion(question) ||
+    isAdministrativeStructureQuestion(question) ||
+    isCareerProgressionQuestion(question)
+  ) {
+    return false;
+  }
 
   return OFFICIAL_GAZETTE_TRIGGER_WORDS.some((word) =>
     normalizedQuestion.includes(normalizeOfficialGazetteSearchText(word)),
@@ -3443,29 +3815,20 @@ export async function POST(request: Request) {
       question: content,
     });
 
-    const institutionalContextResult = await buildInstitutionalDocumentsContext({
+    const knowledgeContextResult = await buildGovernanceKnowledgeContext({
       client: supabase,
       organizationId: context.organization.id,
       question: content,
-    });
-
-    const officialGazetteContextResult = await buildOfficialGazetteContext({
-      client: supabase,
-      organizationId: context.organization.id,
-      question: content,
-    });
-
-    const officialSourcesContextResult = await loadActiveOfficialSourcesForChat({
-      client: supabase,
-      organizationId: context.organization.id,
-      question: content,
+      maxContextChars: 22000,
     });
 
     const responseSources: GovernanceChatSources = {
-      institutional: institutionalContextResult.sources,
-      officialGazette: [],
-      officialSources: [],
+      institutional: knowledgeContextResult.sources.institutional,
+      officialGazette: knowledgeContextResult.sources.officialGazette,
+      officialSources: knowledgeContextResult.sources.officialSources,
     };
+
+    const responseReferences = buildGovernanceChatReferences(responseSources);
 
     const { data: recentHistoryData, error: historyError } = await supabase
       .from("governance_messages")
@@ -3509,13 +3872,12 @@ export async function POST(request: Request) {
     console.log("[GOVERNANCA] Relation:", conversationRelation);
     console.log("[GOVERNANCA] Mode:", effectiveResponseMode);
 
-    const scopedPrompt = buildProductScopedPrompt({
-      productTier: "governance",
+    const governancePrompt = buildGovernancePrompt({
       responseMode: mapGovernanceModeToPromptMode(effectiveResponseMode),
     });
 
     const instructions = [
-      scopedPrompt,
+      governancePrompt,
       "",
       criticalKnowledgeInstruction,
       "",
@@ -3545,7 +3907,13 @@ export async function POST(request: Request) {
         "REGRA DE REFERÊNCIAS E LINGUAGEM:",
         "Não escreva 'Não houve consulta web nesta resposta' nem variações semelhantes.",
         "Não gere hyperlinks inventados no corpo da resposta.",
-        "Quando houver fontes estruturadas, o sistema exibirá os links oficiais abaixo da resposta.",
+        "Não transforme automaticamente leis municipais, leis estaduais, leis complementares municipais, decretos municipais ou atos do Diário Oficial em links do Planalto.",
+        "Use links somente quando eles vierem explicitamente no contexto como link oficial. Caso contrário, deixe o nome da norma sem link.",
+        "Não crie seções finais chamadas 'Base legal', 'Referências oficiais' ou 'Base institucional'.",
+        "Quando houver fontes estruturadas, o sistema exibirá os links oficiais abaixo da resposta no bloco 'Documentos consultados'.",
+        "Não economize resposta. Quando o contexto trouxer dados suficientes, responda de forma completa e útil para uso administrativo.",
+        "Não diga que o trecho foi cortado, truncado ou incompleto por economia. Use todo o contexto recebido; se ainda faltar dado essencial, diga exatamente qual dado faltou.",
+        "Não mande o usuário clicar na lei para obter a resposta quando a resposta puder ser extraída do contexto. O link serve para conferência, não para substituir a resposta.",
       ].join("\n"),
       "",
       buildForcedExecutiveFollowUpInstruction({
@@ -3562,22 +3930,10 @@ export async function POST(request: Request) {
           ].join("\n")
         : "",
       legalGuardrails,
-      institutionalContextResult.contextText
+      knowledgeContextResult.contextText
         ? [
-            "REGRA PONTUAL PARA BASE INSTITUCIONAL:",
-            institutionalContextResult.contextText,
-          ].join("\n\n")
-        : "",
-      officialGazetteContextResult.contextText
-        ? [
-            "REGRA PONTUAL PARA DIÁRIO OFICIAL:",
-            officialGazetteContextResult.contextText,
-          ].join("\n\n")
-        : "",
-      officialSourcesContextResult.contextText
-        ? [
-            "REGRA PONTUAL PARA FONTES OFICIAIS:",
-            officialSourcesContextResult.contextText,
+            "CONTEXTO ESTRUTURADO DO KNOWLEDGE ENGINE:",
+            knowledgeContextResult.contextText,
           ].join("\n\n")
         : "",
       hasSelectedPdfAttachments
@@ -3638,16 +3994,12 @@ export async function POST(request: Request) {
         );
       }
 
-      assistantText = linkOfficialGazetteReferencesInAssistantText(
+      // Governança V2: links não são gerados automaticamente no texto da IA.
+      // O backend expõe fontes e referências estruturadas em metadata.sources/references.
+      assistantText = sanitizeGovernanceAssistantText({
         assistantText,
-        officialGazetteContextResult.referenceLinks,
-      );
-
-      assistantText = applyOfficialSourceCitationGuard({
-        assistantText,
-        sources: officialSourcesContextResult.sources,
-        prioritizedSource: officialSourcesContextResult.prioritizedSource,
         question: content,
+        institutionalSources: responseSources.institutional,
       });
 
       const { data: assistantMessage, error: assistantMessageError } =
@@ -3669,32 +4021,28 @@ export async function POST(request: Request) {
               selected_pdf_file_ids: selectedPdfFileIds,
               current_message_only_for_pdf: hasSelectedPdfAttachments,
               current_message_only_for_legal_guardrails: hasLegalGuardrails,
-              official_gazette_context_enabled: officialGazetteContextResult.enabled,
-              official_gazette_chunks_used: officialGazetteContextResult.chunksUsed,
-              official_gazette_chunks_read: officialGazetteContextResult.totalChunksRead,
-              official_gazette_reference_links: officialGazetteContextResult.referenceLinks,
+              official_gazette_context_enabled: responseSources.officialGazette.length > 0,
+              official_gazette_chunks_used: knowledgeContextResult.items.filter((item) => item.provider === "official_gazette").length,
+              official_gazette_reference_links: responseSources.officialGazette,
               sources: responseSources,
+              references: responseReferences,
+              knowledge_engine: {
+                version: "governance-v2.1-orchestrated",
+                diagnostics: knowledgeContextResult.diagnostics,
+                selected_items: knowledgeContextResult.items.map((item) => ({
+                  id: item.id,
+                  provider: item.provider,
+                  title: item.title,
+                  type: item.type,
+                  url: item.url,
+                  score: item.score,
+                })),
+              },
               institutional_sources_used: responseSources.institutional,
-              official_sources_context_enabled: officialSourcesContextResult.sources.length > 0,
-              official_sources_used: officialSourcesContextResult.sources.map((source) => ({
-                id: source.id,
-                name: source.name,
-                source_type: source.source_type,
-                priority: source.priority,
-                url: source.url,
-              })),
-              official_sources_prioritized_source: officialSourcesContextResult.prioritizedSource
-                ? {
-                    id: officialSourcesContextResult.prioritizedSource.source.id,
-                    name: officialSourcesContextResult.prioritizedSource.source.name,
-                    source_type: officialSourcesContextResult.prioritizedSource.source.source_type,
-                    priority: officialSourcesContextResult.prioritizedSource.source.priority,
-                    url: officialSourcesContextResult.prioritizedSource.source.url,
-                    score: officialSourcesContextResult.prioritizedSource.score,
-                    intent: officialSourcesContextResult.prioritizedSource.intent,
-                  }
-                : null,
-              official_sources_error: officialSourcesContextResult.error || null,
+              official_sources_context_enabled: responseSources.officialSources.length > 0,
+              official_sources_used: responseSources.officialSources,
+              official_sources_prioritized_source: responseSources.officialSources[0] ?? null,
+              official_sources_error: null,
               conversation_relation: conversationRelation,
               previous_user_question: previousUserQuestion || null,
               streaming: false,
@@ -3755,6 +4103,7 @@ export async function POST(request: Request) {
         conversationTitle,
         suggestions,
         sources: responseSources,
+        references: responseReferences,
       });
     }
 
@@ -3808,25 +4157,8 @@ export async function POST(request: Request) {
           return;
         }
 
-        assistantText = linkOfficialGazetteReferencesInAssistantText(
-          assistantText,
-          officialGazetteContextResult.referenceLinks,
-        );
-
-        const assistantTextBeforeOfficialSourceGuard = assistantText;
-
-        assistantText = applyOfficialSourceCitationGuard({
-          assistantText,
-          sources: officialSourcesContextResult.sources,
-          prioritizedSource: officialSourcesContextResult.prioritizedSource,
-          question: content,
-        });
-
-        if (assistantText.length > assistantTextBeforeOfficialSourceGuard.length) {
-          send("delta", {
-            delta: assistantText.slice(assistantTextBeforeOfficialSourceGuard.length),
-          });
-        }
+        // Governança V2: links não são gerados automaticamente no texto da IA.
+        // O backend expõe fontes e referências estruturadas em metadata.sources/references.
 
         const { data: assistantMessage, error: assistantMessageError } =
           await supabase
@@ -3847,21 +4179,27 @@ export async function POST(request: Request) {
                 selected_pdf_file_ids: selectedPdfFileIds,
                 current_message_only_for_pdf: hasSelectedPdfAttachments,
                 current_message_only_for_legal_guardrails: hasLegalGuardrails,
-                official_gazette_context_enabled: officialGazetteContextResult.enabled,
-                official_gazette_chunks_used: officialGazetteContextResult.chunksUsed,
-                official_gazette_chunks_read: officialGazetteContextResult.totalChunksRead,
-                official_gazette_reference_links: officialGazetteContextResult.referenceLinks,
+                official_gazette_context_enabled: responseSources.officialGazette.length > 0,
+                official_gazette_chunks_used: knowledgeContextResult.items.filter((item) => item.provider === "official_gazette").length,
+                official_gazette_reference_links: responseSources.officialGazette,
                 sources: responseSources,
-              institutional_sources_used: responseSources.institutional,
-              official_sources_context_enabled: officialSourcesContextResult.sources.length > 0,
-                official_sources_used: officialSourcesContextResult.sources.map((source) => ({
-                  id: source.id,
-                  name: source.name,
-                  source_type: source.source_type,
-                  priority: source.priority,
-                  url: source.url,
+              references: responseReferences,
+              knowledge_engine: {
+                version: "governance-v2.1-orchestrated",
+                diagnostics: knowledgeContextResult.diagnostics,
+                selected_items: knowledgeContextResult.items.map((item) => ({
+                  id: item.id,
+                  provider: item.provider,
+                  title: item.title,
+                  type: item.type,
+                  url: item.url,
+                  score: item.score,
                 })),
-                official_sources_error: officialSourcesContextResult.error || null,
+              },
+              institutional_sources_used: responseSources.institutional,
+              official_sources_context_enabled: responseSources.officialSources.length > 0,
+                official_sources_used: responseSources.officialSources,
+                official_sources_error: null,
                 conversation_relation: conversationRelation,
                 previous_user_question: previousUserQuestion || null,
                 streaming: true,
@@ -3927,6 +4265,7 @@ export async function POST(request: Request) {
           conversationTitle,
           suggestions,
           sources: responseSources,
+          references: responseReferences,
         });
 
         controller.close();

@@ -11,18 +11,17 @@ import {
   FileText,
   Landmark,
   MessageSquare,
+  Settings,
   ShieldCheck,
   Users,
 } from "lucide-react";
 
 import GovernanceHeader from "./components/GovernanceHeader";
-import GovernanceSidebar from "./components/GovernanceSidebar";
+import GovernancePageFrame from "./components/GovernancePageFrame";
 import {
-  getGovernanceFunctionalRoleLabel,
   getGovernanceHistoryRetentionPolicyLabel,
   getGovernanceMunicipalitySizeLabel,
   getGovernanceOrganizationTypeLabel,
-  getGovernanceTechnicalRoleLabel,
   getOrganizationStatusLabel,
   type GovernanceContext,
 } from "@/types/governance";
@@ -148,7 +147,7 @@ export default function GovernanceShell({
       enabled: isAdminAreaEnabled,
     },
     {
-      title: "Base institucional",
+      title: "Documentos Institucionais",
       description: "Documentos oficiais, normas, manuais e pareceres-modelo.",
       icon: BookOpen,
       value: "Documentos",
@@ -161,6 +160,14 @@ export default function GovernanceShell({
       icon: FileSearch,
       value: "Curadoria",
       href: "/governanca/fontes-oficiais",
+      enabled: isAdminAreaEnabled,
+    },
+    {
+      title: "Diário Oficial",
+      description: "Publique, acompanhe e consulte edições e atos oficiais do órgão.",
+      icon: FileText,
+      value: "Publicações",
+      href: "/governanca/diario-oficial",
       enabled: isAdminAreaEnabled,
     },
     {
@@ -187,29 +194,22 @@ export default function GovernanceShell({
       href: "/governanca/indicadores",
       enabled: isAdminAreaEnabled,
     },
+    {
+      title: "Configurações",
+      description: "Central de ajustes visuais e institucionais do órgão.",
+      icon: Settings,
+      value: "Ajustes",
+      href: "/governanca/configuracoes",
+      enabled: isAdminAreaEnabled,
+    },
   ];
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f5f5f5] text-slate-900">
-      <GovernanceHeader
-        userLabel={userLabel}
-        userEmail={userEmail}
-        organizationName={organization.name}
-        organizationStatusLabel={getOrganizationStatusLabel(organization.status)}
-      />
-
-      <div className="flex min-h-0 flex-1">
-        <GovernanceSidebar
-          organizationName={organization.name}
-          functionalRoleLabel={getGovernanceFunctionalRoleLabel(
-            membership.functional_role,
-          )}
-          technicalRoleLabel={getGovernanceTechnicalRoleLabel(
-            membership.technical_role,
-          )}
-        />
-
-        <main className="min-w-0 flex-1 overflow-y-auto px-8 py-7">
+    <GovernancePageFrame
+      userLabel={userLabel}
+      userEmail={userEmail}
+      context={context}
+    >
           <section className="mb-8 rounded-3xl border border-[#dedede] bg-white p-7 shadow-sm">
             <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
               <div className="min-w-0">
@@ -480,8 +480,13 @@ export default function GovernanceShell({
             </article>
           </section>
 
-          <section className="mt-7 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-            {overviewCards.map((card) => {
+          <section className="mt-7">
+            <h2 className="mb-5 text-lg font-bold text-slate-950">
+              Módulos
+            </h2>
+
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {overviewCards.map((card) => {
               const Icon = card.icon;
 
               const content = (
@@ -523,30 +528,8 @@ export default function GovernanceShell({
                 </Link>
               );
             })}
-          </section>
-
-          <section className="mt-7 rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
-            <div className="flex items-start gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#e6e6e6] text-[#0f3a4a]">
-                <FileText size={22} />
-              </div>
-
-              <div>
-                <h2 className="text-lg font-bold text-slate-950">
-                  Próxima etapa de configuração
-                </h2>
-
-                <p className="mt-2 text-sm leading-6 text-slate-600">
-                  Com o cadastro institucional do órgão estruturado, os próximos
-                  módulos serão gestão de usuários, base institucional e fontes
-                  oficiais. O Chat Governança continua disponível como uso
-                  operacional da IA, separado deste painel administrativo.
-                </p>
-              </div>
             </div>
           </section>
-        </main>
-      </div>
-    </div>
+    </GovernancePageFrame>
   );
 }

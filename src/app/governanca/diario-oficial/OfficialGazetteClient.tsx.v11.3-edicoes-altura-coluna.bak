@@ -1,0 +1,1182 @@
+//src/app/governanca/diario-oficial/OfficialGazetteClient.tsx
+"use client";
+
+import {
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useState,
+  useTransition,
+} from "react";
+import {
+  FileText,
+  Loader2,
+  Newspaper,
+  RotateCcw,
+  Save,
+  Search,
+  Trash2,
+  Upload,
+} from "lucide-react";
+
+type OfficialGazetteRow = {
+  id: string;
+  organization_id: string;
+  name: string;
+  url: string;
+  active: boolean;
+  last_sync_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type OfficialGazetteDocumentRow = {
+  id: string;
+  organization_id: string;
+  gazette_id: string;
+  title: string;
+  edition_number: string | null;
+  publication_date: string | null;
+  pdf_url: string | null;
+  storage_path: string | null;
+  page_count: number | null;
+  file_size: number | null;
+  file_hash: string | null;
+  indexing_status: string;
+  extraction_status: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type OfficialGazetteChunkRow = {
+  document_id: string;
+  organization_id: string;
+  page_number: number | null;
+  section_type: string | null;
+  title: string | null;
+  content: string | null;
+};
+
+
+type OfficialGazetteForm = {
+  id: string | null;
+  name: string;
+  url: string;
+  active: boolean;
+};
+
+type OfficialGazetteDocumentForm = {
+  title: string;
+  editionNumber: string;
+  publicationDate: string;
+  file: File | null;
+};
+
+const initialForm: OfficialGazetteForm = {
+  id: null,
+  name: "Diário Oficial do Município",
+  url: "",
+  active: true,
+};
+
+const initialDocumentForm: OfficialGazetteDocumentForm = {
+  title: "",
+  editionNumber: "",
+  publicationDate: "",
+  file: null,
+};
+
+function formatDateTime(value: string | null) {
+  if (!value) {
+    return "Nunca";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Nunca";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function formatDate(value: string | null) {
+  if (!value) {
+    return "Não informada";
+  }
+
+  const date = new Date(`${value}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Não informada";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+  }).format(date);
+}
+
+function formatFileSize(value: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Tamanho não informado";
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function normalizeUrl(value: string) {
+  const normalizedValue = value.trim();
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  if (/^https?:\/\//i.test(normalizedValue)) {
+    return normalizedValue;
+  }
+
+  return `https://${normalizedValue}`;
+}
+
+function getStatusLabel(value: string) {
+  if (value === "pending") return "Pendente";
+  if (value === "processing") return "Processando";
+  if (value === "completed") return "Concluído";
+  if (value === "indexed") return "Indexado";
+  if (value === "error") return "Erro";
+
+  return value || "Não informado";
+}
+
+
+function getDocumentEditionOrder(document: OfficialGazetteDocumentRow) {
+  const editionNumber = document.edition_number?.trim() ?? "";
+  const numericEdition = Number.parseInt(editionNumber.replace(/\D/g, ""), 10);
+
+  if (Number.isFinite(numericEdition)) {
+    return numericEdition;
+  }
+
+  return 0;
+}
+
+function sortDocumentsByEditionDesc(
+  documents: OfficialGazetteDocumentRow[],
+): OfficialGazetteDocumentRow[] {
+  return [...documents].sort((firstDocument, secondDocument) => {
+    const firstEdition = getDocumentEditionOrder(firstDocument);
+    const secondEdition = getDocumentEditionOrder(secondDocument);
+
+    if (firstEdition !== secondEdition) {
+      return secondEdition - firstEdition;
+    }
+
+    return (
+      new Date(secondDocument.created_at).getTime() -
+      new Date(firstDocument.created_at).getTime()
+    );
+  });
+}
+
+function buildDocumentTitle(editionNumber: string) {
+  const normalizedEditionNumber = editionNumber.trim();
+
+  if (!normalizedEditionNumber) {
+    return "Diário Oficial";
+  }
+
+  return `Diário Oficial nº ${normalizedEditionNumber}`;
+}
+
+export default function OfficialGazetteClient() {
+  const [gazettes, setGazettes] = useState<OfficialGazetteRow[]>([]);
+  const [documents, setDocuments] = useState<OfficialGazetteDocumentRow[]>([]);
+  const [chunksByDocumentId, setChunksByDocumentId] = useState<
+    Record<string, OfficialGazetteChunkRow[]>
+  >({});
+  const [expandedDocumentIds, setExpandedDocumentIds] = useState<string[]>([]);
+  const [chunksLoadingKey, setChunksLoadingKey] = useState<string | null>(null);
+  const [form, setForm] = useState<OfficialGazetteForm>(initialForm);
+  const [documentForm, setDocumentForm] =
+    useState<OfficialGazetteDocumentForm>(initialDocumentForm);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+  const [isPending, startTransition] = useTransition();
+  const [isDocumentPending, startDocumentTransition] = useTransition();
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [documentErrorMessage, setDocumentErrorMessage] = useState<string | null>(
+    null,
+  );
+  const [documentSuccessMessage, setDocumentSuccessMessage] = useState<
+    string | null
+  >(null);
+  const [documentActionKey, setDocumentActionKey] = useState<string | null>(null);
+  const [documentFeedbackById, setDocumentFeedbackById] = useState<
+    Record<string, { type: "success" | "error"; message: string }>
+  >({});
+
+  const selectedGazette = useMemo(
+    () => gazettes.find((gazette) => gazette.id === form.id) ?? null,
+    [form.id, gazettes],
+  );
+
+  async function loadChunksForDocuments(
+    nextDocuments: OfficialGazetteDocumentRow[],
+  ) {
+    const documentIds = nextDocuments.map((document) => document.id);
+
+    if (documentIds.length === 0) {
+      setChunksByDocumentId({});
+      setExpandedDocumentIds([]);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `/api/governance/official-gazette-chunks?documentIds=${encodeURIComponent(
+          documentIds.join(","),
+        )}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível carregar os atos.");
+      }
+
+      const chunks: OfficialGazetteChunkRow[] = payload.chunks ?? [];
+
+      setChunksByDocumentId((currentChunksByDocumentId) => {
+        const nextChunksByDocumentId = { ...currentChunksByDocumentId };
+
+        documentIds.forEach((documentId) => {
+          delete nextChunksByDocumentId[documentId];
+        });
+
+        chunks.forEach((chunk) => {
+          if (!nextChunksByDocumentId[chunk.document_id]) {
+            nextChunksByDocumentId[chunk.document_id] = [];
+          }
+
+          nextChunksByDocumentId[chunk.document_id].push(chunk);
+        });
+
+        return nextChunksByDocumentId;
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao carregar os atos.";
+
+      setDocumentErrorMessage(message);
+    }
+  }
+
+  function getDocumentChunks(documentId: string) {
+    return chunksByDocumentId[documentId] ?? [];
+  }
+
+  function getDocumentChunkCount(documentId: string) {
+    return getDocumentChunks(documentId).length;
+  }
+
+  function getDocumentChunkCountLabel(documentId: string) {
+    const count = getDocumentChunkCount(documentId);
+    return count === 1 ? "1 ato encontrado" : `${count} atos encontrados`;
+  }
+
+  async function handleToggleDocumentChunks(document: OfficialGazetteDocumentRow) {
+    const isExpanded = expandedDocumentIds.includes(document.id);
+
+    if (isExpanded) {
+      setExpandedDocumentIds((currentIds) =>
+        currentIds.filter((currentId) => currentId !== document.id),
+      );
+      return;
+    }
+
+    if (!chunksByDocumentId[document.id]) {
+      setChunksLoadingKey(document.id);
+      await loadChunksForDocuments([document]);
+      setChunksLoadingKey(null);
+    }
+
+    setExpandedDocumentIds((currentIds) =>
+      currentIds.includes(document.id) ? currentIds : [...currentIds, document.id],
+    );
+  }
+
+  async function loadDocuments(gazetteId: string | null) {
+    if (!gazetteId) {
+      setDocuments([]);
+      setChunksByDocumentId({});
+      setExpandedDocumentIds([]);
+      return;
+    }
+
+    setIsLoadingDocuments(true);
+    setDocumentErrorMessage(null);
+
+    try {
+      const response = await fetch(
+        `/api/governance/official-gazette-documents?gazetteId=${encodeURIComponent(
+          gazetteId,
+        )}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error ?? "Não foi possível carregar as edições.",
+        );
+      }
+
+      const nextDocuments: OfficialGazetteDocumentRow[] = sortDocumentsByEditionDesc(
+        payload.documents ?? [],
+      );
+
+      setDocuments(nextDocuments);
+      await loadChunksForDocuments(nextDocuments);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao carregar as edições.";
+
+      setDocumentErrorMessage(message);
+    } finally {
+      setIsLoadingDocuments(false);
+    }
+  }
+
+  async function loadGazettes() {
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/governance/official-gazette", {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error ?? "Não foi possível carregar o Diário Oficial.",
+        );
+      }
+
+      const nextGazettes: OfficialGazetteRow[] = payload.gazettes ?? [];
+
+      setGazettes(nextGazettes);
+
+      if (nextGazettes.length > 0) {
+        const firstGazette = nextGazettes[0];
+
+        setForm({
+          id: firstGazette.id,
+          name: firstGazette.name,
+          url: firstGazette.url,
+          active: firstGazette.active,
+        });
+
+        await loadDocuments(firstGazette.id);
+      } else {
+        setDocuments([]);
+        setChunksByDocumentId({});
+        setExpandedDocumentIds([]);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao carregar o Diário Oficial.";
+
+      setErrorMessage(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadGazettes();
+  }, []);
+
+  function handleSelectGazette(gazette: OfficialGazetteRow) {
+    setForm({
+      id: gazette.id,
+      name: gazette.name,
+      url: gazette.url,
+      active: gazette.active,
+    });
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    setDocumentSuccessMessage(null);
+    setDocumentErrorMessage(null);
+    void loadDocuments(gazette.id);
+  }
+
+  function handleNewGazette() {
+    setForm(initialForm);
+    setDocuments([]);
+    setChunksByDocumentId({});
+    setExpandedDocumentIds([]);
+    setDocumentForm(initialDocumentForm);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    setDocumentSuccessMessage(null);
+    setDocumentErrorMessage(null);
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const name = form.name.trim();
+    const url = normalizeUrl(form.url);
+
+    if (!name) {
+      setErrorMessage("Informe o nome do Diário Oficial.");
+      return;
+    }
+
+    if (!url) {
+      setErrorMessage("Informe a URL do Diário Oficial.");
+      return;
+    }
+
+    startTransition(async () => {
+      try {
+        const response = await fetch("/api/governance/official-gazette", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            id: form.id,
+            name,
+            url,
+            active: form.active,
+          }),
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            payload?.error ?? "Não foi possível salvar o Diário Oficial.",
+          );
+        }
+
+        const savedGazette: OfficialGazetteRow = payload.gazette;
+
+        setGazettes((currentGazettes) => {
+          const exists = currentGazettes.some(
+            (gazette) => gazette.id === savedGazette.id,
+          );
+
+          if (exists) {
+            return currentGazettes.map((gazette) =>
+              gazette.id === savedGazette.id ? savedGazette : gazette,
+            );
+          }
+
+          return [savedGazette, ...currentGazettes];
+        });
+
+        setForm({
+          id: savedGazette.id,
+          name: savedGazette.name,
+          url: savedGazette.url,
+          active: savedGazette.active,
+        });
+
+        setSuccessMessage("Fonte do Diário Oficial salva com sucesso.");
+        await loadDocuments(savedGazette.id);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado ao salvar o Diário Oficial.";
+
+        setErrorMessage(message);
+      }
+    });
+  }
+
+  function handleDocumentSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setDocumentErrorMessage(null);
+    setDocumentSuccessMessage(null);
+
+    if (!selectedGazette) {
+      setDocumentErrorMessage("Cadastre e selecione uma fonte do Diário Oficial.");
+      return;
+    }
+
+    const editionNumber = documentForm.editionNumber.trim();
+    const title = buildDocumentTitle(editionNumber);
+    const publicationDate = documentForm.publicationDate;
+    const file = documentForm.file;
+
+    if (!file) {
+      setDocumentErrorMessage("Selecione um PDF do Diário Oficial.");
+      return;
+    }
+
+    if (file.type && file.type !== "application/pdf") {
+      setDocumentErrorMessage("Envie apenas arquivo PDF.");
+      return;
+    }
+
+    startDocumentTransition(async () => {
+      try {
+        const formData = new FormData();
+        formData.append("gazetteId", selectedGazette.id);
+        formData.append("title", title);
+        formData.append("editionNumber", editionNumber);
+        formData.append("publicationDate", publicationDate);
+        formData.append("file", file);
+
+        const response = await fetch(
+          "/api/governance/official-gazette-documents",
+          {
+            method: "POST",
+            body: formData,
+          },
+        );
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(payload?.error ?? "Não foi possível adicionar o PDF.");
+        }
+
+        const savedDocument: OfficialGazetteDocumentRow = payload.document;
+
+        setDocuments((currentDocuments) =>
+          sortDocumentsByEditionDesc([savedDocument, ...currentDocuments]),
+        );
+        await loadChunksForDocuments([savedDocument]);
+        setDocumentForm(initialDocumentForm);
+        setDocumentSuccessMessage("PDF do Diário Oficial adicionado com sucesso.");
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado ao adicionar o PDF.";
+
+        setDocumentErrorMessage(message);
+      }
+    });
+  }
+
+  async function handleReprocessDocument(document: OfficialGazetteDocumentRow) {
+    setDocumentFeedbackById((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[document.id];
+      return nextFeedbacks;
+    });
+    setDocumentActionKey(`reprocess:${document.id}`);
+
+    try {
+      const response = await fetch("/api/governance/official-gazette-documents", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          documentId: document.id,
+        }),
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível reprocessar a edição.");
+      }
+
+      const updatedDocument: OfficialGazetteDocumentRow = payload.document;
+
+      setDocuments((currentDocuments) =>
+        sortDocumentsByEditionDesc(
+          currentDocuments.map((currentDocument) =>
+            currentDocument.id === updatedDocument.id
+              ? updatedDocument
+              : currentDocument,
+          ),
+        ),
+      );
+
+      await loadChunksForDocuments([updatedDocument]);
+
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [updatedDocument.id]: {
+          type: "success",
+          message: "Edição reprocessada com sucesso.",
+        },
+      }));
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao reprocessar a edição.";
+
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "error",
+          message,
+        },
+      }));
+    } finally {
+      setDocumentActionKey(null);
+    }
+  }
+
+  async function handleDeleteDocument(document: OfficialGazetteDocumentRow) {
+    const confirmed = window.confirm(
+      `Excluir ${document.title}? Esta edição deixará de aparecer na lista.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDocumentFeedbackById((currentFeedbacks) => {
+      const nextFeedbacks = { ...currentFeedbacks };
+      delete nextFeedbacks[document.id];
+      return nextFeedbacks;
+    });
+    setDocumentActionKey(`delete:${document.id}`);
+
+    try {
+      const response = await fetch("/api/governance/official-gazette-documents", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          documentId: document.id,
+        }),
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível excluir a edição.");
+      }
+
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "success",
+          message: "Edição excluída com sucesso.",
+        },
+      }));
+
+      window.setTimeout(() => {
+        setDocuments((currentDocuments) =>
+          currentDocuments.filter(
+            (currentDocument) => currentDocument.id !== document.id,
+          ),
+        );
+        setChunksByDocumentId((currentChunks) => {
+          const nextChunks = { ...currentChunks };
+          delete nextChunks[document.id];
+          return nextChunks;
+        });
+        setExpandedDocumentIds((currentIds) =>
+          currentIds.filter((currentId) => currentId !== document.id),
+        );
+        setDocumentFeedbackById((currentFeedbacks) => {
+          const nextFeedbacks = { ...currentFeedbacks };
+          delete nextFeedbacks[document.id];
+          return nextFeedbacks;
+        });
+      }, 1200);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao excluir a edição.";
+
+      setDocumentFeedbackById((currentFeedbacks) => ({
+        ...currentFeedbacks,
+        [document.id]: {
+          type: "error",
+          message,
+        },
+      }));
+    } finally {
+      setDocumentActionKey(null);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border border-[#dedede] bg-white p-8 shadow-sm">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-[#0f3a4a]">
+              <Newspaper size={14} />
+              Diário Oficial
+            </div>
+
+            <h1 className="text-2xl font-bold text-slate-950">
+              Fonte do Diário Oficial
+            </h1>
+
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
+              Informe o endereço web (URL) principal do Diário Oficial ou a
+              página onde as edições são publicadas de forma contínua.
+              Certifique-se de que a URL seja pública, esteja acessível e
+              estável ao longo do tempo.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleNewGazette}
+            className="inline-flex items-center justify-center rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-white"
+          >
+            Nova fonte
+          </button>
+        </div>
+      </section>
+
+      <section className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_430px]">
+        <div className="space-y-6">
+          <div className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-950">
+              Fontes cadastradas
+            </h2>
+
+            {isLoading ? (
+              <div className="mt-5 flex items-center gap-2 text-sm text-slate-600">
+                <Loader2 size={16} className="animate-spin" />
+                Carregando fontes...
+              </div>
+            ) : gazettes.length === 0 ? (
+              <p className="mt-5 text-sm leading-6 text-slate-600">
+                Nenhuma fonte do Diário Oficial cadastrada ainda.
+              </p>
+            ) : (
+              <div className="mt-5 space-y-3">
+                {gazettes.map((gazette) => (
+                  <button
+                    key={gazette.id}
+                    type="button"
+                    onClick={() => handleSelectGazette(gazette)}
+                    className={[
+                      "w-full rounded-2xl border p-4 text-left transition",
+                      form.id === gazette.id
+                        ? "border-[#0f3a4a] bg-[#eef5f7]"
+                        : "border-[#dedede] bg-[#f8f8f8] hover:bg-white",
+                    ].join(" ")}
+                  >
+                    <strong className="block text-sm text-slate-950">
+                      {gazette.name}
+                    </strong>
+                    <span className="mt-1 block break-all text-xs text-slate-600">
+                      {gazette.url}
+                    </span>
+                    <span className="mt-2 block text-xs font-semibold text-slate-500">
+                      {gazette.active ? "Ativa" : "Inativa"}
+                    </span>
+                    <span className="mt-1 block text-xs font-semibold text-slate-500">
+                      Última atualização: {formatDateTime(gazette.last_sync_at)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <form
+            onSubmit={handleSubmit}
+            className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm"
+          >
+            <div className="mb-5">
+              <h2 className="text-lg font-bold text-slate-950">
+                Cadastro da fonte
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-600">
+                Informe o nome e o endereço web oficial do Diário Oficial.
+              </p>
+            </div>
+
+            <div className="grid gap-4">
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                  Nome
+                </span>
+                <input
+                  value={form.name}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="Diário Oficial do Município"
+                  className="w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a] focus:bg-white"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                  URL
+                </span>
+                <input
+                  value={form.url}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      url: event.target.value,
+                    }))
+                  }
+                  placeholder="https://santanadoitarare.pr.gov.br/diariooficial/"
+                  className="w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a] focus:bg-white"
+                />
+              </label>
+
+              <label className="flex items-center gap-3 rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3">
+                <input
+                  type="checkbox"
+                  checked={form.active}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      active: event.target.checked,
+                    }))
+                  }
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                <span className="text-sm font-semibold text-slate-700">
+                  Fonte ativa
+                </span>
+              </label>
+            </div>
+
+            {errorMessage && (
+              <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {errorMessage}
+              </div>
+            )}
+
+            {successMessage && (
+              <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                {successMessage}
+              </div>
+            )}
+
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <button
+                type="submit"
+                disabled={isPending}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[#0f3a4a] px-5 py-3 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isPending ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <Save size={18} />
+                )}
+                Salvar fonte
+              </button>
+
+              <button
+                type="button"
+                disabled
+                className="inline-flex cursor-not-allowed items-center justify-center gap-2 rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-5 py-3 text-sm font-semibold text-slate-400"
+                title="A sincronização será implementada em módulo posterior."
+              >
+                <Search size={18} />
+                Sincronizar em breve
+              </button>
+            </div>
+          </form>
+
+          <section className="rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm">
+            <div className="mb-5">
+              <h2 className="text-lg font-bold text-slate-950">
+                Adicionar PDF do Diário Oficial
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-600">
+                Cadastre manualmente uma edição publicada. A extração do texto
+                ficará pendente para o próximo módulo.
+              </p>
+            </div>
+
+            <form onSubmit={handleDocumentSubmit} className="grid gap-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                    Edição
+                  </span>
+                  <input
+                    value={documentForm.editionNumber}
+                    onChange={(event) =>
+                      setDocumentForm((current) => ({
+                        ...current,
+                        editionNumber: event.target.value,
+                      }))
+                    }
+                    placeholder="2485"
+                    disabled={!selectedGazette}
+                    className="w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a] focus:bg-white disabled:cursor-not-allowed disabled:opacity-70"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                    Data de publicação
+                  </span>
+                  <input
+                    type="date"
+                    value={documentForm.publicationDate}
+                    onChange={(event) =>
+                      setDocumentForm((current) => ({
+                        ...current,
+                        publicationDate: event.target.value,
+                      }))
+                    }
+                    disabled={!selectedGazette}
+                    className="w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a] focus:bg-white disabled:cursor-not-allowed disabled:opacity-70"
+                  />
+                </label>
+
+                <label className="block lg:col-span-2">
+                  <span className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                    Arquivo PDF
+                  </span>
+                  <input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    onChange={(event) =>
+                      setDocumentForm((current) => ({
+                        ...current,
+                        file: event.target.files?.[0] ?? null,
+                      }))
+                    }
+                    disabled={!selectedGazette}
+                    className="w-full rounded-2xl border border-[#dedede] bg-[#f8f8f8] px-4 py-3 text-sm outline-none transition file:mr-4 file:rounded-xl file:border-0 file:bg-[#0f3a4a] file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white disabled:cursor-not-allowed disabled:opacity-70"
+                  />
+                </label>
+              </div>
+
+              {documentErrorMessage && (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {documentErrorMessage}
+                </div>
+              )}
+
+              {documentSuccessMessage && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                  {documentSuccessMessage}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={!selectedGazette || isDocumentPending}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[#0f3a4a] px-5 py-3 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isDocumentPending ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <Upload size={18} />
+                )}
+                Adicionar PDF
+              </button>
+            </form>
+          </section>
+
+        </div>
+
+        <aside className="min-h-0 xl:sticky xl:top-6 xl:self-start">
+          <section className="flex h-[72vh] min-h-[520px] w-full flex-col overflow-hidden rounded-3xl border border-[#dedede] bg-white p-6 shadow-sm xl:h-[calc(100vh-9rem)] xl:max-h-[860px]">
+            <div className="mb-5">
+              <h2 className="text-lg font-bold text-slate-950">
+                Edições cadastradas
+              </h2>
+            </div>
+
+            {isLoadingDocuments ? (
+              <div className="flex items-center gap-2 text-sm text-slate-600">
+                <Loader2 size={16} className="animate-spin" />
+                Carregando edições...
+              </div>
+            ) : documents.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-[#dedede] bg-[#f8f8f8] p-5 text-sm leading-6 text-slate-600">
+                Nenhuma edição cadastrada ainda.
+              </p>
+            ) : (
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain pr-2">
+                {documents.map((document) => {
+                  const chunks = getDocumentChunks(document.id);
+                  const isExpanded = expandedDocumentIds.includes(document.id);
+                  const isLoadingChunks = chunksLoadingKey === document.id;
+                  const documentFeedback = documentFeedbackById[document.id];
+
+                  return (
+                    <article
+                      key={document.id}
+                      className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4"
+                    >
+                      <div className="flex flex-col gap-3">
+                        <div>
+                          <p className="flex items-center gap-2 whitespace-nowrap text-sm text-slate-600">
+                            <FileText
+                              size={16}
+                              className="shrink-0 text-[#0f3a4a]"
+                            />
+                            <span className="min-w-0 overflow-hidden text-ellipsis">
+                              Edição: {document.edition_number || "Não informada"} · Publicação: {formatDate(document.publication_date)}
+                            </span>
+                          </p>
+
+                          <p className="mt-1 truncate pl-6 text-xs text-slate-500">
+                            {formatFileSize(document.file_size)} · Cadastrado em{" "}
+                            {formatDateTime(document.created_at)}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-nowrap gap-2 text-xs font-semibold">
+                          <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700">
+                            Extração: {getStatusLabel(document.extraction_status)}
+                          </span>
+
+                          <span className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-700">
+                            Indexação: {getStatusLabel(document.indexing_status)}
+                          </span>
+                        </div>
+
+                        <p className="text-sm font-semibold text-slate-700">
+                          {getDocumentChunkCountLabel(document.id)}
+                        </p>
+
+                        {isExpanded ? (
+                          <div className="rounded-2xl border border-[#dedede] bg-white p-3">
+                            {chunks.length === 0 ? (
+                              <p className="text-sm text-slate-500">
+                                Nenhum ato extraído para esta edição.
+                              </p>
+                            ) : (
+                              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                                {chunks.map((chunk, chunkIndex) => (
+                                  <div
+                                    key={`${chunk.document_id}-${chunk.page_number ?? "sem-pagina"}-${chunkIndex}`}
+                                    className="rounded-xl border border-[#dedede] bg-[#f8f8f8] p-3"
+                                  >
+                                    <p className="text-sm font-semibold text-slate-900">
+                                      {chunk.title?.trim() || "Ato sem título"}
+                                    </p>
+
+                                    <p className="mt-1 text-xs text-slate-500">
+                                      {chunk.section_type || "tipo não identificado"}
+                                      {chunk.page_number
+                                        ? ` · Página ${chunk.page_number}`
+                                        : ""}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
+
+                        <div className="flex flex-nowrap items-center gap-2 border-t border-[#dedede] pt-3">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDocumentChunks(document)}
+                            disabled={documentActionKey !== null || isLoadingChunks}
+                            className="inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl border border-[#dedede] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isLoadingChunks ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <FileText size={14} />
+                            )}
+                            {isExpanded ? "Ocultar atos" : "Ver atos"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleReprocessDocument(document)}
+                            disabled={documentActionKey !== null}
+                            className="inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl border border-[#dedede] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {documentActionKey === `reprocess:${document.id}` ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <RotateCcw size={14} />
+                            )}
+                            Reprocessar
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteDocument(document)}
+                            disabled={documentActionKey !== null}
+                            className="inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {documentActionKey === `delete:${document.id}` ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={14} />
+                            )}
+                            Excluir
+                          </button>
+                        </div>
+
+                        {documentFeedback ? (
+                          <div
+                            className={`rounded-2xl border px-4 py-3 text-sm ${
+                              documentFeedback.type === "success"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                : "border-red-200 bg-red-50 text-red-700"
+                            }`}
+                          >
+                            {documentFeedback.message}
+                          </div>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+        </aside>
+      </section>
+    </div>
+  );
+}
+

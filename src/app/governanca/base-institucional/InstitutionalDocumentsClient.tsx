@@ -39,16 +39,19 @@ type EditingDocument = {
 };
 
 const documentTypes = [
-  { value: "lei_organica", label: "Lei Orgânica" },
-  { value: "estatuto", label: "Estatuto" },
   { value: "codigo", label: "Código" },
-  { value: "plano", label: "Plano" },
-  { value: "manual", label: "Manual" },
+  { value: "decreto", label: "Decreto" },
+  { value: "estatuto", label: "Estatuto" },
   { value: "instrucao_normativa", label: "Instrução Normativa" },
+  { value: "lei", label: "Lei" },
+  { value: "manual", label: "Manual" },
   { value: "organograma", label: "Organograma" },
-  { value: "portaria", label: "Portaria" },
-  { value: "decreto_consolidado", label: "Decreto Consolidado" },
   { value: "outro", label: "Outro" },
+  { value: "parecer_juridico", label: "Parecer Jurídico" },
+  { value: "plano", label: "Plano" },
+  { value: "portaria", label: "Portaria" },
+  { value: "recomendacoes_mp", label: "Recomendações do MP" },
+  { value: "resolucao", label: "Resolução" },
 ];
 
 const reviewStatuses = [
@@ -93,25 +96,28 @@ function formatFileSize(value: number | null) {
 
 function getDocumentTypeLabel(value: string) {
   const labels: Record<string, string> = {
-    lei: "Lei",
-    lei_organica: "Lei Orgânica",
-    estatuto: "Estatuto",
-    codigo: "Código",
-    plano: "Plano",
-    decreto: "Decreto",
-    decreto_consolidado: "Decreto Consolidado",
-    portaria: "Portaria",
-    parecer: "Parecer",
-    parecer_modelo: "Parecer / modelo",
-    regulamento: "Regulamento",
-    norma_interna: "Norma interna",
-    instrucao_normativa: "Instrução Normativa",
-    organograma: "Organograma",
-    manual: "Manual",
-    contrato: "Contrato",
-    edital: "Edital",
     ata: "Ata",
+    codigo: "Código",
+    contrato: "Contrato",
+    decreto: "Decreto",
+    decreto_consolidado: "Decreto",
+    edital: "Edital",
+    estatuto: "Estatuto",
+    instrucao_normativa: "Instrução Normativa",
+    lei: "Lei",
+    lei_organica: "Lei",
+    manual: "Manual",
+    norma_interna: "Instrução Normativa",
+    organograma: "Organograma",
     outro: "Outro",
+    parecer: "Parecer Jurídico",
+    parecer_juridico: "Parecer Jurídico",
+    parecer_modelo: "Parecer Jurídico",
+    plano: "Plano",
+    portaria: "Portaria",
+    recomendacoes_mp: "Recomendações do MP",
+    regulamento: "Regulamento",
+    resolucao: "Resolução",
   };
 
   return labels[value] ?? "Documento";
@@ -143,12 +149,28 @@ function getIndexingStatusLabel(value: string) {
   return labels[value] ?? "Pendente";
 }
 
+function isDocumentApproved(document: GovernanceInstitutionalDocument) {
+  return String(document.review_status) === "approved";
+}
+
+function isDocumentArchived(document: GovernanceInstitutionalDocument) {
+  return String(document.review_status) === "archived";
+}
+
+function isDocumentIndexed(document: GovernanceInstitutionalDocument) {
+  return String(document.indexing_status) === "indexed";
+}
+
 function getExtractionMessage(document: GovernanceInstitutionalDocument) {
   const metadata = document.metadata ?? {};
   const message = metadata.extraction_message;
 
   if (String(document.indexing_status) === "indexed") {
-    return "Documento indexado e disponível para consulta no Chat.";
+    if (String(document.review_status) === "approved") {
+      return "Documento ativo, indexado e disponível para consulta no Chat.";
+    }
+
+    return "Documento indexado. Ative após a revisão para liberar a consulta no Chat.";
   }
 
   return typeof message === "string" && message.trim() ? message.trim() : null;
@@ -177,6 +199,9 @@ export default function InstitutionalDocumentsClient({
   const [editingDocument, setEditingDocument] =
     useState<EditingDocument | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
+  const [documentFeedback, setDocumentFeedback] = useState<
+    Record<string, NonNullable<Feedback>>
+  >({});
 
   const totalDocuments = documents.length;
 
@@ -229,7 +254,7 @@ export default function InstitutionalDocumentsClient({
       setFeedback({
         type: "success",
         message:
-          "Documento cadastrado e indexado automaticamente quando o texto foi detectado.",
+          "Documento cadastrado em revisão. Depois de conferir, clique em Ativar para liberar o uso no Chat Governança.",
       });
     } catch (error) {
       setFeedback({
@@ -251,7 +276,11 @@ export default function InstitutionalDocumentsClient({
     if (busyDocumentId) return;
 
     setBusyDocumentId(documentId);
-    setFeedback(null);
+    setDocumentFeedback((current) => {
+      const next = { ...current };
+      delete next[documentId];
+      return next;
+    });
 
     try {
       const response = await fetch("/api/governance/institutional-documents", {
@@ -280,39 +309,63 @@ export default function InstitutionalDocumentsClient({
         reprocess: "Documento reprocessado.",
       };
 
-      setFeedback({
-        type: "success",
-        message: messages[action],
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [documentId]: {
+          type: "success",
+          message: messages[action],
+        },
+      }));
     } catch (error) {
-      setFeedback({
-        type: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Erro inesperado ao atualizar documento.",
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [documentId]: {
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Erro inesperado ao atualizar documento.",
+        },
+      }));
     } finally {
       setBusyDocumentId(null);
     }
   }
 
-  async function handleDeleteDocument(documentId: string) {
+  async function handleDeleteDocument(document: GovernanceInstitutionalDocument) {
     if (busyDocumentId) return;
 
+    const isArchived = String(document.review_status) === "archived";
+
+    if (!isArchived) {
+      setDocumentFeedback((current) => ({
+        ...current,
+        [document.id]: {
+          type: "error",
+          message:
+            "Para proteger a base institucional, arquive o documento antes de excluir definitivamente.",
+        },
+      }));
+      return;
+    }
+
     const confirmed = window.confirm(
-      "Excluir este documento definitivamente do banco e do Storage?",
+      "Excluir definitivamente este documento arquivado do banco e do Storage?",
     );
 
     if (!confirmed) return;
 
-    setBusyDocumentId(documentId);
-    setFeedback(null);
+    setBusyDocumentId(document.id);
+    setDocumentFeedback((current) => {
+      const next = { ...current };
+      delete next[document.id];
+      return next;
+    });
 
     try {
       const response = await fetch(
         `/api/governance/institutional-documents?id=${encodeURIComponent(
-          documentId,
+          document.id,
         )}`,
         {
           method: "DELETE",
@@ -327,24 +380,30 @@ export default function InstitutionalDocumentsClient({
         );
       }
 
-      setDocuments((current) => current.filter((item) => item.id !== documentId));
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
 
-      if (editingDocument?.id === documentId) {
+      if (editingDocument?.id === document.id) {
         setEditingDocument(null);
       }
 
-      setFeedback({
-        type: "success",
-        message: "Documento excluído definitivamente.",
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [document.id]: {
+          type: "success",
+          message: "Documento excluído definitivamente.",
+        },
+      }));
     } catch (error) {
-      setFeedback({
-        type: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Erro inesperado ao excluir documento.",
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [document.id]: {
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Erro inesperado ao excluir documento.",
+        },
+      }));
     } finally {
       setBusyDocumentId(null);
     }
@@ -356,7 +415,11 @@ export default function InstitutionalDocumentsClient({
     if (!editingDocument || busyDocumentId) return;
 
     setBusyDocumentId(editingDocument.id);
-    setFeedback(null);
+    setDocumentFeedback((current) => {
+      const next = { ...current };
+      delete next[editingDocument.id];
+      return next;
+    });
 
     try {
       const response = await fetch("/api/governance/institutional-documents", {
@@ -387,18 +450,24 @@ export default function InstitutionalDocumentsClient({
       updateDocumentInState(payload.document as GovernanceInstitutionalDocument);
       setEditingDocument(null);
 
-      setFeedback({
-        type: "success",
-        message: "Documento atualizado com sucesso.",
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [editingDocument.id]: {
+          type: "success",
+          message: "Documento atualizado com sucesso.",
+        },
+      }));
     } catch (error) {
-      setFeedback({
-        type: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Erro inesperado ao salvar edição.",
-      });
+      setDocumentFeedback((current) => ({
+        ...current,
+        [editingDocument.id]: {
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Erro inesperado ao salvar edição.",
+        },
+      }));
     } finally {
       setBusyDocumentId(null);
     }
@@ -444,7 +513,7 @@ export default function InstitutionalDocumentsClient({
             <input
               name="title"
               required
-              placeholder="Ex.: Lei Orgânica Municipal"
+              placeholder="Ex.: Lei Municipal"
               className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
             />
           </div>
@@ -456,7 +525,7 @@ export default function InstitutionalDocumentsClient({
             <select
               name="documentType"
               required
-              defaultValue="lei_organica"
+              defaultValue="lei"
               className="w-full rounded-2xl border border-[#dedede] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#0f3a4a]"
             >
               {documentTypes.map((type) => (
@@ -558,10 +627,226 @@ export default function InstitutionalDocumentsClient({
           </div>
         </div>
 
-        {editingDocument ? (
+        {latestDocuments.length === 0 ? (
+          <div className="rounded-3xl border border-dashed border-[#bcbcbc] bg-[#f8f8f8] p-8 text-center">
+            <h3 className="text-base font-bold text-slate-950">
+              Nenhum documento cadastrado
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              Envie o primeiro documento institucional para começar a estruturar
+              a base do órgão.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {latestDocuments.map((document) => {
+              const extractionMessage = getExtractionMessage(document);
+              const isBusy = busyDocumentId === document.id;
+              const isArchived = isDocumentArchived(document);
+              const isApproved = isDocumentApproved(document);
+              const isIndexed = isDocumentIndexed(document);
+              const canActivate = !isApproved && !isArchived && isIndexed;
+              const canArchive = isApproved;
+              const canDelete = isArchived;
+
+              return (
+                <article
+                  key={document.id}
+                  className={[
+                    "rounded-3xl border p-5",
+                    isArchived
+                      ? "border-slate-200 bg-slate-100 opacity-80"
+                      : "border-[#dedede] bg-[#f8f8f8]",
+                  ].join(" ")}
+                >
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        <span className="rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
+                          Tipo: {getDocumentTypeLabel(String(document.document_type))}
+                        </span>
+
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                          Status: {getReviewStatusLabel(String(document.review_status))}
+                        </span>
+
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                          Pesquisa IA:{" "}
+                          {getIndexingStatusLabel(
+                            String(document.indexing_status),
+                          )}
+                        </span>
+                      </div>
+
+                      <h3 className="truncate text-base font-bold text-slate-950">
+                        {document.title}
+                      </h3>
+
+                      <p className="mt-1 text-sm text-slate-600">
+                        {document.file_name || "Arquivo não informado"}
+                      </p>
+
+                      {extractionMessage ? (
+                        <p className="mt-3 min-h-[4.5rem] max-w-full rounded-2xl bg-white px-4 py-4 text-xs leading-6 text-slate-600 lg:w-[34rem]">
+                          {extractionMessage}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="shrink-0 rounded-2xl bg-white px-4 py-3 text-xs text-slate-600">
+                      <p>
+                        <strong>Tamanho:</strong>{" "}
+                        {formatFileSize(document.file_size)}
+                      </p>
+                      <p className="mt-1">
+                        <strong>Cadastrado:</strong>{" "}
+                        {formatDate(document.created_at)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 text-xs text-slate-600 md:grid-cols-2">
+                    <div className="rounded-2xl bg-white p-3">
+                      <strong className="block text-slate-800">
+                        Link da fonte
+                      </strong>
+                      {document.source_url ? (
+                        <a
+                          href={document.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="break-all text-[#0f3a4a] underline"
+                        >
+                          {document.source_url}
+                        </a>
+                      ) : (
+                        <span>Não informado</span>
+                      )}
+                    </div>
+
+                    <div className="rounded-2xl bg-white p-3">
+                      <strong className="block text-slate-800">Vigência</strong>
+                      <span>
+                        {formatDate(document.valid_from)} até{" "}
+                        {formatDate(document.valid_until)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => {
+                        setDocumentFeedback((current) => {
+                          const next = { ...current };
+                          delete next[document.id];
+                          return next;
+                        });
+                        setEditingDocument(normalizeDocumentForEdit(document));
+                      }}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Edit3 size={14} />
+                      Editar
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() =>
+                        handleDocumentAction(document.id, "reprocess")
+                      }
+                      className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isBusy ? (
+                        <Loader2 className="animate-spin" size={14} />
+                      ) : (
+                        <RefreshCw size={14} />
+                      )}
+                      Reprocessar
+                    </button>
+
+                    {isArchived ? (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() =>
+                          handleDocumentAction(document.id, "restore")
+                        }
+                        className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <RotateCcw size={14} />
+                        Restaurar para revisão
+                      </button>
+                    ) : null}
+
+                    {!isApproved && !isArchived ? (
+                      <button
+                        type="button"
+                        disabled={isBusy || !canActivate}
+                        title={
+                          isIndexed
+                            ? "Ativar documento revisado"
+                            : "Reprocesse ou aguarde a indexação antes de ativar"
+                        }
+                        onClick={() =>
+                          handleDocumentAction(document.id, "approve")
+                        }
+                        className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <CheckCircle2 size={14} />
+                        Ativar
+                      </button>
+                    ) : null}
+
+                    {canArchive ? (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() =>
+                          handleDocumentAction(document.id, "archive")
+                        }
+                        className="inline-flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Archive size={14} />
+                        Arquivar
+                      </button>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      disabled={isBusy || !canDelete}
+                      title={
+                        canDelete
+                          ? "Excluir definitivamente"
+                          : "Arquive o documento antes de excluir"
+                      }
+                      onClick={() => handleDeleteDocument(document)}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-800 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trash2 size={14} />
+                      Excluir
+                    </button>
+                  </div>
+
+                  {documentFeedback[document.id] ? (
+                    <div
+                      className={[
+                        "mt-4 rounded-2xl border p-4 text-sm",
+                        documentFeedback[document.id].type === "success"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                          : "border-red-200 bg-red-50 text-red-900",
+                      ].join(" ")}
+                    >
+                      {documentFeedback[document.id].message}
+                    </div>
+                  ) : null}
+
+        {editingDocument?.id === document.id ? (
           <form
             onSubmit={handleEditSubmit}
-            className="mb-5 rounded-3xl border border-[#dedede] bg-[#f8f8f8] p-5"
+            className="mt-4 rounded-3xl border border-[#dedede] bg-white p-5"
           >
             <div className="mb-4 flex items-center justify-between gap-3">
               <h3 className="text-base font-bold text-slate-950">
@@ -687,185 +972,7 @@ export default function InstitutionalDocumentsClient({
           </form>
         ) : null}
 
-        {latestDocuments.length === 0 ? (
-          <div className="rounded-3xl border border-dashed border-[#bcbcbc] bg-[#f8f8f8] p-8 text-center">
-            <h3 className="text-base font-bold text-slate-950">
-              Nenhum documento cadastrado
-            </h3>
-            <p className="mt-2 text-sm leading-6 text-slate-600">
-              Envie o primeiro documento institucional para começar a estruturar
-              a base do órgão.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {latestDocuments.map((document) => {
-              const extractionMessage = getExtractionMessage(document);
-              const isBusy = busyDocumentId === document.id;
-              const isArchived = String(document.review_status) === "archived";
 
-              return (
-                <article
-                  key={document.id}
-                  className={[
-                    "rounded-3xl border p-5",
-                    isArchived
-                      ? "border-slate-200 bg-slate-100 opacity-80"
-                      : "border-[#dedede] bg-[#f8f8f8]",
-                  ].join(" ")}
-                >
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0">
-                      <div className="mb-2 flex flex-wrap gap-2">
-                        <span className="rounded-full bg-[#e6e6e6] px-3 py-1 text-xs font-semibold text-[#0f3a4a]">
-                          {getDocumentTypeLabel(String(document.document_type))}
-                        </span>
-
-                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                          {getReviewStatusLabel(String(document.review_status))}
-                        </span>
-
-                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                          {getIndexingStatusLabel(
-                            String(document.indexing_status),
-                          )}
-                        </span>
-                      </div>
-
-                      <h3 className="truncate text-base font-bold text-slate-950">
-                        {document.title}
-                      </h3>
-
-                      <p className="mt-1 text-sm text-slate-600">
-                        {document.file_name || "Arquivo não informado"}
-                      </p>
-
-                      {extractionMessage ? (
-                        <p className="mt-3 min-h-[4.5rem] max-w-full rounded-2xl bg-white px-4 py-4 text-xs leading-6 text-slate-600 lg:w-[34rem]">
-                          {extractionMessage}
-                        </p>
-                      ) : null}
-                    </div>
-
-                    <div className="shrink-0 rounded-2xl bg-white px-4 py-3 text-xs text-slate-600">
-                      <p>
-                        <strong>Tamanho:</strong>{" "}
-                        {formatFileSize(document.file_size)}
-                      </p>
-                      <p className="mt-1">
-                        <strong>Cadastrado:</strong>{" "}
-                        {formatDate(document.created_at)}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-3 text-xs text-slate-600 md:grid-cols-2">
-                    <div className="rounded-2xl bg-white p-3">
-                      <strong className="block text-slate-800">
-                        Link da fonte
-                      </strong>
-                      {document.source_url ? (
-                        <a
-                          href={document.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="break-all text-[#0f3a4a] underline"
-                        >
-                          {document.source_url}
-                        </a>
-                      ) : (
-                        <span>Não informado</span>
-                      )}
-                    </div>
-
-                    <div className="rounded-2xl bg-white p-3">
-                      <strong className="block text-slate-800">Vigência</strong>
-                      <span>
-                        {formatDate(document.valid_from)} até{" "}
-                        {formatDate(document.valid_until)}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() =>
-                        setEditingDocument(normalizeDocumentForEdit(document))
-                      }
-                      className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Edit3 size={14} />
-                      Editar
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() =>
-                        handleDocumentAction(document.id, "reprocess")
-                      }
-                      className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {isBusy ? (
-                        <Loader2 className="animate-spin" size={14} />
-                      ) : (
-                        <RefreshCw size={14} />
-                      )}
-                      Reprocessar
-                    </button>
-
-                    {isArchived ? (
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() =>
-                          handleDocumentAction(document.id, "restore")
-                        }
-                        className="inline-flex items-center gap-2 rounded-2xl border border-[#dedede] bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <RotateCcw size={14} />
-                        Restaurar
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() =>
-                            handleDocumentAction(document.id, "approve")
-                          }
-                          className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <CheckCircle2 size={14} />
-                          Ativar
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() =>
-                            handleDocumentAction(document.id, "archive")
-                          }
-                          className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-800 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <Archive size={14} />
-                          Inativar
-                        </button>
-                      </>
-                    )}
-
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleDeleteDocument(document.id)}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-800 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Trash2 size={14} />
-                      Excluir
-                    </button>
-                  </div>
                 </article>
               );
             })}
