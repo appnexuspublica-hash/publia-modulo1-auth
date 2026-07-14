@@ -1,0 +1,831 @@
+// src/app/api/upload-pdf/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import {
+  buildAccessContext,
+  evaluateAccessWithAdmin,
+  getAccessSummary,
+  getPdfUploadMaxMbForTier,
+  getPdfUploadsPerMonthForTier,
+} from "@/lib/access-control";
+import type { AccessStatus, PdfPeriod, ProductTier } from "@/types/access";
+
+const TRIAL_PDF_LIMIT = 10;
+
+const ESSENTIAL_PDFS_PER_CONVERSATION = 3;
+const STRATEGIC_PDFS_PER_CONVERSATION = 5;
+
+const PDF_STORAGE_BUCKET =
+  process.env.NEXT_PUBLIC_SUPABASE_PDF_BUCKET ||
+  process.env.NEXT_PUBLIC_SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
+  "pdf-files";
+
+function sanitizeStorageFileName(fileName: string) {
+  return String(fileName || "arquivo.pdf")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
+
+type PdfUploadPlanValidation = {
+  allowed: boolean;
+  limit: number | null;
+  used: number;
+  remaining: number | null;
+  period: PdfPeriod;
+  blockedMessage: string | null;
+  accessStatus: AccessStatus;
+  isAdmin: boolean;
+  productTier: ProductTier;
+  capabilities: {
+    maxPdfsPerConversation: number;
+    maxPdfUploadsPerAccount: number | null;
+    maxPdfUploadsPerMonth: number | null;
+  };
+};
+
+type UploadPdfRequestBody = {
+  product?: "essential" | "strategic" | "governance" | string;
+  conversationId?: string;
+  fileName?: string;
+  storagePath?: string;
+  filePath?: string;
+  fileSize?: number;
+  fileSizeBytes?: number;
+  mimeType?: string;
+};
+
+function getMonthRangeUtc() {
+  const now = new Date();
+
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)
+  );
+
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0)
+  );
+
+  return {
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+  };
+}
+
+async function countUserPdfsAllTime(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+) {
+  const { count, error } = await supabase
+    .from("pdf_files")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error(`Erro ao contar PDFs da conta: ${error.message}`);
+  }
+
+  return count ?? 0;
+}
+
+async function countUserPdfsThisMonth(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+) {
+  const { startIso, endIso } = getMonthRangeUtc();
+
+  const { count, error } = await supabase
+    .from("pdf_files")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("created_at", startIso)
+    .lt("created_at", endIso);
+
+  if (error) {
+    throw new Error(`Erro ao contar PDFs do mês: ${error.message}`);
+  }
+
+  return count ?? 0;
+}
+
+async function validatePdfUploadByPlan(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string
+): Promise<PdfUploadPlanValidation> {
+  const access = await getAccessSummary(supabase, userId);
+
+  if (!access) {
+    return {
+      allowed: false,
+      limit: null,
+      used: 0,
+      remaining: 0,
+      period: null,
+      blockedMessage:
+        "Não foi possível validar o acesso da sua conta no momento.",
+      accessStatus: "trial_expired",
+      isAdmin: false,
+      productTier: "essential",
+      capabilities: {
+        maxPdfsPerConversation: ESSENTIAL_PDFS_PER_CONVERSATION,
+        maxPdfUploadsPerAccount: TRIAL_PDF_LIMIT,
+        maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("essential"),
+      },
+    };
+  }
+
+  const decision = await evaluateAccessWithAdmin(supabase, access);
+  const accessStatus = decision.effectiveStatus as AccessStatus;
+  const isAdmin = decision.reason === "admin_override";
+  const accessContext = buildAccessContext({
+    summary: access,
+    effectiveStatus: accessStatus,
+    isAdmin,
+  });
+
+  if (isAdmin) {
+    const used = await countUserPdfsAllTime(supabase, userId);
+
+    return {
+      allowed: true,
+      limit: null,
+      used,
+      remaining: null,
+      period: "admin",
+      blockedMessage: null,
+      accessStatus,
+      isAdmin: true,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
+    };
+  }
+
+  if (!decision.allowed) {
+    return {
+      allowed: false,
+      limit: null,
+      used: 0,
+      remaining: 0,
+      period: null,
+      blockedMessage:
+        decision.message ??
+        "Seu plano atual não permite enviar novos PDFs.",
+      accessStatus,
+      isAdmin: false,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
+    };
+  }
+
+  if (accessStatus === "trial_active") {
+    if (accessContext.productTier === "strategic") {
+      const used = await countUserPdfsThisMonth(supabase, userId);
+      const limit =
+        accessContext.capabilities.maxPdfUploadsPerMonth ??
+        getPdfUploadsPerMonthForTier("strategic");
+      const remaining = limit === null ? null : Math.max(limit - used, 0);
+
+      return {
+        allowed: limit === null ? true : used < limit,
+        limit,
+        used,
+        remaining,
+        period: "month",
+        blockedMessage:
+          limit !== null && used >= limit
+            ? `Você atingiu o limite de ${limit} PDFs neste mês no trial Estratégico.`
+            : null,
+        accessStatus,
+        isAdmin: false,
+        productTier: accessContext.productTier,
+        capabilities: accessContext.capabilities,
+      };
+    }
+
+    const used = await countUserPdfsAllTime(supabase, userId);
+    const limit =
+      accessContext.capabilities.maxPdfUploadsPerAccount ?? TRIAL_PDF_LIMIT;
+    const remaining = Math.max(limit - used, 0);
+
+    return {
+      allowed: used < limit,
+      limit,
+      used,
+      remaining,
+      period: "account",
+      blockedMessage:
+        used >= limit
+          ? `Você atingiu o limite de ${limit} PDFs no trial. Assine um plano para continuar.`
+          : null,
+      accessStatus,
+      isAdmin: false,
+      productTier: accessContext.productTier,
+      capabilities: accessContext.capabilities,
+    };
+  }
+
+  const used = await countUserPdfsThisMonth(supabase, userId);
+  const limit =
+    accessContext.capabilities.maxPdfUploadsPerMonth ??
+    getPdfUploadsPerMonthForTier(accessContext.productTier);
+  const remaining = limit === null ? null : Math.max(limit - used, 0);
+
+  return {
+    allowed: limit === null ? true : used < limit,
+    limit,
+    used,
+    remaining,
+    period: "month",
+    blockedMessage:
+      limit !== null && used >= limit
+        ? `Você atingiu o limite de ${limit} PDFs neste mês no seu plano atual.`
+        : null,
+    accessStatus: "subscription_active",
+    isAdmin: false,
+    productTier: accessContext.productTier,
+    capabilities: accessContext.capabilities,
+  };
+}
+
+async function getConversationPdfCount(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  conversationId: string
+) {
+  const { count, error } = await supabase
+    .from("conversation_pdf_links")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId);
+
+  if (error) {
+    throw new Error(
+      `Erro ao contar PDFs vinculados à conversa: ${error.message}`
+    );
+  }
+
+  return count ?? 0;
+}
+
+function getConversationPdfLimit(params: {
+  isAdmin: boolean;
+  productTier: ProductTier;
+  capabilities: {
+    maxPdfsPerConversation: number;
+  };
+}) {
+  const { isAdmin, productTier, capabilities } = params;
+
+  if (isAdmin) {
+    return capabilities.maxPdfsPerConversation;
+  }
+
+  if (productTier === "essential") {
+    return ESSENTIAL_PDFS_PER_CONVERSATION;
+  }
+
+  if (productTier === "strategic") {
+    return STRATEGIC_PDFS_PER_CONVERSATION;
+  }
+
+  return capabilities.maxPdfsPerConversation;
+}
+
+function getConversationPdfLimitMessage(params: {
+  productTier: ProductTier;
+  limit: number;
+}) {
+  const { productTier, limit } = params;
+
+  if (productTier === "essential") {
+    return "Você atingiu o limite de 3 PDFs por conversa. Para enviar até 5 PDFs, faça upgrade para o Publ.IA Estratégico.";
+  }
+
+  if (productTier === "strategic") {
+    return "Você atingiu o limite de 5 PDFs por conversa.";
+  }
+
+  return `Você atingiu o limite de ${limit} PDFs por conversa.`;
+}
+
+async function setConversationActivePdf(params: {
+  supabase: any;
+  conversationId: string;
+  userId: string;
+  pdfFileId: string;
+  productTier: ProductTier;
+}) {
+  const { supabase, conversationId, userId, pdfFileId, productTier } = params;
+
+  const { error: deactivateError } = await supabase
+    .from("conversation_pdf_links")
+    .update({ is_active: false } as never)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId);
+
+  if (deactivateError) {
+    throw new Error(
+      `Erro ao desativar PDFs anteriores da conversa: ${deactivateError.message}`
+    );
+  }
+
+  const { error: activateError } = await supabase
+    .from("conversation_pdf_links")
+    .update({ is_active: true } as never)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
+    .eq("pdf_file_id", pdfFileId);
+
+  if (activateError) {
+    throw new Error(
+      `Erro ao ativar o PDF atual da conversa: ${activateError.message}`
+    );
+  }
+
+  const { error: conversationUpdateError } = await supabase
+    .from("conversations")
+    .update({
+      active_pdf_file_id: pdfFileId,
+      pdf_enabled: true,
+    } as never)
+    .eq("id", conversationId)
+    .eq("user_id", userId)
+    .eq("product_tier", productTier);
+
+  if (conversationUpdateError) {
+    throw new Error(
+      `Erro ao atualizar conversa com PDF ativo: ${conversationUpdateError.message}`
+    );
+  }
+}
+
+async function registerPdfUploadEvent(params: {
+  supabase: any;
+  userId: string;
+  fileName: string;
+  storagePath: string;
+  fileSizeBytes: number;
+  accessStatus: AccessStatus;
+  pdfLimit: number | null;
+  pdfUsed: number;
+  pdfRemaining: number | null;
+  pdfPeriod: PdfPeriod;
+  conversationId: string | null;
+  productTier: ProductTier;
+  isGovernanceUpload: boolean;
+}) {
+  const {
+    supabase,
+    userId,
+    fileName,
+    storagePath,
+    fileSizeBytes,
+    accessStatus,
+    pdfLimit,
+    pdfUsed,
+    pdfRemaining,
+    pdfPeriod,
+    conversationId,
+    productTier,
+    isGovernanceUpload,
+  } = params;
+
+  const payload = {
+    user_id: userId,
+    event_type: "pdf_upload",
+    metadata: {
+      feature_key: "pdf_upload",
+      value: 1,
+      conversation_id: isGovernanceUpload ? null : conversationId,
+      file_name: fileName,
+      storage_path: storagePath,
+      file_size_bytes: fileSizeBytes,
+      access_status: accessStatus,
+      product_tier: productTier,
+      pdf_limit: pdfLimit,
+      pdf_used: pdfUsed,
+      pdf_remaining: pdfRemaining,
+      pdf_period: pdfPeriod,
+    },
+  };
+
+  const { error } = await supabase.from("usage_events").insert(payload as never);
+
+  if (error) {
+    console.error("Erro ao registrar usage_events(pdf_upload):", error.message);
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const supabase = await createSupabaseServerClient();
+    const writeSupabase = createSupabaseAdminClient();
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return NextResponse.json(
+        { error: "Usuário não autenticado." },
+        { status: 401 }
+      );
+    }
+
+    const contentType = request.headers.get("content-type") ?? "";
+
+    let body: UploadPdfRequestBody;
+    let pendingStorageUploadFile: File | null = null;
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const fileValue = formData.get("file");
+
+      if (!(fileValue instanceof File)) {
+        return NextResponse.json(
+          { error: "Arquivo PDF não enviado." },
+          { status: 400 }
+        );
+      }
+
+      if (fileValue.type && fileValue.type !== "application/pdf") {
+        return NextResponse.json(
+          { error: "Envie apenas arquivos PDF." },
+          { status: 400 }
+        );
+      }
+
+      const conversationIdFromForm = String(
+        formData.get("conversationId") ?? ""
+      ).trim();
+      const safeFileName = sanitizeStorageFileName(fileValue.name);
+      const storagePath = [
+        user.id,
+        "governance",
+        conversationIdFromForm,
+        `${Date.now()}-${crypto.randomUUID()}-${safeFileName}`,
+      ].join("/");
+
+      pendingStorageUploadFile = fileValue;
+
+      body = {
+        // product="governance" separa a Governança do fluxo comercial
+        // compartilhado pelo Publ.IA Essencial/Estratégico.
+        product: String(formData.get("product") ?? "").trim(),
+        conversationId: conversationIdFromForm,
+        fileName: fileValue.name,
+        storagePath,
+        fileSize: fileValue.size,
+        mimeType: fileValue.type || "application/pdf",
+      };
+    } else {
+      body = (await request.json()) as UploadPdfRequestBody;
+    }
+
+    const product = String(body.product ?? "").trim().toLowerCase();
+    const isGovernanceUpload = product === "governance";
+    const productTier: ProductTier = isGovernanceUpload
+      ? "governance"
+      : product === "strategic"
+        ? "strategic"
+        : "essential";
+
+    const conversationId = String(body.conversationId ?? "").trim();
+    const fileName = String(body.fileName ?? "").trim();
+    const storagePath = String(body.storagePath ?? body.filePath ?? "").trim();
+    const fileSizeBytes = Number(body.fileSize ?? body.fileSizeBytes ?? 0);
+
+    if (!conversationId || !fileName || !storagePath || !fileSizeBytes) {
+      return NextResponse.json(
+        {
+          error:
+            "Dados inválidos para registrar o PDF. Envie conversationId, fileName, storagePath/filePath e fileSize/fileSizeBytes.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (isGovernanceUpload) {
+      const { data: governanceConversation, error: governanceConversationError } =
+        await supabase
+          .from("governance_conversations")
+          .select("id")
+          .eq("id", conversationId)
+          .eq("user_id", user.id)
+          .is("deleted_at", null)
+          .neq("status", "deleted")
+          .maybeSingle();
+
+      if (governanceConversationError) {
+        console.error(
+          "Erro ao validar conversa de Governança do PDF:",
+          governanceConversationError.message
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível validar a conversa de Governança do PDF." },
+          { status: 500 }
+        );
+      }
+
+      if (!governanceConversation) {
+        return NextResponse.json(
+          { error: "Conversa de Governança inválida para vincular o PDF." },
+          { status: 400 }
+        );
+      }
+    } else {
+      // Usa o cliente administrativo somente para validar a propriedade e o
+      // produto da conversa. A autenticação do usuário já foi confirmada acima.
+      // Isso evita falso negativo quando a política RLS ainda não contempla
+      // explicitamente o produto Estratégico.
+      const { data: conversation, error: conversationError } =
+        await writeSupabase
+          .from("conversations")
+          .select("id, product_tier")
+          .eq("id", conversationId)
+          .eq("user_id", user.id)
+          .eq("product_tier", productTier)
+          .maybeSingle();
+
+      if (conversationError) {
+        console.error("Erro ao validar conversa do PDF:", conversationError.message);
+        return NextResponse.json(
+          { error: "Não foi possível validar a conversa do PDF." },
+          { status: 500 }
+        );
+      }
+
+      if (!conversation) {
+        console.warn("[upload-pdf] Conversa não encontrada para vínculo.", {
+          conversationId,
+          userId: user.id,
+          productTier,
+        });
+
+        return NextResponse.json(
+          { error: "Conversa inválida para vincular o PDF." },
+          { status: 400 }
+        );
+      }
+    }
+
+    // PUBL.IA GOVERNANÇA:
+    // Uploads iniciados pela Governança NÃO dependem da assinatura do
+    // Publ.IA Essencial/Estratégico. A autorização institucional já foi
+    // validada acima pela conversa de Governança do usuário.
+    //
+    // PUBL.IA ESSENCIAL/ESTRATÉGICO:
+    // Continuam usando a regra comercial normal de plano, limites e bloqueio.
+    const planValidation = isGovernanceUpload
+      ? ({
+          allowed: true,
+          limit: null,
+          used: 0,
+          remaining: null,
+          period: null,
+          blockedMessage: null,
+          accessStatus: "subscription_active",
+          isAdmin: false,
+          productTier: "governance",
+          capabilities: {
+            maxPdfsPerConversation: getConversationPdfLimit({
+              isAdmin: false,
+              productTier: "governance",
+              capabilities: { maxPdfsPerConversation: STRATEGIC_PDFS_PER_CONVERSATION },
+            }),
+            maxPdfUploadsPerAccount: null,
+            maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("governance"),
+          },
+        } satisfies PdfUploadPlanValidation)
+      : await validatePdfUploadByPlan(supabase, user.id);
+
+    if (!planValidation.allowed) {
+      return NextResponse.json(
+        {
+          error:
+            planValidation.blockedMessage ??
+            "Seu plano atual não permite enviar novos PDFs.",
+          accessStatus: planValidation.accessStatus,
+          access_status: planValidation.accessStatus,
+          isAdmin: planValidation.isAdmin,
+          productTier: planValidation.productTier,
+          pdfUsage: {
+            limit: planValidation.limit,
+            used: planValidation.used,
+            remaining: planValidation.remaining,
+            period: planValidation.period,
+          },
+        },
+        { status: 403 }
+      );
+    }
+
+    const pdfUploadMaxMb = getPdfUploadMaxMbForTier(planValidation.productTier);
+    const maxBytes = pdfUploadMaxMb * 1024 * 1024;
+
+    if (fileSizeBytes > maxBytes) {
+      const sizeMb = (fileSizeBytes / (1024 * 1024)).toFixed(1);
+
+      return NextResponse.json(
+        {
+          error: `PDF grande (${sizeMb} MB). Limite atual: ${pdfUploadMaxMb} MB para o seu plano.`,
+          code: "PDF_TOO_LARGE",
+          uploadMaxMb: pdfUploadMaxMb,
+          productTier: planValidation.productTier,
+        },
+        { status: 400 }
+      );
+    }
+
+    const conversationPdfLimit = getConversationPdfLimit({
+      isAdmin: planValidation.isAdmin,
+      productTier: planValidation.productTier,
+      capabilities: planValidation.capabilities,
+    });
+
+    const conversationPdfCount = isGovernanceUpload
+      ? 0
+      : await getConversationPdfCount(supabase, conversationId);
+
+    if (!isGovernanceUpload && conversationPdfCount >= conversationPdfLimit) {
+      return NextResponse.json(
+        {
+          error: getConversationPdfLimitMessage({
+            productTier: planValidation.productTier,
+            limit: conversationPdfLimit,
+          }),
+          accessStatus: planValidation.accessStatus,
+          access_status: planValidation.accessStatus,
+          isAdmin: planValidation.isAdmin,
+          productTier: planValidation.productTier,
+          conversationPdfUsage: {
+            limit: conversationPdfLimit,
+            used: conversationPdfCount,
+            remaining: Math.max(conversationPdfLimit - conversationPdfCount, 0),
+          },
+          pdfUsage: {
+            limit: planValidation.limit,
+            used: planValidation.used,
+            remaining: planValidation.remaining,
+            period: planValidation.period,
+          },
+        },
+        { status: 403 }
+      );
+    }
+
+    if (pendingStorageUploadFile) {
+      const uploadBuffer = Buffer.from(await pendingStorageUploadFile.arrayBuffer());
+
+      const { error: storageUploadError } = await writeSupabase.storage
+        .from(PDF_STORAGE_BUCKET)
+        .upload(storagePath, uploadBuffer, {
+          contentType: body.mimeType || "application/pdf",
+          upsert: false,
+        });
+
+      if (storageUploadError) {
+        console.error(
+          "Erro ao enviar PDF para o Storage:",
+          storageUploadError.message
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível enviar o PDF para o Storage." },
+          { status: 500 }
+        );
+      }
+    }
+
+    const pdfInsertPayload = {
+      user_id: user.id,
+      conversation_id: isGovernanceUpload ? null : conversationId,
+      file_name: fileName,
+      storage_path: storagePath,
+      file_size: fileSizeBytes,
+    };
+
+    const { data: insertedPdf, error: insertError } = await writeSupabase
+      .from("pdf_files")
+      .insert(pdfInsertPayload as never)
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error("Erro ao salvar pdf_files:", insertError.message);
+
+      return NextResponse.json(
+        { error: "Não foi possível registrar o PDF no banco." },
+        { status: 500 }
+      );
+    }
+
+    const insertedPdfId = (insertedPdf as { id: string }).id;
+
+    if (!isGovernanceUpload) {
+      const { error: linkInsertError } = await writeSupabase
+        .from("conversation_pdf_links")
+        .insert({
+          conversation_id: conversationId,
+          pdf_file_id: insertedPdfId,
+          user_id: user.id,
+          is_active: false,
+        } as never);
+
+      if (linkInsertError) {
+        console.error(
+          "Erro ao salvar conversation_pdf_links:",
+          linkInsertError.message
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível vincular o PDF à conversa." },
+          { status: 500 }
+        );
+      }
+
+      try {
+        await setConversationActivePdf({
+          supabase: writeSupabase,
+          conversationId,
+          userId: user.id,
+          pdfFileId: insertedPdfId,
+          productTier,
+        });
+      } catch (activePdfError) {
+        console.error(activePdfError);
+
+        return NextResponse.json(
+          {
+            error: "O PDF foi salvo, mas não foi possível defini-lo como ativo.",
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    await registerPdfUploadEvent({
+      supabase: writeSupabase,
+      userId: user.id,
+      fileName,
+      storagePath,
+      fileSizeBytes,
+      accessStatus: planValidation.accessStatus,
+      pdfLimit: planValidation.limit,
+      pdfUsed: planValidation.used + 1,
+      pdfRemaining:
+        planValidation.remaining === null
+          ? null
+          : Math.max(planValidation.remaining - 1, 0),
+      pdfPeriod: planValidation.period,
+      conversationId,
+      productTier: planValidation.productTier,
+      isGovernanceUpload,
+    });
+
+    return NextResponse.json(
+      {
+        id: insertedPdfId,
+        fileName:
+          (insertedPdf as { file_name?: string }).file_name ?? fileName,
+        fileSize: Number(
+          (insertedPdf as { file_size?: number }).file_size ?? fileSizeBytes
+        ),
+        isAdmin: planValidation.isAdmin,
+        productTier: planValidation.productTier,
+        pdfUploadMaxMb,
+        pdfUsage: {
+          limit: planValidation.limit,
+          used: planValidation.used + 1,
+          remaining:
+            planValidation.remaining === null
+              ? null
+              : Math.max(planValidation.remaining - 1, 0),
+          period: planValidation.period,
+        },
+        conversationPdfUsage: {
+          limit: conversationPdfLimit,
+          used: conversationPdfCount + 1,
+          remaining: Math.max(
+            conversationPdfLimit - (conversationPdfCount + 1),
+            0
+          ),
+        },
+        activePdfFileId: insertedPdfId,
+      },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error("Erro em /api/upload-pdf:", error);
+
+    return NextResponse.json(
+      { error: "Erro interno ao processar o upload do PDF." },
+      { status: 500 }
+    );
+  }
+}

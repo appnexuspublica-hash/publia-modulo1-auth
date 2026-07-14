@@ -422,7 +422,37 @@ function isPendingPaymentEvent(payload: unknown): boolean {
   return false;
 }
 
-function isNegativeEvent(payload: unknown): boolean {
+type NonRevokingEventKind = "subscription_canceled" | "payment_issue";
+
+function isImmediateRevocationEvent(payload: unknown): boolean {
+  const eventType = getEventType(payload);
+  const orderStatus = getOrderStatus(payload);
+  const subscriptionStatus = getSubscriptionStatus(payload);
+
+  if (
+    eventType.includes("chargeback") ||
+    eventType.includes("refund") ||
+    eventType.includes("refunded") ||
+    eventType.includes("expired")
+  ) {
+    return true;
+  }
+
+  if (
+    orderStatus === "chargeback" ||
+    orderStatus === "refunded" ||
+    orderStatus === "refund" ||
+    orderStatus === "expired"
+  ) {
+    return true;
+  }
+
+  return subscriptionStatus === "expired";
+}
+
+function getNonRevokingEventKind(
+  payload: unknown
+): NonRevokingEventKind | null {
   const eventType = getEventType(payload);
   const orderStatus = getOrderStatus(payload);
   const subscriptionStatus = getSubscriptionStatus(payload);
@@ -430,40 +460,32 @@ function isNegativeEvent(payload: unknown): boolean {
   if (
     eventType.includes("canceled") ||
     eventType.includes("cancelled") ||
+    orderStatus === "canceled" ||
+    orderStatus === "cancelled" ||
+    subscriptionStatus === "canceled" ||
+    subscriptionStatus === "cancelled"
+  ) {
+    return "subscription_canceled";
+  }
+
+  if (
     eventType.includes("late") ||
     eventType.includes("delinquent") ||
     eventType.includes("refused") ||
-    eventType.includes("chargeback") ||
-    eventType.includes("expired") ||
     eventType.includes("unpaid") ||
-    eventType.includes("overdue")
-  ) {
-    return true;
-  }
-
-  if (
+    eventType.includes("overdue") ||
     orderStatus === "refused" ||
-    orderStatus === "canceled" ||
-    orderStatus === "cancelled" ||
-    orderStatus === "expired" ||
     orderStatus === "unpaid" ||
-    orderStatus === "overdue"
-  ) {
-    return true;
-  }
-
-  if (
-    subscriptionStatus === "canceled" ||
-    subscriptionStatus === "cancelled" ||
+    orderStatus === "overdue" ||
     subscriptionStatus === "late" ||
-    subscriptionStatus === "expired" ||
+    subscriptionStatus === "delinquent" ||
     subscriptionStatus === "unpaid" ||
     subscriptionStatus === "overdue"
   ) {
-    return true;
+    return "payment_issue";
   }
 
-  return false;
+  return null;
 }
 
 function getLaterDate(a: string | null, b: string | null): string | null {
@@ -1311,14 +1333,58 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (isNegativeEvent(payload)) {
+    const nonRevokingEventKind = getNonRevokingEventKind(payload);
+
+    if (nonRevokingEventKind) {
+      const accessPreservedUntil =
+        existingAccess?.subscription_ends_at ??
+        getCustomerAccessUntil(payload) ??
+        getSubscriptionNextPayment(payload);
+
+      const action =
+        nonRevokingEventKind === "subscription_canceled"
+          ? "subscription_canceled_access_preserved"
+          : "payment_issue_access_preserved";
+
+      return finish(
+        "processed",
+        {
+          ok: true,
+          processed: true,
+          action,
+          reason:
+            nonRevokingEventKind === "subscription_canceled"
+              ? "automatic_renewal_stopped_access_preserved_until_current_end"
+              : "payment_issue_does_not_revoke_current_paid_period",
+          userId: profile.user_id,
+          cpfCnpj,
+          productTier,
+          accessPreservedUntil,
+          eventType,
+          orderStatus,
+          subscriptionId,
+          orderId,
+        },
+        200,
+        {
+          action,
+          reason:
+            nonRevokingEventKind === "subscription_canceled"
+              ? "automatic_renewal_stopped_access_preserved_until_current_end"
+              : "payment_issue_does_not_revoke_current_paid_period",
+          userId: profile.user_id,
+        }
+      );
+    }
+
+    if (isImmediateRevocationEvent(payload)) {
       if (!productTier) {
         return finish(
           "ignored",
           {
             ok: true,
             ignored: true,
-            reason: "product_tier_not_mapped_for_negative_event",
+            reason: "product_tier_not_mapped_for_revocation_event",
             cpfCnpj,
             productTier: null,
             eventType,
@@ -1328,19 +1394,19 @@ export async function POST(request: NextRequest) {
           },
           200,
           {
-            reason: "product_tier_not_mapped_for_negative_event",
+            reason: "product_tier_not_mapped_for_revocation_event",
             userId: profile.user_id,
           }
         );
       }
 
-      const negativeAccessUntil =
+      const revocationAccessUntil =
         getCustomerAccessUntil(payload) ?? getSubscriptionNextPayment(payload);
 
       const hasNewerActiveSubscription =
         existingAccess?.access_status === "subscription_active" &&
         existingAccess.product_tier === productTier &&
-        isDateAfter(existingAccess.subscription_ends_at, negativeAccessUntil);
+        isDateAfter(existingAccess.subscription_ends_at, revocationAccessUntil);
 
       if (hasNewerActiveSubscription) {
         return finish(
@@ -1348,7 +1414,7 @@ export async function POST(request: NextRequest) {
           {
             ok: true,
             ignored: true,
-            reason: "stale_negative_event_older_than_active_subscription",
+            reason: "stale_revocation_event_older_than_active_subscription",
             userId: profile.user_id,
             cpfCnpj,
             productTier,
@@ -1357,11 +1423,11 @@ export async function POST(request: NextRequest) {
             subscriptionId,
             orderId,
             currentSubscriptionEndsAt: existingAccess.subscription_ends_at,
-            negativeAccessUntil,
+            revocationAccessUntil,
           },
           200,
           {
-            reason: "stale_negative_event_older_than_active_subscription",
+            reason: "stale_revocation_event_older_than_active_subscription",
             userId: profile.user_id,
           }
         );
@@ -1373,7 +1439,7 @@ export async function POST(request: NextRequest) {
           userId: profile.user_id,
           productTier,
           payload,
-          reason: "negative_event_from_kiwify",
+          reason: "immediate_revocation_event_from_kiwify",
         });
 
         await reconcileUserAccessSnapshot({
@@ -1382,7 +1448,7 @@ export async function POST(request: NextRequest) {
         });
       } catch (expireError) {
         console.error(
-          "[kiwify/webhook] erro ao expirar grants/snapshot:",
+          "[kiwify/webhook] erro ao revogar grants/snapshot:",
           expireError
         );
 
@@ -1390,11 +1456,11 @@ export async function POST(request: NextRequest) {
           "error",
           {
             ok: false,
-            error: "Erro ao atualizar status da assinatura.",
+            error: "Erro ao revogar a assinatura.",
           },
           500,
           {
-            errorMessage: "Erro ao atualizar status da assinatura.",
+            errorMessage: "Erro ao revogar a assinatura.",
             userId: profile.user_id,
           }
         );
@@ -1405,7 +1471,7 @@ export async function POST(request: NextRequest) {
         {
           ok: true,
           processed: true,
-          action: "subscription_expired",
+          action: "subscription_revoked",
           userId: profile.user_id,
           cpfCnpj,
           productTier,
@@ -1416,7 +1482,7 @@ export async function POST(request: NextRequest) {
         },
         200,
         {
-          action: "subscription_expired",
+          action: "subscription_revoked",
           userId: profile.user_id,
         }
       );

@@ -1,0 +1,43 @@
+// src/lib/strategicLegalGuardrails.ts
+/**
+ * Proteções normativas do Publ.IA Estratégico.
+ *
+ * Esta camada isola a rota estratégica dos guardrails do Essencial sem
+ * alterar o comportamento jurídico já estabilizado. A base consolidada é
+ * reaproveitada como referência e as futuras regras exclusivas do
+ * Estratégico devem ser acrescentadas somente neste arquivo.
+ */
+
+import { buildEssentialLegalGuardrails } from "@/lib/essentialLegalGuardrails";
+
+export type StrategicLegalContext = {
+  hasPdf?: boolean;
+  pdfCount?: number;
+  responseMode?:
+    | "objective"
+    | "summary"
+    | "step_by_step"
+    | "checklist"
+    | "document_draft"
+    | "manager_guidance"
+    | "attention_points";
+};
+
+function buildStrategicSpecificRules(
+  _userText: string,
+  _context?: StrategicLegalContext,
+): string {
+  // Reservado para regras jurídicas exclusivas do Publ.IA Estratégico.
+  // Manter vazio preserva integralmente o comportamento já validado.
+  return "";
+}
+
+export function buildStrategicLegalGuardrails(
+  userText: string,
+  context?: StrategicLegalContext,
+): string {
+  const consolidatedRules = buildEssentialLegalGuardrails(userText);
+  const strategicRules = buildStrategicSpecificRules(userText, context);
+
+  return [consolidatedRules, strategicRules].filter(Boolean).join("\n\n");
+}

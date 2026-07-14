@@ -1,0 +1,110 @@
+import type {
+  OfficialWebAuthority,
+  OfficialWebTopic,
+} from "./types";
+
+export const OFFICIAL_AUTHORITY_ORDER: OfficialWebAuthority[] = [
+  "normative",
+  "jurisdictional",
+  "fiscalizing",
+  "operational",
+  "statistical",
+  "informative",
+];
+
+export const ESSENTIAL_BASE_OFFICIAL_DOMAINS = [
+  "planalto.gov.br",
+  "gov.br",
+  "in.gov.br",
+  "senado.leg.br",
+  "camara.leg.br",
+  "tcu.gov.br",
+  "stf.jus.br",
+  "stj.jus.br",
+  "cnj.jus.br",
+] as const;
+
+export const OFFICIAL_DOMAINS_BY_TOPIC: Record<OfficialWebTopic, string[]> = {
+  legislation: [
+    "planalto.gov.br",
+    "in.gov.br",
+    "senado.leg.br",
+    "camara.leg.br",
+    "stf.jus.br",
+    "stj.jus.br",
+    "cnj.jus.br",
+    "tcu.gov.br",
+    "gov.br",
+  ],
+  bidding: [
+    "planalto.gov.br",
+    "pncp.gov.br",
+    "compras.gov.br",
+    "tcu.gov.br",
+    "gov.br",
+    "in.gov.br",
+  ],
+  accounting: [
+    "planalto.gov.br",
+    "gov.br",
+    "tesourotransparente.gov.br",
+    "siconfi.tesouro.gov.br",
+    "tcu.gov.br",
+  ],
+  transfers: [
+    "gov.br",
+    "transferegov.sistema.gov.br",
+    "tesourotransparente.gov.br",
+    "tcu.gov.br",
+  ],
+  municipal_data: [
+    "ibge.gov.br",
+    "ipea.gov.br",
+    "bcb.gov.br",
+    "gov.br",
+    "datasus.gov.br",
+    "inep.gov.br",
+    "tesourotransparente.gov.br",
+    "siconfi.tesouro.gov.br",
+  ],
+  tax: [
+    "gov.br",
+    "planalto.gov.br",
+    "in.gov.br",
+    "bcb.gov.br",
+  ],
+  transparency: [
+    "gov.br",
+    "tcu.gov.br",
+    "planalto.gov.br",
+    "pncp.gov.br",
+    "compras.gov.br",
+    "tesourotransparente.gov.br",
+  ],
+  personnel: [
+    "planalto.gov.br",
+    "gov.br",
+    "tcu.gov.br",
+    "stf.jus.br",
+    "stj.jus.br",
+    "in.gov.br",
+  ],
+  privacy: [
+    "gov.br",
+    "planalto.gov.br",
+    "in.gov.br",
+    "stj.jus.br",
+    "stf.jus.br",
+  ],
+  general: [
+    "planalto.gov.br",
+    "gov.br",
+    "in.gov.br",
+    "senado.leg.br",
+    "camara.leg.br",
+    "tcu.gov.br",
+    "ibge.gov.br",
+    "ipea.gov.br",
+    "bcb.gov.br",
+  ],
+};

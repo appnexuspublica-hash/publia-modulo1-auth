@@ -100,8 +100,13 @@ body {
   opacity: 0.92;
 }
 
+/* Ajuste visual exclusivo do rodapé jurídico do Publ.IA Estratégico. */
+.publia-footnote--strategic {
+  font-size: 13px !important;
+  line-height: 1.5 !important;
+}
+
 /* força TODAS as tags internas a herdarem 9px */
-.publia-footnote,
 .publia-footnote * {
   font-size: inherit !important;
   line-height: inherit !important;

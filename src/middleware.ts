@@ -10,7 +10,12 @@ function redirectToLogin(req: NextRequest) {
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
 
-  if (!pathname.startsWith("/chat")) {
+  const protectedIndividualRoutes = ["/chat", "/essencial/chat", "/estrategico/chat"];
+  const isProtectedIndividualRoute = protectedIndividualRoutes.some((route) =>
+    pathname === route || pathname.startsWith(`${route}/`),
+  );
+
+  if (!isProtectedIndividualRoute) {
     return NextResponse.next();
   }
 
@@ -62,5 +67,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/chat/:path*"],
+  matcher: ["/chat/:path*", "/essencial/chat/:path*", "/estrategico/chat/:path*"],
 };

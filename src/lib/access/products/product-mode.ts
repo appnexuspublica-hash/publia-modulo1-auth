@@ -29,14 +29,14 @@ export const PRODUCT_RULES = {
   essential: {
     scope: "individual",
     requiresOrganization: false,
-    chatRoute: "/api/chat",
-    appRoute: "/chat",
+    chatRoute: "/api/essential/chat",
+    appRoute: "/essencial/chat",
   },
   strategic: {
     scope: "individual",
     requiresOrganization: false,
-    chatRoute: "/api/chat",
-    appRoute: "/chat",
+    chatRoute: "/api/strategic/chat",
+    appRoute: "/estrategico/chat",
   },
   governance: {
     scope: "organization",

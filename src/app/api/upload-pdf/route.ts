@@ -316,8 +316,9 @@ async function setConversationActivePdf(params: {
   conversationId: string;
   userId: string;
   pdfFileId: string;
+  productTier: ProductTier;
 }) {
-  const { supabase, conversationId, userId, pdfFileId } = params;
+  const { supabase, conversationId, userId, pdfFileId, productTier } = params;
 
   const { error: deactivateError } = await supabase
     .from("conversation_pdf_links")
@@ -351,7 +352,8 @@ async function setConversationActivePdf(params: {
       pdf_enabled: true,
     } as never)
     .eq("id", conversationId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("product_tier", productTier);
 
   if (conversationUpdateError) {
     throw new Error(
@@ -486,6 +488,11 @@ export async function POST(request: NextRequest) {
 
     const product = String(body.product ?? "").trim().toLowerCase();
     const isGovernanceUpload = product === "governance";
+    const productTier: ProductTier = isGovernanceUpload
+      ? "governance"
+      : product === "strategic"
+        ? "strategic"
+        : "essential";
 
     const conversationId = String(body.conversationId ?? "").trim();
     const fileName = String(body.fileName ?? "").trim();
@@ -532,15 +539,72 @@ export async function POST(request: NextRequest) {
         );
       }
     } else {
-      const { data: conversation, error: conversationError } = await supabase
-        .from("conversations")
-        .select("id")
-        .eq("id", conversationId)
-        .eq("user_id", user.id)
-        .maybeSingle();
+      // Validação resiliente do vínculo:
+      // 1) consulta a conversa pelo ID, sem filtrar antecipadamente por produto;
+      // 2) confirma a propriedade pelo user_id autenticado;
+      // 3) valida o produto em memória;
+      // 4) aceita e corrige apenas conversas legadas sem product_tier.
+      //
+      // Não há qualquer alteração no pipeline de IA, Base Legal ou Fontes
+      // Consultadas. Esta lógica atua exclusivamente no vínculo do PDF.
+      type ConversationOwnershipRow = {
+        id: string;
+        user_id: string | null;
+        product_tier: ProductTier | string | null;
+      };
 
-      if (conversationError) {
-        console.error("Erro ao validar conversa do PDF:", conversationError.message);
+      let conversation: ConversationOwnershipRow | null = null;
+      let conversationErrorMessage: string | null = null;
+
+      // Pequena repetição para cobrir o intervalo entre a criação da conversa
+      // no cliente e a leitura pela rota de upload.
+      for (let attempt = 1; attempt <= 3 && !conversation; attempt += 1) {
+        const {
+          data,
+          error,
+        } = await writeSupabase
+          .from("conversations")
+          .select("id, user_id, product_tier")
+          .eq("id", conversationId)
+          .maybeSingle();
+
+        if (error) {
+          conversationErrorMessage = error.message;
+          break;
+        }
+
+        conversation = (data as ConversationOwnershipRow | null) ?? null;
+
+        if (!conversation && attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+      }
+
+      // Fallback com a sessão autenticada. Ele mantém a rota funcional mesmo
+      // quando o ambiente local ainda está com a service role desatualizada.
+      if (!conversation && !conversationErrorMessage) {
+        const {
+          data,
+          error,
+        } = await supabase
+          .from("conversations")
+          .select("id, user_id, product_tier")
+          .eq("id", conversationId)
+          .maybeSingle();
+
+        if (error) {
+          conversationErrorMessage = error.message;
+        } else {
+          conversation = (data as ConversationOwnershipRow | null) ?? null;
+        }
+      }
+
+      if (conversationErrorMessage) {
+        console.error(
+          "Erro ao validar conversa do PDF:",
+          conversationErrorMessage
+        );
+
         return NextResponse.json(
           { error: "Não foi possível validar a conversa do PDF." },
           { status: 500 }
@@ -548,8 +612,66 @@ export async function POST(request: NextRequest) {
       }
 
       if (!conversation) {
+        console.warn("[upload-pdf] Conversa não encontrada pelo ID.", {
+          conversationId,
+          authenticatedUserId: user.id,
+          requestedProductTier: productTier,
+        });
+
         return NextResponse.json(
           { error: "Conversa inválida para vincular o PDF." },
+          { status: 400 }
+        );
+      }
+
+      if (String(conversation.user_id ?? "") !== user.id) {
+        console.warn("[upload-pdf] Conversa pertence a outro usuário.", {
+          conversationId,
+          authenticatedUserId: user.id,
+          conversationUserId: conversation.user_id,
+        });
+
+        return NextResponse.json(
+          { error: "Você não tem permissão para vincular PDF a esta conversa." },
+          { status: 403 }
+        );
+      }
+
+      const storedProductTier = String(
+        conversation.product_tier ?? ""
+      ).trim().toLowerCase();
+
+      if (!storedProductTier) {
+        // Migração segura de conversa legada sem classificação de produto.
+        const { error: repairError } = await writeSupabase
+          .from("conversations")
+          .update({ product_tier: productTier } as never)
+          .eq("id", conversationId)
+          .eq("user_id", user.id);
+
+        if (repairError) {
+          console.error(
+            "Erro ao classificar conversa legada para o upload do PDF:",
+            repairError.message
+          );
+
+          return NextResponse.json(
+            { error: "Não foi possível preparar a conversa para receber o PDF." },
+            { status: 500 }
+          );
+        }
+      } else if (storedProductTier !== productTier) {
+        console.warn("[upload-pdf] Produto da conversa divergente.", {
+          conversationId,
+          requestedProductTier: productTier,
+          storedProductTier,
+        });
+
+        return NextResponse.json(
+          {
+            error:
+              "A conversa selecionada pertence a outro produto. Crie ou selecione uma conversa do Publ.IA Estratégico para anexar o PDF.",
+          },
           { status: 400 }
         );
       }
@@ -736,6 +858,7 @@ export async function POST(request: NextRequest) {
           conversationId,
           userId: user.id,
           pdfFileId: insertedPdfId,
+          productTier,
         });
       } catch (activePdfError) {
         console.error(activePdfError);

@@ -1,0 +1,27 @@
+export type OfficialWebAuthority =
+  | "normative"
+  | "jurisdictional"
+  | "fiscalizing"
+  | "operational"
+  | "statistical"
+  | "informative";
+
+export type OfficialWebTopic =
+  | "legislation"
+  | "bidding"
+  | "accounting"
+  | "transfers"
+  | "municipal_data"
+  | "tax"
+  | "transparency"
+  | "personnel"
+  | "privacy"
+  | "general";
+
+export type OfficialWebResolution = {
+  topic: OfficialWebTopic;
+  topicLabel: string;
+  allowedDomains: string[];
+  hierarchy: string[];
+  authorityOrder: OfficialWebAuthority[];
+};

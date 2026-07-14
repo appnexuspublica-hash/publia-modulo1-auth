@@ -5,7 +5,7 @@ export default function Brand({ size = 28 }: { size?: number }) {
   return (
     <div className="flex items-center gap-2">
       <Image
-        src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+        src="/logos/nexus.png"
         alt="Nexus Pública"
         width={size}
         height={size}

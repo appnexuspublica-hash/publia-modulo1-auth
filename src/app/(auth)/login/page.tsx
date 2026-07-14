@@ -104,7 +104,7 @@ export default function LoginPage() {
           >
             {loadingPlan === "essential"
               ? "Gerando acesso..."
-              : "Testar Publ.IA Essencial - 15 dias Grátis"}
+              : "Testar Publ.IA Essencial - 7 dias Grátis"}
           </button>
 
           <button

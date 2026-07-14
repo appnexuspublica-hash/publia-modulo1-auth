@@ -1,0 +1,71 @@
+// src/app/chat/page.tsx
+import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+
+import ChatPageClient from "./ChatPageClient";
+import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+export default async function ChatPage() {
+  const cookieStore = cookies();
+
+  const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(_name: string, _value: string, _options: any) {
+        // No-op em Server Component.
+      },
+      remove(_name: string, _options: any) {
+        // No-op em Server Component.
+      },
+    },
+  });
+
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
+
+  if (error || !user) {
+    return redirect("/login");
+  }
+
+  // /chat é exclusivo do Publ.IA Estratégico.
+  // Usuários Essencial devem sempre entrar na rota própria para que o frontend,
+  // a API e o histórico usem o mesmo escopo de produto.
+  try {
+    const { resolved } = await getCurrentUserAccess(supabase);
+
+    if (resolved.effectiveProductTier === "essential") {
+      return redirect("/essencial/chat");
+    }
+
+  } catch (accessError) {
+    console.error("[chat/page] Erro ao resolver produto do usuário:", accessError);
+  }
+
+  let userCpfCnpj: string | null = null;
+
+  try {
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("cpf_cnpj")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (!profileError && profile?.cpf_cnpj) {
+      userCpfCnpj = profile.cpf_cnpj;
+    }
+  } catch (profileError) {
+    console.error("[chat/page] Erro ao buscar profile:", profileError);
+  }
+
+  const userLabel = userCpfCnpj || "[ usuário ]";
+
+  return <ChatPageClient userId={user.id} userLabel={userLabel} />;
+}

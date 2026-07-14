@@ -114,7 +114,7 @@ export default function LoginForm() {
     <div className="w-full max-w-md rounded-2xl border bg-gray-50 p-8 shadow-sm">
       <div className="mb-6 flex flex-col items-center">
         <Image
-          src="https://nexuspublica.com.br/wp-content/uploads/2025/09/icon_nexus.png"
+          src="/logos/nexus.png"
           alt="Publ.IA"
           width={40}
           height={40}
@@ -189,7 +189,7 @@ export default function LoginForm() {
           <SignupActionButton
             plan="essential"
             label="Criar conta Essencial"
-            helper="Acesso trial por 15 dias."
+            helper="Acesso trial por 7 dias."
             onClick={handleSignupRedirect}
             loadingPlan={loadingPlan}
           />

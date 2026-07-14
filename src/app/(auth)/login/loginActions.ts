@@ -4,6 +4,8 @@ import { z } from "zod";
 import { onlyDigits } from "@/lib/validators";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+import { getProductRule } from "@/lib/access/products/product-mode";
 
 export type LoginState = {
   ok: boolean;
@@ -71,8 +73,22 @@ export async function login(prevState: LoginState, formData: FormData): Promise<
       return { ok: false, error: msg };
     }
 
-    // 3) Sucesso -> front faz router.push
-    return { ok: true, redirect: "/chat" };
+    // 3) Sucesso -> direciona conforme o produto efetivo.
+    // Essencial já possui rota própria; Estratégico permanece em /estrategico/chat por compatibilidade.
+    let redirect = "/estrategico/chat";
+
+    try {
+      const { resolved } = await getCurrentUserAccess(supa);
+      const effectiveProductTier = resolved.effectiveProductTier;
+
+      if (effectiveProductTier === "essential" || effectiveProductTier === "strategic") {
+        redirect = getProductRule(effectiveProductTier).appRoute;
+      }
+    } catch (accessError) {
+      console.error("[login] access redirect resolution error", accessError);
+    }
+
+    return { ok: true, redirect };
   } catch (e: any) {
     console.error("[login] error", e);
     const zIssue = e?.issues?.[0]?.message;

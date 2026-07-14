@@ -1,0 +1,74 @@
+//src/app/estrategico/chat/theme.ts
+
+export type ChatPlanTheme = "essential" | "strategic";
+
+type ChatThemeColors = {
+  bg: string;
+  bgSecondary: string;
+  bgTertiary: string;
+  text: string;
+  textMuted: string;
+  textSoft: string;
+  border: string;
+  borderStrong: string;
+  hover: string;
+  active: string;
+  buttonGhost: string;
+  buttonGhostHover: string;
+  inputBg: string;
+  bubbleUser: string;
+  bubbleAssistant: string;
+};
+
+export type ChatTheme = {
+  plan: ChatPlanTheme;
+  colors: ChatThemeColors;
+};
+
+export const chatThemes: Record<ChatPlanTheme, ChatTheme> = {
+  essential: {
+    plan: "essential",
+    colors: {
+      bg: "#e5e5e5",
+      bgSecondary: "#dcdcdc",
+      bgTertiary: "#f3f3f3",
+      text: "#111111",
+      textMuted: "#4b5563",
+      textSoft: "#6b7280",
+      border: "rgba(0, 0, 0, 0.08)",
+      borderStrong: "rgba(0, 0, 0, 0.14)",
+      hover: "rgba(0, 0, 0, 0.04)",
+      active: "rgba(0, 0, 0, 0.08)",
+      buttonGhost: "transparent",
+      buttonGhostHover: "rgba(0, 0, 0, 0.05)",
+      inputBg: "#ffffff",
+      bubbleUser: "#ffffff",
+      bubbleAssistant: "#f3f4f6",
+    },
+  },
+
+  strategic: {
+    plan: "strategic",
+    colors: {
+      bg: "#EFEFEF",
+      bgSecondary: "#EFEFEF",
+      bgTertiary: "#FFFFFF",
+      text: "#0D2B4D",
+      textMuted: "#5A5A5A",
+      textSoft: "#6B7280",
+      border: "rgba(13, 43, 77, 0.10)",
+      borderStrong: "rgba(13, 43, 77, 0.20)",
+      hover: "#E5E5E5",
+      active: "#DCDCDC",
+      buttonGhost: "transparent",
+      buttonGhostHover: "#E5E5E5",
+      inputBg: "#FFFFFF",
+      bubbleUser: "#E5E5E5",
+      bubbleAssistant: "#E5E5E5",
+    },
+  },
+};
+
+export function getChatTheme(isStrategic: boolean): ChatTheme {
+  return isStrategic ? chatThemes.strategic : chatThemes.essential;
+}

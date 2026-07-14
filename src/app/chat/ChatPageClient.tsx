@@ -34,6 +34,11 @@ import {
 type ChatPageClientProps = {
   userId: string;
   userLabel: string;
+  /**
+   * Endpoint usado para envio das mensagens.
+   * Mantém /api/chat como padrão para preservar o fluxo atual.
+   */
+  chatApiEndpoint?: string;
 };
 
 type ToastType = AlertTone;
@@ -612,6 +617,7 @@ function buildStrategicSuggestions(
 export default function ChatPageClient({
   userId,
   userLabel,
+  chatApiEndpoint = "/api/chat",
 }: ChatPageClientProps) {
   const [supabase] = useState(() =>
     createBrowserClient(supabaseUrl, supabaseAnonKey)
@@ -1081,6 +1087,7 @@ export default function ChatPageClient({
         .select("id, active_pdf_file_id, pdf_enabled")
         .eq("id", conversationId)
         .eq("user_id", userId)
+        .eq("product_tier", "strategic")
         .maybeSingle();
 
       if (convError) {
@@ -1257,7 +1264,8 @@ export default function ChatPageClient({
           pdf_enabled: true,
         } as any)
         .eq("id", conversationId)
-        .eq("user_id", userId);
+        .eq("user_id", userId)
+        .eq("product_tier", "strategic");
 
       if (conversationUpdateError) {
         console.error(
@@ -1330,6 +1338,7 @@ export default function ChatPageClient({
           .from("conversations")
           .select("id, title, created_at, is_shared, share_id, is_favorite")
           .eq("user_id", userId)
+          .eq("product_tier", "strategic")
           .is("deleted_at", null)
           .order("created_at", { ascending: false });
 
@@ -1435,7 +1444,7 @@ export default function ChatPageClient({
     try {
       const { data, error } = await supabase
         .from("conversations")
-        .insert({ user_id: userId, title: "Nova conversa" })
+        .insert({ user_id: userId, title: "Nova conversa", product_tier: "strategic" })
         .select("id, title, created_at, is_shared, share_id, is_favorite")
         .single();
 
@@ -1533,7 +1542,8 @@ export default function ChatPageClient({
       .from("conversations")
       .delete()
       .eq("id", id)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao excluir conversa:", error.message);
@@ -1579,7 +1589,8 @@ export default function ChatPageClient({
       .from("conversations")
       .update({ is_favorite: nextValue })
       .eq("id", id)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao atualizar favorito da conversa:", error.message);
@@ -1623,7 +1634,8 @@ export default function ChatPageClient({
       .from("conversations")
       .update({ title: cleanTitle })
       .eq("id", id)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao renomear conversa:", error.message);
@@ -1797,6 +1809,7 @@ export default function ChatPageClient({
           .update({ title: newTitle })
           .eq("id", conversationId)
           .eq("user_id", userId)
+          .eq("product_tier", "strategic")
           .then(({ error }: any) => {
             if (error) console.error("Erro ao atualizar título:", error.message);
           });
@@ -1825,7 +1838,7 @@ export default function ChatPageClient({
         body.responseMode = effectiveClientResponseMode;
       }
 
-      const res = await fetch("/api/chat", {
+      const res = await fetch(chatApiEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ac.signal,
@@ -1834,7 +1847,7 @@ export default function ChatPageClient({
 
       if (!res.ok) {
         const apiErrorMessage = await extractApiChatErrorMessage(res);
-        console.error("Erro ao chamar /api/chat:", apiErrorMessage);
+        console.error(`Erro ao chamar ${chatApiEndpoint}:`, apiErrorMessage);
 
         setMessages((prev) =>
           prev.map((m) =>

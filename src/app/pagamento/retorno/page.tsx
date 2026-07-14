@@ -48,7 +48,7 @@ function PagamentoRetornoContent() {
 
         const timeoutId = window.setTimeout(() => {
           if (response.ok) {
-            router.replace("/chat");
+            router.replace("/estrategico/chat");
             return;
           }
 

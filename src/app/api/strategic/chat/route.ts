@@ -1,0 +1,1458 @@
+/**
+ * CHAT EXCLUSIVO — PUBL.IA ESTRATÉGICO
+ *
+ * Rota dedicada ao produto Publ.IA Estratégico.
+ *
+ * CONTRATO ARQUITETURAL:
+ * - Esta rota NÃO usa organização.
+ * - Esta rota NÃO importa getCurrentGovernanceOrganization.
+ * - Esta rota NÃO acessa tabelas governance_*.
+ * - Esta rota atende somente ao Publ.IA Estratégico.
+ *
+ * Banco usado:
+ * - conversations
+ * - messages
+ * - pdf_files
+ *
+ * Chave de isolamento:
+ * - user_id
+ *
+ * Rotas separadas:
+ * - Essencial: /api/essential/chat
+ * - Governança: /api/governance/chat
+ */
+
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import OpenAI from "openai";
+
+import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+import {
+  getResolvedUiState,
+  toFrontendAccessStatus,
+} from "@/lib/access/access-helpers";
+import {
+  buildStrategicChatPrompt,
+  type StrategicResponseMode,
+} from "@/lib/prompts/strategic/prompt";
+import { buildStrategicLegalGuardrails } from "@/lib/strategicLegalGuardrails";
+import { finalizeStrategicLegalReferences } from "@/lib/legal/official-legal-references";
+import {
+  buildOfficialWebInstruction,
+  resolveEssentialOfficialWeb,
+} from "@/lib/official-web";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type IndividualProductTier = "strategic";
+
+type IndividualResponseMode = StrategicResponseMode;
+
+type ChatRequestBody = {
+  conversationId?: string;
+  message?: string;
+  content?: string;
+  responseMode?: IndividualResponseMode;
+  pdfMode?: "all" | "selected" | "none";
+  selectedPdfIds?: string[];
+};
+
+type ConversationRow = {
+  id: string;
+  user_id: string;
+  title: string | null;
+  deleted_at: string | null;
+  product_tier: IndividualProductTier;
+};
+
+type MessageRow = {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+type PdfFileRow = {
+  id: string;
+  file_name: string;
+  extracted_text: string | null;
+};
+
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL_NO_PDF ||
+  process.env.OPENAI_MODEL ||
+  "gpt-5.1";
+
+const MAX_USER_MESSAGE_LENGTH = 12000;
+const MAX_HISTORY_MESSAGES = 8;
+const MAX_PDF_CONTEXT_CHARS = 12000;
+
+const uuidRe =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const SSE_HEADERS: HeadersInit = {
+  "Content-Type": "text/event-stream; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  Connection: "keep-alive",
+  "X-Accel-Buffering": "no",
+};
+
+function createSupabaseRouteClient() {
+  const cookieStore = cookies();
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Variáveis do Supabase ausentes no .env.local.");
+  }
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(name: string, value: string, options: any) {
+        cookieStore.set({ name, value, ...options });
+      },
+      remove(name: string, options: any) {
+        cookieStore.set({ name, value: "", ...options });
+      },
+    },
+  });
+}
+
+function sse(event: string, data: unknown) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function jsonError(message: string, status = 400, extra?: Record<string, unknown>) {
+  return NextResponse.json(
+    {
+      error: message,
+      ...extra,
+    },
+    { status },
+  );
+}
+
+function normalizeMessage(body: ChatRequestBody) {
+  return String(body.message ?? body.content ?? "").trim();
+}
+
+function normalizeProductTier(
+  value: unknown,
+): IndividualProductTier | "essential" | "governance" {
+  if (value === "strategic") return "strategic";
+  if (value === "governance") return "governance";
+  return "essential";
+}
+
+const allowedStrategicResponseModes: IndividualResponseMode[] = [
+  "objective",
+  "summary",
+  "step_by_step",
+  "checklist",
+  "document_draft",
+  "manager_guidance",
+  "attention_points",
+];
+
+function normalizeResponseMode(value: unknown): IndividualResponseMode {
+  return allowedStrategicResponseModes.includes(value as IndividualResponseMode)
+    ? (value as IndividualResponseMode)
+    : "objective";
+}
+
+function createTitleFromMessage(message: string) {
+  const clean = message.replace(/\s+/g, " ").trim();
+  return clean.length > 70 ? `${clean.slice(0, 70)}...` : clean || "Nova conversa";
+}
+
+function trimText(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[Conteúdo cortado para respeitar o limite de contexto.]`;
+}
+
+function buildModeInstruction(responseMode: IndividualResponseMode) {
+  return `MODO DE RESPOSTA ESTRATÉGICO: ${responseMode}. Siga o contrato correspondente definido no prompt do produto.`;
+}
+
+async function getOrCreateConversation(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  userId: string;
+  conversationId?: string;
+  firstMessage: string;
+}) {
+  const { supabase, userId, conversationId, firstMessage } = params;
+
+  if (conversationId && uuidRe.test(conversationId)) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id,user_id,title,deleted_at,product_tier")
+      .eq("id", conversationId)
+      .eq("user_id", userId)
+      .eq("product_tier", "strategic")
+      .is("deleted_at", null)
+      .maybeSingle<ConversationRow>();
+
+    if (error) {
+      throw new Error(`Erro ao buscar conversa: ${error.message}`);
+    }
+
+    if (!data) {
+      throw new Error("Conversa não encontrada ou sem permissão.");
+    }
+
+    return data;
+  }
+
+  const { data, error } = await supabase
+    .from("conversations")
+    .insert({
+      user_id: userId,
+      title: createTitleFromMessage(firstMessage),
+      pdf_enabled: false,
+      product_tier: "strategic",
+    })
+    .select("id,user_id,title,deleted_at,product_tier")
+    .single<ConversationRow>();
+
+  if (error || !data) {
+    throw new Error(`Erro ao criar conversa: ${error?.message ?? "sem retorno"}`);
+  }
+
+  return data;
+}
+
+async function loadRecentHistory(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  conversationId: string;
+}) {
+  const { supabase, conversationId } = params;
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id,conversation_id,role,content,created_at")
+    .eq("conversation_id", conversationId)
+    .in("role", ["user", "assistant"])
+    .order("created_at", { ascending: false })
+    .limit(MAX_HISTORY_MESSAGES)
+    .returns<MessageRow[]>();
+
+  if (error) {
+    throw new Error(`Erro ao carregar histórico: ${error.message}`);
+  }
+
+  return (data ?? []).reverse();
+}
+
+async function loadPdfContext(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  userId: string;
+  conversationId: string;
+  pdfMode: ChatRequestBody["pdfMode"];
+  selectedPdfIds: string[];
+}) {
+  const { supabase, userId, conversationId, pdfMode, selectedPdfIds } = params;
+
+  if (pdfMode === "none") return "";
+
+  let query = supabase
+    .from("pdf_files")
+    .select("id,file_name,extracted_text")
+    .eq("user_id", userId)
+    .eq("conversation_id", conversationId)
+    .not("extracted_text", "is", null);
+
+  if (pdfMode === "selected" && selectedPdfIds.length > 0) {
+    query = query.in("id", selectedPdfIds);
+  }
+
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .limit(5)
+    .returns<PdfFileRow[]>();
+
+  if (error) {
+    throw new Error(`Erro ao carregar PDFs da conversa: ${error.message}`);
+  }
+
+  const context = (data ?? [])
+    .map((pdf) => {
+      const text = String(pdf.extracted_text ?? "").trim();
+      if (!text) return "";
+      return [
+        `PDF: ${pdf.file_name}`,
+        trimText(text, Math.floor(MAX_PDF_CONTEXT_CHARS / Math.max(1, data?.length ?? 1))),
+      ].join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+
+  return trimText(context, MAX_PDF_CONTEXT_CHARS);
+}
+
+function buildPrompt(params: {
+  responseMode: IndividualResponseMode;
+  pdfContext: string;
+  legalGuardrails: string;
+  officialWebInstruction: string;
+}) {
+  const {
+    responseMode,
+    pdfContext,
+    legalGuardrails,
+    officialWebInstruction,
+  } = params;
+
+  const scopedPrompt = buildStrategicChatPrompt({
+    responseMode,
+  });
+
+  return [
+    scopedPrompt,
+    "",
+    "CONTRATO DO CHAT INDIVIDUAL — ESTRATÉGICO:",
+    "- Você está no chat individual exclusivo do Publ.IA Estratégico.",
+    "- Não trate este atendimento como Essencial.",
+    "- Não trate este atendimento como Governança.",
+    "- Não mencione organização, órgão vinculado ou base institucional compartilhada como requisito.",
+    "- Use apenas o contexto do usuário, da conversa e dos PDFs individuais anexados.",
+    "",
+    buildModeInstruction(responseMode),
+    "",
+    `DATA DE REFERÊNCIA DA RESPOSTA: ${new Intl.DateTimeFormat("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      dateStyle: "long",
+    }).format(new Date())}.`,
+    "Considere essa data ao verificar vigência, atualizações anuais, valores e dados atuais.",
+    "",
+    officialWebInstruction,
+    "",
+    legalGuardrails
+      ? [
+          "BASE NORMATIVA CRÍTICA — USO OBRIGATÓRIO:",
+          legalGuardrails,
+          "",
+          "Quando esta base trouxer valor, limite, prazo, percentual ou requisito objetivo, apresente esse dado logo no início da resposta.",
+          "Não substitua o dado disponível por recomendação genérica de consulta à legislação.",
+        ].join("\n")
+      : "Não há regra normativa crítica adicional acionada para esta pergunta.",
+    "",
+    [
+      "RODAPÉ NORMATIVO — MESMO PADRÃO DO PUBL.IA ESSENCIAL:",
+      "Ao final de toda resposta que trate de Administração Pública, legislação, contabilidade pública, tributação, licitações, contratos, pessoal, controle, transparência, finanças públicas ou outro assunto regulado, inclua obrigatoriamente e uma única vez estas duas seções:",
+      "",
+      "**Base legal:**",
+      "- Liste em tópicos apenas as normas efetivamente pertinentes à resposta.",
+      "- Informe, no mínimo, o tipo, o número e o ano da norma, quando esses dados forem conhecidos com segurança.",
+      "- Indique artigos, incisos ou parágrafos somente quando houver certeza.",
+      "- Prefira uma base legal curta, útil e diretamente relacionada ao tema.",
+      "- Quando a norma tiver sido efetivamente consultada, escreva seu nome como link Markdown para a página oficial direta.",
+      "",
+      "**Fontes consultadas:**",
+      "- Liste em tópicos somente as fontes oficiais efetivamente utilizadas na resposta.",
+      "- Informe o nome do órgão, documento ou página consultada e o respectivo link oficial direto em Markdown.",
+      "- Não use apenas a página inicial do domínio quando houver link direto para o ato, decisão, manual, tabela ou dado consultado.",
+      "- Nunca invente consulta, fonte, órgão, página, documento ou URL.",
+      "",
+      "Não omita esse rodapé por a resposta estar em modo objetivo, técnico, executivo, plano de ação ou análise de riscos.",
+      "Não crie uma segunda Base legal nem uma segunda seção Fontes consultadas.",
+      "Para assuntos não regulados ou puramente criativos, o rodapé normativo pode ser omitido.",
+    ].join("\n"),
+    "",
+    pdfContext
+      ? [
+          "CONTEXTO DOS PDFs INDIVIDUAIS ANEXADOS:",
+          pdfContext,
+          "",
+          "Use os PDFs como fonte de apoio quando forem relevantes. Se a resposta não estiver no PDF, diga isso com clareza.",
+          "Identifique normas, leis, decretos, resoluções, instruções e demais referências jurídicas citadas nos PDFs.",
+          "Sempre que houver conteúdo jurídico ou normativo nos PDFs, confronte-o com fontes oficiais atuais e preserve as seções Base legal e Fontes consultadas no formato estabilizado.",
+          "Não omita a Base legal nem as Fontes consultadas apenas porque a pergunta foi feita sobre um PDF.",
+        ].join("\n")
+      : "Não há contexto de PDF anexado para esta resposta.",
+  ].join("\n");
+}
+
+
+type OfficialWebSource = {
+  title: string;
+  url: string;
+};
+
+function normalizeSourceTitle(value: unknown, url: string) {
+  const title = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (title) return title;
+
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+
+function collectSerializedOfficialSources(
+  value: unknown,
+  allowedDomains: string[],
+  target: Map<string, OfficialWebSource>,
+) {
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized) return;
+
+    collectOfficialSources(
+      JSON.parse(serialized),
+      allowedDomains,
+      target,
+    );
+  } catch {
+    // Alguns eventos do SDK podem conter estruturas não serializáveis.
+  }
+}
+
+function collectKnownEventSources(
+  event: any,
+  allowedDomains: string[],
+  target: Map<string, OfficialWebSource>,
+) {
+  const candidates = [
+    event?.annotation,
+    event?.item,
+    event?.response,
+    event?.response?.output,
+    event?.item?.action?.sources,
+    event?.response?.output?.flatMap?.((item: any) => item?.content ?? []),
+  ];
+
+  for (const candidate of candidates) {
+    collectOfficialSources(candidate, allowedDomains, target);
+  }
+
+  collectSerializedOfficialSources(event, allowedDomains, target);
+}
+
+function collectMarkdownOfficialSources(
+  markdown: string,
+  allowedDomains: string[],
+  target: Map<string, OfficialWebSource>,
+) {
+  const markdownLinkRe = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = markdownLinkRe.exec(markdown)) !== null) {
+    const title = match[1].replace(/\s+/g, " ").trim();
+    const rawUrl = match[2];
+
+    collectOfficialSources(
+      {
+        title,
+        url: rawUrl,
+      },
+      allowedDomains,
+      target,
+    );
+  }
+
+  const bareUrlRe = /https?:\/\/[^\s<>)\]]+/g;
+  for (const rawUrl of markdown.match(bareUrlRe) ?? []) {
+    collectOfficialSources(
+      {
+        url: rawUrl.replace(/[.,;:]+$/, ""),
+      },
+      allowedDomains,
+      target,
+    );
+  }
+}
+
+function canonicalizeOfficialUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+
+    parsed.hash = "";
+
+    const removableParams = [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "gclid",
+      "fbclid",
+      "mc_cid",
+      "mc_eid",
+    ];
+
+    for (const param of removableParams) {
+      parsed.searchParams.delete(param);
+    }
+
+    parsed.hostname = parsed.hostname.toLowerCase();
+    parsed.pathname = parsed.pathname.replace(/\/{2,}/g, "/");
+
+    if (parsed.pathname !== "/") {
+      parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    }
+
+    parsed.searchParams.sort();
+
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function isGenericSearchUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase();
+
+    return (
+      /(?:^|\/)(?:busca|pesquisa|search)(?:\/|$|\?)/i.test(pathAndQuery) ||
+      /consulta\.action\?/i.test(pathAndQuery) ||
+      /(?:termo|term|query|q|busca)=/i.test(parsed.search)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function extractNormativeIdentifier(source: OfficialWebSource) {
+  const normalized = normalizeIdentifier(`${source.title} ${source.url}`);
+
+  const patterns = [
+    {
+      type: "decreto",
+      re: /decreto(?:n|no|numero)?(\d{1,3}(?:\.\d{3})*)\/(\d{4})/,
+    },
+    {
+      type: "lei-complementar",
+      re: /leicomplementar(?:n|no|numero)?(\d{1,3}(?:\.\d{3})*)\/(\d{4})/,
+    },
+    {
+      type: "lei",
+      re: /lei(?:n|no|numero)?(\d{1,3}(?:\.\d{3})*)\/(\d{4})/,
+    },
+    {
+      type: "in-rfb",
+      re: /(?:inrfb|instrucaonormativarf)(?:n|no|numero)?(\d{1,3}(?:\.\d{3})*)\/(\d{4})/,
+    },
+    {
+      type: "tema-stf",
+      re: /tema(?:n|no|numero)?(\d{1,4})/,
+    },
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern.re);
+
+    if (match) {
+      return `${pattern.type}:${match.slice(1).join("/")}`;
+    }
+  }
+
+  const genericNumber = normalized.match(
+    /\b(\d{1,3}(?:\.\d{3})*)\/(\d{4})\b/,
+  );
+
+  if (genericNumber) {
+    return `ato:${genericNumber[1]}/${genericNumber[2]}`;
+  }
+
+  return "";
+}
+
+function sourceSemanticKey(source: OfficialWebSource) {
+  const normativeIdentifier = extractNormativeIdentifier(source);
+
+  if (normativeIdentifier) {
+    return normativeIdentifier;
+  }
+
+  try {
+    const parsed = new URL(canonicalizeOfficialUrl(source.url));
+    const hostname = parsed.hostname.replace(/^www\./, "");
+    const pathname =
+      parsed.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+
+    return `${hostname}${pathname}`;
+  } catch {
+    return normalizeIdentifier(source.title);
+  }
+}
+
+function sourceScore(source: OfficialWebSource) {
+  try {
+    const parsed = new URL(source.url);
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const path = parsed.pathname.replace(/\/+$/, "");
+    let score = 0;
+
+    if (path && path !== "") score += 4;
+    if (/\.(pdf|html?|aspx?)$/i.test(path)) score += 2;
+
+    if (
+      /\b(lei|decreto|instrucao|instrução|tema|acordao|acórdão|manual|estimativa|portaria|resolucao|resolução)\b/i.test(
+        `${source.title} ${source.url}`,
+      )
+    ) {
+      score += 3;
+    }
+
+    if (extractNormativeIdentifier(source)) score += 5;
+
+    if (path === "" || path === "/") score -= 4;
+
+    if (/^(gov\.br|planalto\.gov\.br)$/i.test(hostname) && !path) {
+      score -= 3;
+    }
+
+    if (hostname === "planalto.gov.br") score += 5;
+    if (hostname === "legis.senado.leg.br") score += 3;
+
+    if (hostname.endsWith(".stf.jus.br") || hostname === "stf.jus.br") {
+      score += 4;
+    }
+
+    if (
+      hostname === "normas.receita.fazenda.gov.br" &&
+      !isGenericSearchUrl(source.url)
+    ) {
+      score += 4;
+    }
+
+    if (isGenericSearchUrl(source.url)) score -= 12;
+
+    return score;
+  } catch {
+    return -10;
+  }
+}
+
+function selectBestOfficialSources(sources: OfficialWebSource[]) {
+  const byCanonicalUrl = new Map<string, OfficialWebSource>();
+
+  for (const source of sources) {
+    const canonicalUrl = canonicalizeOfficialUrl(source.url);
+    const normalizedSource = {
+      ...source,
+      url: canonicalUrl,
+    };
+
+    const current = byCanonicalUrl.get(canonicalUrl);
+
+    if (!current || sourceScore(normalizedSource) > sourceScore(current)) {
+      byCanonicalUrl.set(canonicalUrl, normalizedSource);
+    }
+  }
+
+  const bySemanticDocument = new Map<string, OfficialWebSource>();
+
+  for (const source of byCanonicalUrl.values()) {
+    const key = sourceSemanticKey(source);
+    const current = bySemanticDocument.get(key);
+
+    if (!current || sourceScore(source) > sourceScore(current)) {
+      bySemanticDocument.set(key, source);
+    }
+  }
+
+  const selectedBeforeHomepageFilter = Array.from(
+    bySemanticDocument.values(),
+  ).sort((a, b) => sourceScore(b) - sourceScore(a));
+
+  // O Estratégico não deve apresentar portais institucionais genéricos como
+  // fonte jurídica. Somente documentos ou páginas temáticas específicas.
+  const selected = selectedBeforeHomepageFilter.filter(
+    (source) => !isGenericHomepage(source.url),
+  );
+
+  const hasDirectSources = selected.some(
+    (source) => !isGenericSearchUrl(source.url),
+  );
+
+  return selected
+    .filter(
+      (source) =>
+        !hasDirectSources ||
+        !isGenericSearchUrl(source.url) ||
+        sourceScore(source) >= 0,
+    )
+    .slice(0, 8);
+}
+
+function collectOfficialSources(
+  value: unknown,
+  allowedDomains: string[],
+  target: Map<string, OfficialWebSource>,
+  visited = new Set<object>(),
+) {
+  if (!value || typeof value !== "object") return;
+
+  const objectValue = value as Record<string, unknown>;
+  if (visited.has(objectValue)) return;
+  visited.add(objectValue);
+
+  const urlCandidate =
+    typeof objectValue.url === "string"
+      ? objectValue.url
+      : typeof objectValue.link === "string"
+        ? objectValue.link
+        : "";
+
+  if (/^https?:\/\//i.test(urlCandidate)) {
+    try {
+      const parsed = new URL(urlCandidate);
+      const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+      const allowed = allowedDomains.some(
+        (domain) =>
+          hostname === domain.toLowerCase() ||
+          hostname.endsWith(`.${domain.toLowerCase()}`),
+      );
+
+      if (allowed) {
+        const cleanUrl = canonicalizeOfficialUrl(parsed.toString());
+        const title = normalizeSourceTitle(
+          objectValue.title ??
+            objectValue.name ??
+            objectValue.label ??
+            objectValue.text,
+          cleanUrl,
+        );
+
+        target.set(cleanUrl, { title, url: cleanUrl });
+      }
+    } catch {
+      // URL inválida retornada pela ferramenta: ignorar.
+    }
+  }
+
+  for (const child of Object.values(objectValue)) {
+    if (child && typeof child === "object") {
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          collectOfficialSources(item, allowedDomains, target, visited);
+        }
+      } else {
+        collectOfficialSources(child, allowedDomains, target, visited);
+      }
+    }
+  }
+}
+
+function getSourcesHeadingMatches(markdown: string) {
+  const sourcesHeading =
+    /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*Fontes\s+consultadas\s*(?:\*\*|__)?\s*:?\s*(?=\n|$)/gi;
+
+  return Array.from(markdown.matchAll(sourcesHeading));
+}
+
+function removeExistingSourcesSection(markdown: string) {
+  const matches = getSourcesHeadingMatches(markdown);
+  const firstMatch = matches[0];
+
+  if (!firstMatch || firstMatch.index === undefined) {
+    return markdown.trim();
+  }
+
+  return markdown.slice(0, firstMatch.index).trim();
+}
+
+function keepOnlyFirstSourcesSection(markdown: string) {
+  const matches = getSourcesHeadingMatches(markdown);
+
+  if (matches.length < 2) {
+    return markdown.trim();
+  }
+
+  const secondMatch = matches[1];
+
+  if (secondMatch.index === undefined) {
+    return markdown.trim();
+  }
+
+  return markdown.slice(0, secondMatch.index).trim();
+}
+
+function normalizeIdentifier(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+
+const KNOWN_DIRECT_LEGAL_SOURCES: Array<{
+  matches: RegExp[];
+  source: OfficialWebSource;
+}> = [
+  {
+    matches: [
+      /\bconstitui(?:cao|ção)(?:\s+da\s+republica\s+federativa\s+do\s+brasil)?(?:\s+de)?\s+1988\b/i,
+      /\bconstitui(?:cao|ção)\s+federal\b/i,
+      /\bart\.\s*158\b/i,
+    ],
+    source: {
+      title: "Constituição da República Federativa do Brasil de 1988 — texto compilado",
+      url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicaocompilado.htm",
+    },
+  },
+  {
+    matches: [/\blei\s+complementar\s+n?[ºo.]?\s*101\/2000\b/i, /\bLRF\b/i],
+    source: {
+      title: "Lei Complementar nº 101/2000 — Lei de Responsabilidade Fiscal",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
+    },
+  },
+  {
+    matches: [/\blei\s+n?[ºo.]?\s*14\.?133\/2021\b/i],
+    source: {
+      title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+    },
+  },
+  {
+    matches: [/\blei\s+n?[ºo.]?\s*4\.?320\/1964\b/i],
+    source: {
+      title: "Lei nº 4.320/1964 — Normas Gerais de Direito Financeiro",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/l4320.htm",
+    },
+  },
+  {
+    matches: [/\blei\s+n?[ºo.]?\s*9\.?430\/1996\b/i],
+    source: {
+      title: "Lei nº 9.430/1996 — Legislação tributária federal",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/l9430.htm",
+    },
+  },
+  {
+    matches: [/\bdecreto\s+n?[ºo.]?\s*12\.?807\/2025\b/i],
+    source: {
+      title: "Decreto nº 12.807/2025 — atualização dos valores da Lei nº 14.133/2021",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/decreto/d12807.htm",
+    },
+  },
+  {
+    matches: [
+      /\b(?:codigo|código)\s+tributario\s+nacional\b/i,
+      /\bCTN\b/i,
+      /\blei\s+n?[ºo.]?\s*5\.?172(?:\/1966|\s*,?\s*de\s+25\s+de\s+outubro\s+de\s+1966)?\b/i,
+    ],
+    source: {
+      title: "Lei nº 5.172/1966 — Código Tributário Nacional",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/l5172compilado.htm",
+    },
+  },
+  {
+    matches: [
+      /\b(?:instru(?:cao|ção)\s+normativa|IN)\s+RFB\s+n?[ºo.]?\s*1\.?234(?:\/2012|\s*,?\s*de\s+11\s+de\s+janeiro\s+de\s+2012)?\b/i,
+    ],
+    source: {
+      title: "Instrução Normativa RFB nº 1.234/2012 — texto oficial",
+      url: "https://normas.receita.fazenda.gov.br/sijut2consulta/link.action?idAto=37200",
+    },
+  },
+  {
+    matches: [
+      /\btema\s+n?[ºo.]?\s*1\.?130\b/i,
+      /\brepercuss(?:ao|ão)\s+geral[^\n]*\b1\.?130\b/i,
+    ],
+    source: {
+      title: "Supremo Tribunal Federal — Tema 1.130 da Repercussão Geral",
+      url: "https://portal.stf.jus.br/jurisprudenciaRepercussao/tema.asp?num=1130",
+    },
+  },
+];
+
+function findKnownDirectLegalSource(line: string) {
+  return KNOWN_DIRECT_LEGAL_SOURCES.find((entry) =>
+    entry.matches.some((pattern) => pattern.test(line)),
+  )?.source;
+}
+
+function collectKnownDirectLegalSources(
+  markdown: string,
+  target: Map<string, OfficialWebSource>,
+) {
+  for (const entry of KNOWN_DIRECT_LEGAL_SOURCES) {
+    if (!entry.matches.some((pattern) => pattern.test(markdown))) {
+      continue;
+    }
+
+    const canonicalUrl = canonicalizeOfficialUrl(entry.source.url);
+    target.set(canonicalUrl, {
+      ...entry.source,
+      url: canonicalUrl,
+    });
+  }
+}
+
+function isGenericHomepage(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const path = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+
+    const genericPaths = new Set([
+      "",
+      "/pt-br",
+      "/pt-br/",
+      "/portal",
+      "/home",
+      "/inicio",
+    ]);
+
+    return genericPaths.has(path) || (
+      hostname === "gov.br" &&
+      (path === "" || path === "/pt-br")
+    );
+  } catch {
+    return true;
+  }
+}
+
+function findBestSourceForLegalLine(
+  line: string,
+  sources: OfficialWebSource[],
+) {
+  const knownDirectSource = findKnownDirectLegalSource(line);
+
+  if (knownDirectSource) {
+    return knownDirectSource;
+  }
+
+  const normalizedLine = normalizeIdentifier(line);
+  const identifiers =
+    normalizedLine.match(/\d{1,3}(?:\.\d{3})*(?:\/\d{2,4})?/g) ?? [];
+
+  const byIdentifier = sources
+    .filter((source) => !isGenericHomepage(source.url))
+    .find((source) => {
+      const haystack = normalizeIdentifier(`${source.title} ${source.url}`);
+      return identifiers.some((identifier) => haystack.includes(identifier));
+    });
+
+  if (byIdentifier) return byIdentifier;
+
+  const keywordGroups = [
+    ["tema 1.130", "1130"],
+    ["in rfb 1.234", "1.234"],
+  ];
+
+  for (const [needle, sourceNeedle] of keywordGroups) {
+    if (!normalizedLine.includes(normalizeIdentifier(needle))) continue;
+
+    const match = sources
+      .filter(
+        (source) =>
+          !isGenericHomepage(source.url) &&
+          !isGenericSearchUrl(source.url),
+      )
+      .find((source) =>
+        normalizeIdentifier(`${source.title} ${source.url}`).includes(
+          normalizeIdentifier(sourceNeedle),
+        ),
+      );
+
+    if (match) return match;
+  }
+
+  // Não crie link quando a única opção for uma página institucional genérica.
+  return undefined;
+}
+
+function linkifyBaseLegal(
+  markdown: string,
+  sources: OfficialWebSource[],
+) {
+  const match = markdown.match(
+    /((?:\*\*)?Base legal:(?:\*\*)?)([\s\S]*)$/i,
+  );
+  if (!match || match.index === undefined) return markdown;
+
+  const before = markdown.slice(0, match.index);
+  const heading = match[1];
+  const body = match[2];
+
+  const linkedBody = body
+    .split("\n")
+    .map((line) => {
+      if (!/^\s*[-*•]\s+/.test(line)) {
+        return line;
+      }
+
+      const prefixMatch = line.match(/^(\s*[-*•]\s+)(.*)$/);
+      if (!prefixMatch) return line;
+
+      const content = prefixMatch[2].trim();
+      const knownDirectSource = findKnownDirectLegalSource(content);
+
+      if (knownDirectSource) {
+        // Uma referência jurídica conhecida sempre deve apontar para o ato
+        // oficial direto, mesmo quando o modelo já criou um link genérico.
+        const cleanContent = content.replace(
+          /\[([^\]]+)\]\(https?:\/\/[^)]+\)/gi,
+          "$1",
+        );
+
+        return `${prefixMatch[1]}[${cleanContent}](${knownDirectSource.url})`;
+      }
+
+      // Preserve links específicos já produzidos pelo modelo quando não há
+      // uma fonte direta conhecida no catálogo.
+      if (/\]\(https?:\/\//i.test(content)) {
+        return line;
+      }
+
+      const source = findBestSourceForLegalLine(content, sources);
+      if (!source) return line;
+
+      return `${prefixMatch[1]}[${content}](${source.url})`;
+    })
+    .join("\n");
+
+  return `${before}${heading}${linkedBody}`;
+}
+
+function buildSourcesSection(sources: OfficialWebSource[]) {
+  if (!sources.length) {
+    return "";
+  }
+
+  const inlineSources = sources
+    .map((source) => {
+      try {
+        const domain = new URL(source.url).hostname.replace(/^www\./, "");
+        return `- [${domain}](${source.url})`;
+      } catch {
+        return `- [${source.title}](${source.url})`;
+      }
+    })
+    .join("; ");
+
+  return `Fontes: ${inlineSources}.`;
+}
+
+function removeExistingInlineSourcesFooter(markdown: string) {
+  return markdown
+    .replace(
+      /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*Fontes\s*(?:\*\*|__)?\s*:\s*(?!consultadas)[^\n]*(?=\n|$)/gi,
+      "",
+    )
+    .trim();
+}
+
+function formatExistingSourcesSectionsInline(markdown: string) {
+  const headingPattern =
+    /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*Fontes\s+consultadas\s*(?:\*\*|__)?\s*:?\s*(?=\n|$)/gi;
+
+  const matches = Array.from(markdown.matchAll(headingPattern));
+
+  if (!matches.length) {
+    return markdown.trim();
+  }
+
+  let result = "";
+  let cursor = 0;
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const start = match.index ?? 0;
+    const contentStart = start + match[0].length;
+    const nextStart =
+      index + 1 < matches.length
+        ? matches[index + 1].index ?? markdown.length
+        : markdown.length;
+
+    result += markdown.slice(cursor, start);
+
+    const sectionContent = markdown
+      .slice(contentStart, nextStart)
+      .trim();
+
+    const items = sectionContent
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^[-*•]\s+/, "").trim())
+      .filter(Boolean);
+
+    if (items.length) {
+      result += `\n\nFontes consultadas: ${items
+        .map((item) => `- ${item}`)
+        .join("; ")}.`;
+    } else {
+      result += "\n\nFontes consultadas:";
+    }
+
+    cursor = nextStart;
+  }
+
+  result += markdown.slice(cursor);
+
+  return result.trim();
+}
+
+function finalizeAssistantText(
+  markdown: string,
+  sources: OfficialWebSource[],
+  allowedDomains: string[],
+) {
+  const mergedSources = new Map<string, OfficialWebSource>();
+
+  for (const source of sources) {
+    const canonicalUrl = canonicalizeOfficialUrl(source.url);
+    mergedSources.set(canonicalUrl, {
+      ...source,
+      url: canonicalUrl,
+    });
+  }
+
+  // Preserve fontes oficiais específicas retornadas pelo web_search.
+  collectMarkdownOfficialSources(
+    markdown,
+    allowedDomains,
+    mergedSources,
+  );
+
+  // Referências jurídicas conhecidas sempre recebem o documento oficial
+  // direto, mesmo quando o modelo devolve uma página institucional genérica.
+  collectKnownDirectLegalSources(markdown, mergedSources);
+
+  const selectedSources = selectBestOfficialSources(
+    Array.from(mergedSources.values()),
+  );
+
+  const withoutDuplicateSections = keepOnlyFirstSourcesSection(markdown);
+  const withoutOldFooter = removeExistingInlineSourcesFooter(
+    withoutDuplicateSections,
+  );
+  const withDirectLegalLinks = linkifyBaseLegal(
+    withoutOldFooter,
+    selectedSources,
+  );
+  const sourcesFooter = buildSourcesSection(selectedSources);
+
+  return sourcesFooter
+    ? `${withDirectLegalLinks}\n\n${sourcesFooter}`.trim()
+    : withDirectLegalLinks.trim();
+}
+
+async function saveMessage(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  productTier: IndividualProductTier;
+  responseMode: IndividualResponseMode;
+}) {
+  const { supabase, conversationId, role, content, productTier, responseMode } = params;
+
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      role,
+      content,
+      event: "message",
+      private: false,
+      payload: {
+        scope: "individual",
+        productTier,
+        responseMode,
+      },
+    })
+    .select("id,conversation_id,role,content,created_at")
+    .single<MessageRow>();
+
+  if (error || !data) {
+    throw new Error(`Erro ao salvar mensagem ${role}: ${error?.message ?? "sem retorno"}`);
+  }
+
+  return data;
+}
+
+export async function POST(req: Request) {
+  let body: ChatRequestBody;
+
+  try {
+    body = (await req.json()) as ChatRequestBody;
+  } catch {
+    return jsonError("Body inválido. Envie JSON.", 400);
+  }
+
+  const userText = normalizeMessage(body);
+
+  if (!userText) {
+    return jsonError("Mensagem vazia.", 400);
+  }
+
+  if (userText.length > MAX_USER_MESSAGE_LENGTH) {
+    return jsonError(`Mensagem muito longa. Limite: ${MAX_USER_MESSAGE_LENGTH} caracteres.`, 400);
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return jsonError("OPENAI_API_KEY não configurada.", 500);
+  }
+
+  const supabase = createSupabaseRouteClient();
+  const access = await getCurrentUserAccess(supabase);
+
+  if (!access.user) {
+    return jsonError("Usuário não autenticado.", 401);
+  }
+
+  const ui = getResolvedUiState(access.resolved);
+  const accessStatus = toFrontendAccessStatus(access.resolved);
+  const normalizedTier = normalizeProductTier(access.resolved.effectiveProductTier);
+
+  if (normalizedTier === "governance") {
+    return jsonError(
+      "Este usuário está no produto Governança. Use o chat de Governança em /governanca/chat.",
+      403,
+      {
+        productTier: "governance",
+        requiredRoute: "/api/governance/chat",
+      },
+    );
+  }
+
+  if (normalizedTier !== "strategic") {
+    return jsonError(
+      "Este endpoint é exclusivo do Publ.IA Estratégico. Use /api/essential/chat para o Essencial.",
+      403,
+      {
+        productTier: normalizedTier,
+        requiredRoute: "/api/essential/chat",
+      },
+    );
+  }
+
+  const productTier: IndividualProductTier = "strategic";
+  const effectiveResponseMode = normalizeResponseMode(body.responseMode);
+
+  if (!ui.isActive) {
+    return jsonError("Acesso inativo. Verifique sua assinatura ou período de teste.", 403, {
+      accessBlocked: true,
+      accessStatus,
+      productTier,
+      allowedResponseModes: allowedStrategicResponseModes,
+    });
+  }
+
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  try {
+    const conversation = await getOrCreateConversation({
+      supabase,
+      userId: access.user.id,
+      conversationId: body.conversationId,
+      firstMessage: userText,
+    });
+
+    const userMessage = await saveMessage({
+      supabase,
+      conversationId: conversation.id,
+      role: "user",
+      content: userText,
+      productTier,
+      responseMode: effectiveResponseMode,
+    });
+
+    await supabase
+      .from("conversations")
+      .update({
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", conversation.id)
+      .eq("user_id", access.user.id)
+      .eq("product_tier", "strategic");
+
+    const selectedPdfIds = Array.isArray(body.selectedPdfIds)
+      ? body.selectedPdfIds.filter((id) => uuidRe.test(String(id)))
+      : [];
+
+    const [history, pdfContext] = await Promise.all([
+      loadRecentHistory({ supabase, conversationId: conversation.id }),
+      loadPdfContext({
+        supabase,
+        userId: access.user.id,
+        conversationId: conversation.id,
+        pdfMode: body.pdfMode ?? "all",
+        selectedPdfIds,
+      }),
+    ]);
+
+    const legalSignalText = pdfContext
+      ? `${userText}\n\nCONTEÚDO DOS PDFs SELECIONADOS:\n${trimText(
+          pdfContext,
+          8000,
+        )}`
+      : userText;
+
+    // Quando há PDFs selecionados, a Base Legal e a busca oficial também
+    // consideram as referências normativas presentes nos documentos.
+    // Assim, perguntas genéricas como "resumir" ou "analisar" não eliminam
+    // a fundamentação jurídica encontrada no conteúdo anexado.
+    const legalGuardrails = buildStrategicLegalGuardrails(legalSignalText);
+    const hasLegalGuardrails = legalGuardrails.trim().length > 0;
+
+    const officialWeb = resolveEssentialOfficialWeb(legalSignalText);
+    const officialWebInstruction = buildOfficialWebInstruction(officialWeb);
+
+    const instructions = buildPrompt({
+      responseMode: effectiveResponseMode,
+      pdfContext,
+      legalGuardrails,
+      officialWebInstruction,
+    });
+
+    const input = hasLegalGuardrails
+      ? [
+          {
+            role: "user" as const,
+            content: userText,
+          },
+        ]
+      : history.map((message) => ({
+          role: message.role,
+          content: message.content,
+        }));
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+
+        function send(event: string, data: unknown) {
+          controller.enqueue(encoder.encode(sse(event, data)));
+        }
+
+        try {
+          send("meta", {
+            conversation: {
+              id: conversation.id,
+              title: conversation.title ?? "Nova conversa",
+            },
+            userMessage,
+            productTier,
+            allowedResponseModes: allowedStrategicResponseModes,
+            effectiveResponseMode,
+          });
+
+          let assistantText = "";
+          const officialSources = new Map<string, OfficialWebSource>();
+
+          const openaiStream = await openai.responses.create({
+            model: OPENAI_MODEL,
+            instructions,
+            input,
+            tools: [
+              {
+                type: "web_search",
+                filters: {
+                  allowed_domains: officialWeb.allowedDomains,
+                },
+                external_web_access: true,
+                search_context_size: "medium",
+              },
+            ],
+            tool_choice: "required",
+            include: ["web_search_call.action.sources"],
+            max_output_tokens: 6000,
+            stream: true,
+          } as any);
+
+          for await (const event of openaiStream as any) {
+            collectKnownEventSources(
+              event,
+              officialWeb.allowedDomains,
+              officialSources,
+            );
+
+            if (event?.type !== "response.output_text.delta") continue;
+
+            const deltaText = String(event.delta ?? "");
+            if (!deltaText) continue;
+
+            assistantText += deltaText;
+            send("delta", { text: deltaText });
+          }
+
+          assistantText = finalizeAssistantText(
+            assistantText.trim(),
+            Array.from(officialSources.values()),
+            officialWeb.allowedDomains,
+          );
+
+          assistantText = finalizeStrategicLegalReferences(assistantText);
+
+          if (!assistantText) {
+            throw new Error("A IA não retornou uma resposta válida.");
+          }
+
+          const assistantMessage = await saveMessage({
+            supabase,
+            conversationId: conversation.id,
+            role: "assistant",
+            content: assistantText,
+            productTier,
+            responseMode: effectiveResponseMode,
+          });
+
+          await supabase
+            .from("conversations")
+            .update({
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", conversation.id)
+            .eq("user_id", access.user!.id)
+            .eq("product_tier", "strategic");
+
+          send("done", {
+            assistantMessage,
+            conversation: {
+              id: conversation.id,
+              title: conversation.title ?? "Nova conversa",
+            },
+          });
+        } catch (error) {
+          console.error("[/api/strategic/chat] erro no stream:", error);
+
+          send("error", {
+            error:
+              error instanceof Error
+                ? error.message
+                : "Erro ao gerar resposta da IA.",
+            productTier,
+            accessStatus,
+          });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: SSE_HEADERS,
+    });
+  } catch (error) {
+    console.error("[/api/strategic/chat] erro:", error);
+
+    return jsonError(
+      error instanceof Error ? error.message : "Erro inesperado no chat.",
+      500,
+      {
+        productTier,
+        accessStatus,
+      },
+    );
+  }
+}

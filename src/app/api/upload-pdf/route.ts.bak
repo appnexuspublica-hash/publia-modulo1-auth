@@ -351,7 +351,8 @@ async function setConversationActivePdf(params: {
       pdf_enabled: true,
     } as never)
     .eq("id", conversationId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("product_tier", productTier);
 
   if (conversationUpdateError) {
     throw new Error(
@@ -471,6 +472,8 @@ export async function POST(request: NextRequest) {
       pendingStorageUploadFile = fileValue;
 
       body = {
+        // product="governance" separa a Governança do fluxo comercial
+        // compartilhado pelo Publ.IA Essencial/Estratégico.
         product: String(formData.get("product") ?? "").trim(),
         conversationId: conversationIdFromForm,
         fileName: fileValue.name,
@@ -532,9 +535,10 @@ export async function POST(request: NextRequest) {
     } else {
       const { data: conversation, error: conversationError } = await supabase
         .from("conversations")
-        .select("id")
+        .select("id, product_tier")
         .eq("id", conversationId)
         .eq("user_id", user.id)
+        .eq("product_tier", productTier)
         .maybeSingle();
 
       if (conversationError) {
@@ -553,7 +557,35 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const planValidation = await validatePdfUploadByPlan(supabase, user.id);
+    // PUBL.IA GOVERNANÇA:
+    // Uploads iniciados pela Governança NÃO dependem da assinatura do
+    // Publ.IA Essencial/Estratégico. A autorização institucional já foi
+    // validada acima pela conversa de Governança do usuário.
+    //
+    // PUBL.IA ESSENCIAL/ESTRATÉGICO:
+    // Continuam usando a regra comercial normal de plano, limites e bloqueio.
+    const planValidation = isGovernanceUpload
+      ? ({
+          allowed: true,
+          limit: null,
+          used: 0,
+          remaining: null,
+          period: null,
+          blockedMessage: null,
+          accessStatus: "subscription_active",
+          isAdmin: false,
+          productTier: "governance",
+          capabilities: {
+            maxPdfsPerConversation: getConversationPdfLimit({
+              isAdmin: false,
+              productTier: "governance",
+              capabilities: { maxPdfsPerConversation: STRATEGIC_PDFS_PER_CONVERSATION },
+            }),
+            maxPdfUploadsPerAccount: null,
+            maxPdfUploadsPerMonth: getPdfUploadsPerMonthForTier("governance"),
+          },
+        } satisfies PdfUploadPlanValidation)
+      : await validatePdfUploadByPlan(supabase, user.id);
 
     if (!planValidation.allowed) {
       return NextResponse.json(

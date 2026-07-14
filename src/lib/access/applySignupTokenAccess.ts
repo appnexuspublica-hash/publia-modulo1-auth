@@ -16,6 +16,11 @@ import type {
 
 type SignupTokenGrantKind = "trial" | "subscription" | "upgrade";
 
+const TRIAL_DURATION_DAYS: Record<ProductTier, number> = {
+  essential: 7,
+  strategic: 7,
+};
+
 type SignupTokenRow = {
   id: string;
   token: string;
@@ -135,7 +140,7 @@ function resolveTrialDays(
     return trialDays;
   }
 
-  return productTier === "strategic" ? 7 : 15;
+  return TRIAL_DURATION_DAYS[productTier];
 }
 
 function resolveTrialMessageLimit(productTier: ProductTier): number {

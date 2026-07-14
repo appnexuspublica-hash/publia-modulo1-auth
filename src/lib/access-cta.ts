@@ -37,7 +37,7 @@ type AccessLike = {
   isAdmin?: boolean;
 } | null | undefined;
 
-const SUBSCRIBE_URL = "https://nexuspublica.com.br/assinar-publ-ia-agora/";
+const SUBSCRIBE_URL = "https://nexuspublica.com.br/publia#planos";
 
 const RENEW_URLS = {
   strategic: {

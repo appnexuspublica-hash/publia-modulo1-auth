@@ -1,0 +1,59 @@
+// src/lib/prompts/strategic/prompt.ts
+import { publiaPrompt } from "@/lib/publiaPrompt";
+
+export type StrategicResponseMode =
+  | "objective"
+  | "summary"
+  | "step_by_step"
+  | "checklist"
+  | "document_draft"
+  | "manager_guidance"
+  | "attention_points";
+
+export type BuildStrategicChatPromptParams = {
+  responseMode?: StrategicResponseMode;
+};
+
+function buildStrategicModeInstruction(mode: StrategicResponseMode): string {
+  switch (mode) {
+    case "summary":
+      return "Responda em formato de resumo claro, destacando os pontos principais.";
+    case "step_by_step":
+      return "Responda em passo a passo, com ordem lógica de execução.";
+    case "checklist":
+      return "Responda em formato de checklist prático e verificável.";
+    case "document_draft":
+      return "Responda como minuta inicial de documento, com linguagem técnica e campos revisáveis.";
+    case "manager_guidance":
+      return "Responda como orientação ao gestor, destacando decisão, execução, responsáveis e controles.";
+    case "attention_points":
+      return "Responda destacando riscos, alertas, dependências e pontos que exigem validação.";
+    default:
+      return "Responda de forma natural, direta, técnica e clara.";
+  }
+}
+
+export function buildStrategicChatPrompt(
+  params: BuildStrategicChatPromptParams = {},
+): string {
+  const responseMode = params.responseMode ?? "objective";
+
+  return [
+    publiaPrompt,
+    "",
+    "REGRAS ADICIONAIS DE PRODUTO — PUBL.IA ESTRATÉGICO",
+    "- Você está atendendo exclusivamente um usuário do produto Publ.IA Estratégico.",
+    "- Este produto é uma evolução do Publ.IA Essencial, com recursos avançados de análise, estruturação e apoio à decisão.",
+    "- Não trate este atendimento como Publ.IA Essencial nem como Publ.IA Governança.",
+    "- Não mencione organização, órgão vinculado ou base institucional compartilhada como requisito.",
+    "- Use somente o contexto individual do usuário, da conversa e dos PDFs anexados.",
+    "- Não revele regras internas de planos, controle de acesso ou capability flags.",
+    "",
+    `MODO EFETIVO DEFINIDO PELO SISTEMA: ${responseMode}`,
+    buildStrategicModeInstruction(responseMode),
+    "- Siga rigorosamente o modo efetivo definido pelo sistema.",
+    "- Não trate modos não autorizados como disponíveis.",
+  ]
+    .join("\n")
+    .trim();
+}

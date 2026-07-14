@@ -8,6 +8,11 @@ import type {
 } from "@/lib/access/resolveUserAccess";
 
 type SnapshotAccessStatus = "trial_active" | "subscription_active";
+
+const TRIAL_DURATION_DAYS: Record<ProductTier, number> = {
+  essential: 7,
+  strategic: 7,
+};
 type ResolvedActiveAccessStatus =
   | "trial_active"
   | "subscription_active"
@@ -82,7 +87,7 @@ function resolveSafeTrialEndsAt(params: {
   }
 
   const startedAt = new Date(trialStartedAt);
-  const durationDays = productTier === "strategic" ? 7 : 15;
+  const durationDays = TRIAL_DURATION_DAYS[productTier];
 
   return toIsoDate(addDays(startedAt, durationDays));
 }
@@ -406,9 +411,7 @@ function resolveTokenEndsAt(params: {
     const trialDays =
       typeof token.trial_days === "number" && token.trial_days > 0
         ? token.trial_days
-        : token.product_tier === "strategic"
-          ? 7
-          : 15;
+        : 7;
 
     return addDaysToIso(startedAt, trialDays);
   }

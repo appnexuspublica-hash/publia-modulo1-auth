@@ -84,7 +84,7 @@ function isGrantKind(value: unknown): value is GrantKind {
 }
 
 function getDefaultTrialDays(productTier: ProductTier) {
-  return productTier === "strategic" ? 7 : 15;
+  return 7;
 }
 
 function resolveDefaultSource(productTier: ProductTier) {

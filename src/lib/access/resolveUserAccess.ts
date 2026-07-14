@@ -128,21 +128,43 @@ function isSnapshotSubscriptionStatus(
   return value === "subscription_active" || value === "active";
 }
 
+function resolveTrialEndsAt(
+  startedAt: string | null,
+  storedEndsAt: string | null,
+): string | null {
+  if (!startedAt) {
+    return storedEndsAt;
+  }
+
+  const startedDate = new Date(startedAt);
+
+  if (Number.isNaN(startedDate.getTime())) {
+    return storedEndsAt;
+  }
+
+  const maximumTrialEnd = new Date(startedDate);
+  maximumTrialEnd.setUTCDate(maximumTrialEnd.getUTCDate() + 7);
+
+  if (!storedEndsAt) {
+    return maximumTrialEnd.toISOString();
+  }
+
+  const storedEndDate = new Date(storedEndsAt);
+
+  if (Number.isNaN(storedEndDate.getTime())) {
+    return maximumTrialEnd.toISOString();
+  }
+
+  return storedEndDate.getTime() <= maximumTrialEnd.getTime()
+    ? storedEndDate.toISOString()
+    : maximumTrialEnd.toISOString();
+}
+
 function normalizeGrant(
   row: UserAccessGrantRow,
   now: Date,
 ): ResolvedGrant | null {
   if (!isProductTier(row.product_tier)) return null;
-
-  const isExpiredByDate = hasExpired(row.ends_at, now);
-  const started = hasStarted(row.started_at, now);
-
-  const isCurrentlyActive =
-    row.status === "active" &&
-    started &&
-    !isExpiredByDate &&
-    !row.canceled_at &&
-    !row.consumed_at;
 
   const grantKind: GrantKind =
     row.grant_kind === "trial" ||
@@ -151,6 +173,21 @@ function normalizeGrant(
     row.grant_kind === "fallback"
       ? row.grant_kind
       : "fallback";
+
+  const effectiveEndsAt =
+    grantKind === "trial"
+      ? resolveTrialEndsAt(row.started_at, row.ends_at)
+      : row.ends_at;
+
+  const isExpiredByDate = hasExpired(effectiveEndsAt, now);
+  const started = hasStarted(row.started_at, now);
+
+  const isCurrentlyActive =
+    row.status === "active" &&
+    started &&
+    !isExpiredByDate &&
+    !row.canceled_at &&
+    !row.consumed_at;
 
   const grantStatus: GrantStatus =
     row.status === "active" ||
@@ -169,7 +206,7 @@ function normalizeGrant(
     source: row.source,
     subscriptionPlan: row.subscription_plan,
     startedAt: row.started_at,
-    endsAt: row.ends_at,
+    endsAt: effectiveEndsAt,
     activatedAt: row.activated_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

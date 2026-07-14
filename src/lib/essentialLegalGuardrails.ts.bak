@@ -1,0 +1,15 @@
+// src/lib/essentialLegalGuardrails.ts
+/**
+ * Proteções normativas do Publ.IA Essencial.
+ *
+ * O Essencial reutiliza a base crítica já consolidada no projeto para temas
+ * jurídicos, fiscais, contábeis, licitatórios e de controle. Esta camada
+ * mantém a rota do Essencial desacoplada da implementação interna e permite
+ * futura migração para um núcleo normativo compartilhado sem alterar o chat.
+ */
+
+import { buildGovernanceLegalGuardrails } from "@/lib/governanceLegalGuardrails";
+
+export function buildEssentialLegalGuardrails(userText: string): string {
+  return buildGovernanceLegalGuardrails(userText);
+}

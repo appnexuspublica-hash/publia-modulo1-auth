@@ -1,0 +1,599 @@
+/**
+ * CHAT INDIVIDUAL
+ *
+ * Usado pelos produtos:
+ * - Publ.IA Essencial
+ * - Publ.IA Estratégico
+ *
+ * CONTRATO ARQUITETURAL:
+ * - Esta rota NÃO usa organização.
+ * - Esta rota NÃO importa getCurrentGovernanceOrganization.
+ * - Esta rota NÃO acessa tabelas governance_*.
+ *
+ * Banco usado:
+ * - conversations
+ * - messages
+ * - pdf_files
+ *
+ * Chave de isolamento:
+ * - user_id
+ *
+ * Governança usa outra rota:
+ * - /api/governance/chat
+ */
+
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import OpenAI from "openai";
+
+import { getCurrentUserAccess } from "@/lib/access/getCurrentUserAccess";
+import {
+  getResolvedUiState,
+  toFrontendAccessStatus,
+} from "@/lib/access/access-helpers";
+import { buildProductScopedPrompt } from "@/lib/publiaPrompt";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type IndividualProductTier = "essential" | "strategic";
+
+type IndividualResponseMode =
+  | "objective"
+  | "summary"
+  | "step_by_step"
+  | "checklist"
+  | "document_draft"
+  | "manager_guidance"
+  | "attention_points";
+
+type ChatRequestBody = {
+  conversationId?: string;
+  message?: string;
+  content?: string;
+  responseMode?: IndividualResponseMode;
+  pdfMode?: "all" | "selected" | "none";
+  selectedPdfIds?: string[];
+};
+
+type ConversationRow = {
+  id: string;
+  user_id: string;
+  title: string | null;
+  deleted_at: string | null;
+  product_tier: IndividualProductTier;
+};
+
+type MessageRow = {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+type PdfFileRow = {
+  id: string;
+  file_name: string;
+  extracted_text: string | null;
+};
+
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL_NO_PDF ||
+  process.env.OPENAI_MODEL ||
+  "gpt-5.1";
+
+const MAX_USER_MESSAGE_LENGTH = 12000;
+const MAX_HISTORY_MESSAGES = 8;
+const MAX_PDF_CONTEXT_CHARS = 12000;
+
+const allowedStrategicResponseModes: IndividualResponseMode[] = [
+  "objective",
+  "summary",
+  "step_by_step",
+  "checklist",
+  "document_draft",
+  "manager_guidance",
+  "attention_points",
+];
+
+const uuidRe =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const SSE_HEADERS: HeadersInit = {
+  "Content-Type": "text/event-stream; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  Connection: "keep-alive",
+  "X-Accel-Buffering": "no",
+};
+
+function createSupabaseRouteClient() {
+  const cookieStore = cookies();
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Variáveis do Supabase ausentes no .env.local.");
+  }
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(name: string, value: string, options: any) {
+        cookieStore.set({ name, value, ...options });
+      },
+      remove(name: string, options: any) {
+        cookieStore.set({ name, value: "", ...options });
+      },
+    },
+  });
+}
+
+function sse(event: string, data: unknown) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function jsonError(message: string, status = 400, extra?: Record<string, unknown>) {
+  return NextResponse.json(
+    {
+      error: message,
+      ...extra,
+    },
+    { status },
+  );
+}
+
+function normalizeMessage(body: ChatRequestBody) {
+  return String(body.message ?? body.content ?? "").trim();
+}
+
+function normalizeProductTier(value: unknown): IndividualProductTier | "governance" {
+  if (value === "strategic") return "strategic";
+  if (value === "governance") return "governance";
+  return "essential";
+}
+
+function normalizeResponseMode(
+  value: unknown,
+  productTier: IndividualProductTier,
+): IndividualResponseMode {
+  if (productTier !== "strategic") return "objective";
+
+  return allowedStrategicResponseModes.includes(value as IndividualResponseMode)
+    ? (value as IndividualResponseMode)
+    : "objective";
+}
+
+function createTitleFromMessage(message: string) {
+  const clean = message.replace(/\s+/g, " ").trim();
+  return clean.length > 70 ? `${clean.slice(0, 70)}...` : clean || "Nova conversa";
+}
+
+function trimText(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[Conteúdo cortado para respeitar o limite de contexto.]`;
+}
+
+function buildModeInstruction(mode: IndividualResponseMode) {
+  switch (mode) {
+    case "summary":
+      return "Responda em formato de resumo claro, com os pontos principais.";
+    case "step_by_step":
+      return "Responda em passo a passo, com ordem lógica de execução.";
+    case "checklist":
+      return "Responda em formato de checklist prático.";
+    case "document_draft":
+      return "Responda como minuta inicial de documento, mantendo linguagem técnica e revisável.";
+    case "manager_guidance":
+      return "Responda com orientação gerencial, destacando decisão, risco e próximo passo.";
+    case "attention_points":
+      return "Responda destacando pontos de atenção, riscos e cuidados.";
+    case "objective":
+    default:
+      return "Responda de forma objetiva, clara e útil.";
+  }
+}
+
+async function getOrCreateConversation(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  userId: string;
+  conversationId?: string;
+  firstMessage: string;
+}) {
+  const { supabase, userId, conversationId, firstMessage } = params;
+
+  if (conversationId && uuidRe.test(conversationId)) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id,user_id,title,deleted_at,product_tier")
+      .eq("id", conversationId)
+      .eq("user_id", userId)
+      .eq("product_tier", "strategic")
+      .is("deleted_at", null)
+      .maybeSingle<ConversationRow>();
+
+    if (error) {
+      throw new Error(`Erro ao buscar conversa: ${error.message}`);
+    }
+
+    if (!data) {
+      throw new Error("Conversa não encontrada ou sem permissão.");
+    }
+
+    return data;
+  }
+
+  const { data, error } = await supabase
+    .from("conversations")
+    .insert({
+      user_id: userId,
+      title: createTitleFromMessage(firstMessage),
+      pdf_enabled: false,
+      product_tier: "strategic",
+    })
+    .select("id,user_id,title,deleted_at,product_tier")
+    .single<ConversationRow>();
+
+  if (error || !data) {
+    throw new Error(`Erro ao criar conversa: ${error?.message ?? "sem retorno"}`);
+  }
+
+  return data;
+}
+
+async function loadRecentHistory(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  conversationId: string;
+}) {
+  const { supabase, conversationId } = params;
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id,conversation_id,role,content,created_at")
+    .eq("conversation_id", conversationId)
+    .in("role", ["user", "assistant"])
+    .order("created_at", { ascending: false })
+    .limit(MAX_HISTORY_MESSAGES)
+    .returns<MessageRow[]>();
+
+  if (error) {
+    throw new Error(`Erro ao carregar histórico: ${error.message}`);
+  }
+
+  return (data ?? []).reverse();
+}
+
+async function loadPdfContext(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  userId: string;
+  conversationId: string;
+  pdfMode: ChatRequestBody["pdfMode"];
+  selectedPdfIds: string[];
+}) {
+  const { supabase, userId, conversationId, pdfMode, selectedPdfIds } = params;
+
+  if (pdfMode === "none") return "";
+
+  let query = supabase
+    .from("pdf_files")
+    .select("id,file_name,extracted_text")
+    .eq("user_id", userId)
+    .eq("conversation_id", conversationId)
+    .not("extracted_text", "is", null);
+
+  if (pdfMode === "selected" && selectedPdfIds.length > 0) {
+    query = query.in("id", selectedPdfIds);
+  }
+
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .limit(5)
+    .returns<PdfFileRow[]>();
+
+  if (error) {
+    throw new Error(`Erro ao carregar PDFs da conversa: ${error.message}`);
+  }
+
+  const context = (data ?? [])
+    .map((pdf) => {
+      const text = String(pdf.extracted_text ?? "").trim();
+      if (!text) return "";
+      return [
+        `PDF: ${pdf.file_name}`,
+        trimText(text, Math.floor(MAX_PDF_CONTEXT_CHARS / Math.max(1, data?.length ?? 1))),
+      ].join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+
+  return trimText(context, MAX_PDF_CONTEXT_CHARS);
+}
+
+function buildPrompt(params: {
+  productTier: IndividualProductTier;
+  responseMode: IndividualResponseMode;
+  pdfContext: string;
+}) {
+  const { productTier, responseMode, pdfContext } = params;
+
+  const scopedPrompt = buildProductScopedPrompt({
+    productTier,
+    responseMode,
+  } as any);
+
+  return [
+    scopedPrompt,
+    "",
+    "CONTRATO DO CHAT INDIVIDUAL:",
+    "- Você está no chat individual do Publ.IA Essencial ou Publ.IA Estratégico.",
+    "- Não trate este atendimento como Governança.",
+    "- Não mencione organização, órgão vinculado ou base institucional compartilhada como requisito.",
+    "- Use apenas o contexto do usuário, da conversa e dos PDFs individuais anexados.",
+    "",
+    buildModeInstruction(responseMode),
+    "",
+    pdfContext
+      ? [
+          "CONTEXTO DOS PDFs INDIVIDUAIS ANEXADOS:",
+          pdfContext,
+          "",
+          "Use os PDFs como fonte de apoio quando forem relevantes. Se a resposta não estiver no PDF, diga isso com clareza.",
+        ].join("\n")
+      : "Não há contexto de PDF anexado para esta resposta.",
+  ].join("\n");
+}
+
+async function saveMessage(params: {
+  supabase: ReturnType<typeof createSupabaseRouteClient>;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  productTier: IndividualProductTier;
+  responseMode: IndividualResponseMode;
+}) {
+  const { supabase, conversationId, role, content, productTier, responseMode } = params;
+
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      role,
+      content,
+      event: "message",
+      private: false,
+      payload: {
+        scope: "individual",
+        productTier,
+        responseMode,
+      },
+    })
+    .select("id,conversation_id,role,content,created_at")
+    .single<MessageRow>();
+
+  if (error || !data) {
+    throw new Error(`Erro ao salvar mensagem ${role}: ${error?.message ?? "sem retorno"}`);
+  }
+
+  return data;
+}
+
+export async function POST(req: Request) {
+  let body: ChatRequestBody;
+
+  try {
+    body = (await req.json()) as ChatRequestBody;
+  } catch {
+    return jsonError("Body inválido. Envie JSON.", 400);
+  }
+
+  const userText = normalizeMessage(body);
+
+  if (!userText) {
+    return jsonError("Mensagem vazia.", 400);
+  }
+
+  if (userText.length > MAX_USER_MESSAGE_LENGTH) {
+    return jsonError(`Mensagem muito longa. Limite: ${MAX_USER_MESSAGE_LENGTH} caracteres.`, 400);
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return jsonError("OPENAI_API_KEY não configurada.", 500);
+  }
+
+  const supabase = createSupabaseRouteClient();
+  const access = await getCurrentUserAccess(supabase);
+
+  if (!access.user) {
+    return jsonError("Usuário não autenticado.", 401);
+  }
+
+  const ui = getResolvedUiState(access.resolved);
+  const accessStatus = toFrontendAccessStatus(access.resolved);
+  const normalizedTier = normalizeProductTier(access.resolved.effectiveProductTier);
+
+  if (normalizedTier === "governance") {
+    return jsonError(
+      "Este usuário está no produto Governança. Use o chat de Governança em /governanca/chat.",
+      403,
+      {
+        productTier: "governance",
+        requiredRoute: "/api/governance/chat",
+      },
+    );
+  }
+
+  if (normalizedTier !== "strategic") {
+    return jsonError(
+      "Este endpoint é exclusivo do Publ.IA Estratégico. Use /api/essential/chat para o Essencial.",
+      403,
+      {
+        productTier: normalizedTier,
+        requiredRoute: "/api/essential/chat",
+      },
+    );
+  }
+
+  const productTier: IndividualProductTier = "strategic";
+  const effectiveResponseMode = normalizeResponseMode(body.responseMode, productTier);
+
+  if (!ui.isActive) {
+    return jsonError("Acesso inativo. Verifique sua assinatura ou período de teste.", 403, {
+      accessBlocked: true,
+      accessStatus,
+      productTier,
+      allowedResponseModes:
+        productTier === "strategic" ? allowedStrategicResponseModes : [],
+    });
+  }
+
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  try {
+    const conversation = await getOrCreateConversation({
+      supabase,
+      userId: access.user.id,
+      conversationId: body.conversationId,
+      firstMessage: userText,
+    });
+
+    const userMessage = await saveMessage({
+      supabase,
+      conversationId: conversation.id,
+      role: "user",
+      content: userText,
+      productTier,
+      responseMode: effectiveResponseMode,
+    });
+
+    await supabase
+      .from("conversations")
+      .update({
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", conversation.id)
+      .eq("user_id", access.user.id)
+      .eq("product_tier", "strategic");
+
+    const selectedPdfIds = Array.isArray(body.selectedPdfIds)
+      ? body.selectedPdfIds.filter((id) => uuidRe.test(String(id)))
+      : [];
+
+    const [history, pdfContext] = await Promise.all([
+      loadRecentHistory({ supabase, conversationId: conversation.id }),
+      loadPdfContext({
+        supabase,
+        userId: access.user.id,
+        conversationId: conversation.id,
+        pdfMode: body.pdfMode ?? "all",
+        selectedPdfIds,
+      }),
+    ]);
+
+    const instructions = buildPrompt({
+      productTier,
+      responseMode: effectiveResponseMode,
+      pdfContext,
+    });
+
+    const input = history.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+
+        function send(event: string, data: unknown) {
+          controller.enqueue(encoder.encode(sse(event, data)));
+        }
+
+        try {
+          send("meta", {
+            conversation: {
+              id: conversation.id,
+              title: conversation.title ?? "Nova conversa",
+            },
+            userMessage,
+            productTier,
+            allowedResponseModes:
+              productTier === "strategic" ? allowedStrategicResponseModes : [],
+            effectiveResponseMode,
+          });
+
+          const response = await openai.responses.create({
+            model: OPENAI_MODEL,
+            instructions,
+            input,
+            max_output_tokens: 1800,
+          } as any);
+
+          const assistantText =
+            String((response as any).output_text ?? "").trim() ||
+            "Não consegui gerar uma resposta agora. Tente novamente.";
+
+          send("delta", { text: assistantText });
+
+          const assistantMessage = await saveMessage({
+            supabase,
+            conversationId: conversation.id,
+            role: "assistant",
+            content: assistantText,
+            productTier,
+            responseMode: effectiveResponseMode,
+          });
+
+          await supabase
+            .from("conversations")
+            .update({
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", conversation.id)
+            .eq("user_id", access.user!.id)
+            .eq("product_tier", "strategic");
+
+          send("done", {
+            assistantMessage,
+            conversation: {
+              id: conversation.id,
+              title: conversation.title ?? "Nova conversa",
+            },
+          });
+        } catch (error) {
+          console.error("[/api/chat] erro no stream:", error);
+
+          send("error", {
+            error:
+              error instanceof Error
+                ? error.message
+                : "Erro ao gerar resposta da IA.",
+            productTier,
+            accessStatus,
+          });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: SSE_HEADERS,
+    });
+  } catch (error) {
+    console.error("[/api/chat] erro:", error);
+
+    return jsonError(
+      error instanceof Error ? error.message : "Erro inesperado no chat.",
+      500,
+      {
+        productTier,
+        accessStatus,
+      },
+    );
+  }
+}
