@@ -1,0 +1,133 @@
+export type OfficialWebSource = {
+  title: string;
+  url: string;
+};
+
+type CollectOfficialWebSourcesOptions = {
+  allowedDomains?: string[];
+  maxItems?: number;
+};
+
+function cleanText(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeHost(value: string) {
+  return value.trim().toLowerCase().replace(/^www\./, "");
+}
+
+function isAllowedOfficialUrl(url: string, allowedDomains: string[]) {
+  try {
+    const hostname = normalizeHost(new URL(url).hostname);
+
+    if (allowedDomains.length === 0) {
+      return hostname.endsWith(".gov.br") || hostname.endsWith(".jus.br");
+    }
+
+    return allowedDomains.some((domain) => {
+      const normalizedDomain = normalizeHost(domain);
+      return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function inferTitle(value: Record<string, unknown>, url: string) {
+  const directTitle =
+    cleanText(value.title) ||
+    cleanText(value.name) ||
+    cleanText(value.page_title) ||
+    cleanText(value.site_name);
+
+  if (directTitle) {
+    return directTitle;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "");
+  } catch {
+    return "Fonte oficial consultada";
+  }
+}
+
+export function collectOfficialWebSources(
+  payload: unknown,
+  options: CollectOfficialWebSourcesOptions = {},
+): OfficialWebSource[] {
+  const allowedDomains = (options.allowedDomains ?? []).map(normalizeHost);
+  const maxItems = Math.max(1, Math.min(12, options.maxItems ?? 8));
+  const sources = new Map<string, OfficialWebSource>();
+  const visited = new Set<object>();
+
+  function addSource(candidate: Record<string, unknown>) {
+    const url =
+      cleanText(candidate.url) ||
+      cleanText(candidate.uri) ||
+      cleanText(candidate.link);
+
+    if (!url || !/^https?:\/\//i.test(url)) {
+      return;
+    }
+
+    if (!isAllowedOfficialUrl(url, allowedDomains)) {
+      return;
+    }
+
+    let normalizedUrl = url;
+    try {
+      const parsed = new URL(url);
+      parsed.hash = "";
+      normalizedUrl = parsed.toString();
+    } catch {
+      return;
+    }
+
+    const key = normalizedUrl.toLowerCase();
+    const incoming = {
+      title: inferTitle(candidate, normalizedUrl),
+      url: normalizedUrl,
+    };
+    const existing = sources.get(key);
+
+    if (!existing || incoming.title.length > existing.title.length) {
+      sources.set(key, incoming);
+    }
+  }
+
+  function visit(value: unknown) {
+    if (sources.size >= maxItems || value === null || value === undefined) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+        if (sources.size >= maxItems) break;
+      }
+      return;
+    }
+
+    if (typeof value !== "object") {
+      return;
+    }
+
+    const objectValue = value as Record<string, unknown>;
+    if (visited.has(objectValue)) {
+      return;
+    }
+    visited.add(objectValue);
+
+    addSource(objectValue);
+
+    for (const nestedValue of Object.values(objectValue)) {
+      visit(nestedValue);
+      if (sources.size >= maxItems) break;
+    }
+  }
+
+  visit(payload);
+
+  return Array.from(sources.values()).slice(0, maxItems);
+}

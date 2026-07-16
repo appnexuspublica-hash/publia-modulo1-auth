@@ -35,7 +35,6 @@ type ChatInputProps = {
   inputValue?: string;
   onInputValueChange?: (value: string) => void;
   externalTextareaRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
-  helperText?: string;
 };
 
 const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
@@ -75,7 +74,6 @@ export function ChatInput({
   inputValue,
   onInputValueChange,
   externalTextareaRef,
-  helperText,
 }: ChatInputProps) {
   const [internalValue, setInternalValue] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -201,7 +199,7 @@ export function ChatInput({
         className="flex flex-col gap-3 lg:flex-row lg:items-end"
       >
         <div
-          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-2 text-sm shadow-sm ${
+          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-3 text-sm shadow-sm ${
             isBlockedState
               ? "border-amber-300/70 opacity-90"
               : !isStrategic
@@ -229,7 +227,7 @@ export function ChatInput({
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
                   ? "Validando..."
-                  : "Digite sua pergunta..."
+                  : "Envie sua pergunta..."
             }
             value={value}
             onChange={handleChange}
@@ -270,9 +268,9 @@ export function ChatInput({
               style={
                 !isBlockedState && isStrategic
                   ? {
-                      backgroundColor: theme.colors.text,
+                      backgroundColor: theme.colors.primary,
                       color: "#ffffff",
-                      border: `1px solid ${theme.colors.text}`,
+                      border: `1px solid ${theme.colors.primary}`,
                     }
                   : undefined
               }
@@ -298,7 +296,7 @@ export function ChatInput({
                 borderColor: isStrategic
                   ? theme.colors.borderStrong
                   : "#dedede",
-                color: isStrategic ? theme.colors.text : "#0f3a4a",
+                color: isStrategic ? theme.colors.primary : "#0f3a4a",
               }}
               aria-haspopup="listbox"
               aria-expanded={isMenuOpen}
@@ -331,7 +329,7 @@ export function ChatInput({
                   className="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-[0.12em]"
                   style={{
                     color: isStrategic
-                      ? theme.colors.text
+                      ? theme.colors.primary
                       : "#0f3a4a",
                   }}
                 >
@@ -352,7 +350,7 @@ export function ChatInput({
                         className="flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm font-semibold transition"
                         style={{
                           color: isStrategic
-                            ? theme.colors.text
+                            ? theme.colors.primary
                             : isActive
                               ? "#0f3a4a"
                               : "#334155",
@@ -375,24 +373,18 @@ export function ChatInput({
         )}
       </form>
 
-      {helperText ? (
-        <div className="w-full px-4">
+      {showResponseModes && (
+        <div className="mx-auto w-full max-w-3xl px-3">
           <div
             className="text-[11px]"
             style={{
               color: isStrategic ? theme.colors.textMuted : "#475569",
             }}
           >
-            {helperText}
-          </div>
-        </div>
-      ) : showResponseModes && !isStrategic ? (
-        <div className="mx-auto w-full max-w-3xl px-3">
-          <div className="text-[11px]" style={{ color: "#475569" }}>
             Modo de Resposta: {selectedModeLabel}
           </div>
         </div>
-      ) : null}
+      )}
 
       <div
         className="w-full px-4 py-3 text-center text-[12px] leading-relaxed"

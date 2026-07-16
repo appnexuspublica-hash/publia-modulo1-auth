@@ -1,0 +1,149 @@
+import {
+  collectOfficialWebSources,
+  collectOfficialWebSourcesFromText,
+  type OfficialWebSource,
+} from "@/lib/official-web/source-collector";
+
+type BuildGovernanceEvidenceContextParams = {
+  openai: any;
+  model: string;
+  question: string;
+  topicLabel: string;
+  allowedDomains: string[];
+  researchChecklist: string[];
+};
+
+export type GovernanceEvidenceContextResult = {
+  instruction: string;
+  sources: OfficialWebSource[];
+  rawEvidenceText: string;
+};
+
+function deduplicateSources(
+  sources: OfficialWebSource[],
+  maxItems = 10,
+): OfficialWebSource[] {
+  const unique = new Map<string, OfficialWebSource>();
+
+  for (const source of sources) {
+    const key = source.url.trim().toLowerCase();
+    const existing = unique.get(key);
+
+    if (!existing || source.title.length > existing.title.length) {
+      unique.set(key, source);
+    }
+  }
+
+  return Array.from(unique.values()).slice(0, maxItems);
+}
+
+/**
+ * Pesquisa e organiza evidências oficiais antes da resposta principal.
+ *
+ * A função não redige a resposta ao usuário. Ela produz um dossiê curto,
+ * com atos, decisões, guias e URLs oficiais que a geração principal deverá
+ * usar e citar. Assim, o Governança deixa de tentar reconstruir evidências
+ * apenas depois que o texto já foi produzido.
+ */
+export async function buildGovernanceEvidenceContext(
+  params: BuildGovernanceEvidenceContextParams,
+): Promise<GovernanceEvidenceContextResult> {
+  const response = await params.openai.responses.create({
+    model: params.model,
+    instructions: [
+      "Você é o resolvedor de evidências oficiais do Publ.IA Governança.",
+      "Sua tarefa é pesquisar, confirmar e organizar evidências antes da resposta principal.",
+      "Não responda como consultor ao usuário e não produza recomendações administrativas.",
+      "Localize documentos oficiais específicos, evitando páginas iniciais ou domínios genéricos quando existir URL direta.",
+      "Confirme número, ano, órgão, vigência e relação com a pergunta.",
+      "Não trate frases, recomendações ou conclusões como fontes.",
+      "",
+      `TEMA CLASSIFICADO: ${params.topicLabel}`,
+      "",
+      "CHECKLIST DE PESQUISA:",
+      ...params.researchChecklist.map((item) => `- ${item}`),
+      "",
+      "FORMATO OBRIGATÓRIO:",
+      "BASE LEGAL E JURISPRUDÊNCIA:",
+      "- Título oficial completo | dispositivo ou utilidade | URL oficial específica",
+      "",
+      "FONTES TÉCNICAS OFICIAIS:",
+      "- Título oficial completo | órgão responsável | URL oficial específica",
+      "",
+      "REGRAS:",
+      "- Inclua somente documentos realmente encontrados.",
+      "- Para acórdão, informe número, ano e colegiado.",
+      "- Para lei, decreto ou instrução normativa, informe número e ano.",
+      "- Para guia ou manual, informe o título oficial.",
+      "- Não use rótulos como 'gov.br', 'portal.tcu.gov.br' ou 'pesquisa.apps.tcu.gov.br' quando for possível identificar o documento.",
+      "- Não invente URL nem documento.",
+    ].join("\n"),
+    input: params.question,
+    tools: [
+      {
+        type: "web_search",
+        filters: {
+          allowed_domains: params.allowedDomains,
+        },
+        external_web_access: true,
+        search_context_size: "high",
+      },
+    ],
+    tool_choice: "required",
+    include: ["web_search_call.action.sources"],
+    temperature: 0,
+  } as any);
+
+  const rawEvidenceText = String(response.output_text ?? "").trim();
+
+  const structuredSources = collectOfficialWebSources(response, {
+    allowedDomains: params.allowedDomains,
+    maxItems: 10,
+  });
+
+  const contextualSources = collectOfficialWebSourcesFromText(
+    rawEvidenceText,
+    {
+      allowedDomains: params.allowedDomains,
+      maxItems: 10,
+    },
+  );
+
+  const sources = deduplicateSources(
+    [...contextualSources, ...structuredSources],
+    10,
+  );
+
+  const sourceLedger = sources.length
+    ? sources
+        .map(
+          (source, index) =>
+            `${index + 1}. ${source.title} | ${source.url}`,
+        )
+        .join("\n")
+    : "Nenhuma fonte estruturada adicional foi recuperada.";
+
+  const instruction = [
+    "DOSSIÊ PRÉVIO DE EVIDÊNCIAS OFICIAIS",
+    "",
+    "O conteúdo abaixo foi pesquisado antes da geração principal.",
+    "Use-o como base prioritária para afirmações atuais, legais, normativas, jurisprudenciais ou técnicas.",
+    "Não cite documento que não esteja no dossiê ou em outro contexto oficial fornecido pelo sistema.",
+    "Não transforme recomendações, resumos ou frases do texto em fontes.",
+    "",
+    rawEvidenceText || "A pesquisa prévia não retornou texto descritivo.",
+    "",
+    "CATÁLOGO DE URLs OFICIAIS RECUPERADAS:",
+    sourceLedger,
+    "",
+    "REGRA DE SAÍDA:",
+    "No corpo da resposta, mencione o nome completo dos atos, decisões, guias e manuais efetivamente utilizados.",
+    "A seção final estruturada será montada pelo sistema a partir destas evidências.",
+  ].join("\n");
+
+  return {
+    instruction,
+    sources,
+    rawEvidenceText,
+  };
+}

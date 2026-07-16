@@ -16,7 +16,6 @@
  * - organization_id
  */
 import { NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -27,19 +26,9 @@ import { buildGovernancePrompt } from "@/lib/prompts/governance/prompt";
 import { buildGovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine";
 import { analyzeGovernanceQuery } from "@/lib/governance/knowledge-engine/analyzer";
 import { buildGovernanceFinalAnswer } from "@/lib/governance/knowledge-engine/response-builder";
-import { buildGovernanceEvidenceContext } from "@/lib/governance/evidence-context";
-import { buildGovernanceAnswerPlan } from "@/lib/governance/answer-planner";
 import { filterGovernanceSourcesForResponse } from "@/lib/governance/knowledge-engine/source-filter";
 import { buildGovernanceLegalGuardrails, findGovernanceCriticalKnowledge } from "@/lib/governanceLegalGuardrails";
 import { shouldForceWebFirst } from "@/lib/webFirstDetector";
-import {
-  buildOfficialWebInstruction,
-  resolveEssentialOfficialWeb,
-} from "@/lib/official-web";
-import {
-  collectOfficialWebSources,
-  collectOfficialWebSourcesFromText,
-} from "@/lib/official-web/source-collector";
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import type {
   GovernanceMessage,
@@ -84,104 +73,6 @@ const SSE_HEADERS: HeadersInit = {
   Connection: "keep-alive",
   "X-Accel-Buffering": "no",
 };
-
-function getCompactErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const cause = (error as Error & {
-      cause?: { code?: string; message?: string };
-    }).cause;
-
-    const causeCode =
-      cause && typeof cause.code === "string" ? cause.code : null;
-    const causeMessage =
-      cause && typeof cause.message === "string" ? cause.message : null;
-
-    return [
-      error.name || "Error",
-      causeCode,
-      causeMessage || error.message,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
-
-  if (error && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-
-    return [
-      typeof record.code === "string" ? record.code : null,
-      typeof record.message === "string" ? record.message : null,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
-
-  return String(error);
-}
-
-function isRecoverableExternalError(error: unknown): boolean {
-  const message = getCompactErrorMessage(error).toLowerCase();
-
-  return [
-    "apiconnectionerror",
-    "apiconnectiontimeouterror",
-    "request timed out",
-    "eai_again",
-    "etimedout",
-    "und_err_connect_timeout",
-    "fetch failed",
-    "connection error",
-  ].some((token) => message.includes(token));
-}
-
-async function isGovernanceConversationAvailable(params: {
-  supabase: any;
-  conversationId: string;
-  organizationId: string;
-}): Promise<boolean | null> {
-  const { data, error } = await params.supabase
-    .from("governance_conversations")
-    .select("id")
-    .eq("id", params.conversationId)
-    .eq("organization_id", params.organizationId)
-    .eq("status", "active")
-    .is("deleted_at", null)
-    .maybeSingle();
-
-  if (error) {
-    console.warn(
-      `[governance/chat] Não foi possível confirmar a conversa antes de persistir: ${getCompactErrorMessage(error)}`,
-    );
-    return null;
-  }
-
-  return Boolean(data);
-}
-
-function buildTransientAssistantMessage(params: {
-  organizationId: string;
-  conversationId: string;
-  content: string;
-  responseMode: GovernanceResponseMode;
-  streaming: boolean;
-}): GovernanceMessage {
-  return {
-    id: `unsaved-${randomUUID()}`,
-    organization_id: params.organizationId,
-    conversation_id: params.conversationId,
-    user_id: null,
-    role: "assistant",
-    content: params.content,
-    metadata: {
-      source: "openai",
-      product_tier: "governance",
-      response_mode: params.responseMode,
-      streaming: params.streaming,
-      persistence_skipped: "conversation_removed_during_generation",
-    },
-    created_at: new Date().toISOString(),
-  };
-}
 
 
 let openai: OpenAI | null = null;
@@ -234,7 +125,6 @@ const allowedResponseModes: GovernanceResponseMode[] = [
   "summary",
   "checklist",
   "technical_opinion",
-  "legal_opinion",
   "risk_analysis",
   "attention_points",
   "action_plan",
@@ -318,7 +208,6 @@ function mapGovernanceModeToPromptMode(
       return "checklist";
 
     case "technical_opinion":
-    case "legal_opinion":
     case "draft":
       return "document_draft";
 
@@ -383,29 +272,6 @@ function buildGovernanceModeInstruction(mode: GovernanceResponseMode): string {
         "",
         "É proibido começar com introdução conversacional do tipo 'Na prática' ou 'O ponto central é'.",
         "É proibido responder apenas com tópicos soltos. O formato deve parecer um parecer técnico institucional.",
-      ].join("\n");
-
-    case "legal_opinion":
-      return [
-        "MODO DE RESPOSTA ATIVO: PARECER JURÍDICO.",
-        "OBEDEÇA AO FORMATO: a resposta deve iniciar obrigatoriamente com o título PARECER JURÍDICO.",
-        "Escreva como manifestação jurídica institucional completa, não como parecer técnico, conversa, resumo, checklist, minuta ou orientação ao gestor.",
-        "Use obrigatoriamente estes blocos, nesta ordem:",
-        "PARECER JURÍDICO",
-        "EMENTA",
-        "IDENTIFICAÇÃO",
-        "I. RELATÓRIO",
-        "II. DELIMITAÇÃO DA CONSULTA",
-        "III. FUNDAMENTAÇÃO JURÍDICA",
-        "IV. ANÁLISE DO CASO CONCRETO",
-        "V. RISCOS JURÍDICOS E CONDICIONANTES",
-        "VI. CONCLUSÃO",
-        "VII. RECOMENDAÇÕES",
-        "ASSINATURA",
-        "A conclusão deve classificar o caso como: viável, viável com condicionantes, inviável ou insuficientemente instruído.",
-        "Use campos entre colchetes para dados ausentes. Nunca invente processo, interessado, procurador, cargo, OAB, local ou data.",
-        "Não trate o parecer como vinculante sem norma expressa no contexto.",
-        "Não repita Base Legal nem Fontes consultadas; o backend acrescentará essas seções.",
       ].join("\n");
 
     case "risk_analysis":
@@ -1126,19 +992,6 @@ function buildFinalConsultativeOverride(
   mode: GovernanceResponseMode,
   relation: ConversationRelation = "INICIAL",
 ): string {
-  if (mode === "legal_opinion") {
-    return [
-      "REGRA FINAL OBRIGATÓRIA PARA PARECER JURÍDICO",
-      "A resposta deve iniciar obrigatoriamente com o título: PARECER JURÍDICO.",
-      "Use exatamente os blocos: EMENTA, IDENTIFICAÇÃO, I. RELATÓRIO, II. DELIMITAÇÃO DA CONSULTA, III. FUNDAMENTAÇÃO JURÍDICA, IV. ANÁLISE DO CASO CONCRETO, V. RISCOS JURÍDICOS E CONDICIONANTES, VI. CONCLUSÃO, VII. RECOMENDAÇÕES e ASSINATURA.",
-      "A conclusão deve declarar uma destas posições: viabilidade, viabilidade condicionada, inviabilidade ou impossibilidade de concluir por insuficiência documental.",
-      "Não invente fatos, normas, jurisprudência, documentos, nome de parecerista ou número de OAB.",
-      "Use linguagem jurídica formal, impessoal, fundamentada e prudente.",
-      "O parecer deve ser apresentado como opinativo e não vinculante, salvo norma expressa em sentido diverso presente no contexto.",
-      "Não gere Base Legal ou Fontes consultadas dentro do corpo, pois essas seções são montadas pelo backend.",
-    ].join("\n");
-  }
-
   if (mode === "technical_opinion") {
     return [
       "REGRA FINAL OBRIGATÓRIA PARA PARECER TÉCNICO",
@@ -1764,14 +1617,12 @@ type GovernanceChatSources = {
   institutional: GovernanceChatSource[];
   officialGazette: GovernanceChatSource[];
   officialSources: GovernanceChatSource[];
-  externalSources?: GovernanceChatSource[];
 };
 
 type GovernanceChatReference = {
   title: string;
   url: string | null;
   kind: "institutional" | "official" | "legal";
-  origin?: "knowledge" | "web";
 };
 
 function buildGovernanceChatReferences(
@@ -1807,23 +1658,6 @@ function buildGovernanceChatReferences(
 
   for (const source of sources.officialGazette ?? []) {
     addReference(source, "official");
-  }
-
-  for (const source of sources.externalSources ?? []) {
-    const title = String(source?.title ?? "").trim();
-    const url = String(source?.url ?? "").trim() || null;
-
-    if (!title) continue;
-
-    const key = `official::${title.toLowerCase()}::${url ?? ""}`;
-    if (!unique.has(key)) {
-      unique.set(key, {
-        title,
-        url,
-        kind: "official",
-        origin: "web",
-      });
-    }
   }
 
   return Array.from(unique.values());
@@ -1865,7 +1699,6 @@ function mergeGovernanceChatReferences(
       title,
       url,
       kind: reference.kind,
-      origin: reference.origin,
     };
     const key = normalizeGovernanceReferenceKey(normalizedReference);
     const existing = merged.get(key);
@@ -1887,7 +1720,6 @@ function mergeGovernanceChatReferences(
         title: title.length >= String(existing.title ?? "").trim().length ? title : existing.title,
         url: incomingHasUrl ? url : existing.url,
         kind: reference.kind,
-        origin: reference.origin ?? existing.origin,
       });
     }
   }
@@ -1943,20 +1775,6 @@ const OFFICIAL_LEGAL_RESOLVER_ENTRIES: OfficialLegalResolverEntry[] = [
       "atualizacao dos valores",
       "atualização dos valores",
       "limites de dispensa",
-    ],
-  },
-  {
-    title: "Instrução Normativa Seges/ME nº 65/2021 — Pesquisa de preços",
-    url: "https://www.gov.br/compras/pt-br/acesso-a-informacao/legislacao/instrucoes-normativas/instrucao-normativa-seges-me-no-65-de-7-de-julho-de-2021",
-    triggers: [
-      "in 65/2021",
-      "in seges 65/2021",
-      "instrucao normativa seges/me 65/2021",
-      "instrução normativa seges/me 65/2021",
-      "pesquisa de precos",
-      "pesquisa de preços",
-      "cesta de precos",
-      "cesta de preços",
     ],
   },
   {
@@ -2252,10 +2070,6 @@ function shouldKeepGovernanceReferenceForClient(params: {
 
   if (reference.kind === "legal") {
     return false;
-  }
-
-  if (reference.origin === "web" && Boolean(String(reference.url ?? "").trim())) {
-    return true;
   }
 
   if (governanceReferenceAppearsInAnswer(reference, answer)) {
@@ -4593,38 +4407,6 @@ export async function POST(request: Request) {
       queryAnalysis.queryNature !== "legal_general";
 
     const forceWebFirst = shouldForceWebFirst(content);
-    const officialWeb = forceWebFirst
-      ? resolveEssentialOfficialWeb(content)
-      : null;
-
-    let governanceEvidenceContext:
-      | Awaited<ReturnType<typeof buildGovernanceEvidenceContext>>
-      | null = null;
-
-    if (forceWebFirst && officialWeb && openai) {
-      try {
-        governanceEvidenceContext = await buildGovernanceEvidenceContext({
-          openai,
-          model: OPENAI_MODEL_GOVERNANCE,
-          question: content,
-          topicLabel: officialWeb.topicLabel,
-          allowedDomains: officialWeb.allowedDomains,
-          researchChecklist: officialWeb.researchChecklist,
-        });
-      } catch (error) {
-        const detail = getCompactErrorMessage(error);
-
-        if (isRecoverableExternalError(error)) {
-          console.warn(
-            `[governance/chat] Dossiê prévio indisponível; seguindo com fallback: ${detail}`,
-          );
-        } else {
-          console.error(
-            `[governance/chat] Falha não recuperável no dossiê prévio: ${detail}`,
-          );
-        }
-      }
-    }
 
     const criticalKnowledge =
       findGovernanceCriticalKnowledge(content);
@@ -4812,15 +4594,6 @@ export async function POST(request: Request) {
       "",
       buildGovernanceModeInstruction(effectiveResponseMode),
       "",
-      buildGovernanceAnswerPlan({
-        responseMode: effectiveResponseMode,
-        question: content,
-        hasEvidenceContext: Boolean(governanceEvidenceContext),
-        hasMunicipalContext:
-          shouldUseMunicipalKnowledgeContext &&
-          Boolean(knowledgeContextResult.contextText),
-      }),
-      "",
       buildGovernanceConsultantStyleInstruction(
         effectiveResponseMode,
         content,
@@ -4847,17 +4620,14 @@ export async function POST(request: Request) {
         mode: effectiveResponseMode,
       }),
       "",
-      forceWebFirst && officialWeb
+      forceWebFirst
         ? [
             "ALERTA INTERNO WEB-FIRST / VALIDAÇÃO NORMATIVA",
             "A pergunta atual envolve prazo, valor, limite, percentual, dispositivo legal, licitação, contrato, sanção ou tema normativo sensível.",
             "Não responda por memória quando houver dado legal específico, volátil ou dependente de fonte oficial.",
-            "Use obrigatoriamente a ferramenta de pesquisa web configurada neste fluxo.",
-            "Priorize fontes oficiais e utilize a URL específica do ato, acórdão, instrução normativa, decreto, portaria ou orientação consultada.",
-            buildOfficialWebInstruction(officialWeb),
+            "Se não houver ferramenta de consulta oficial disponível neste fluxo, preserve o tom consultivo, mas indique a necessidade de validação em fonte oficial antes de decisão administrativa.",
           ].join("\n")
         : "",
-      governanceEvidenceContext?.instruction ?? "",
       legalGuardrails,
       shouldUseMunicipalKnowledgeContext && knowledgeContextResult.contextText
         ? [
@@ -4897,103 +4667,21 @@ export async function POST(request: Request) {
 
     if (!wantsStreaming) {
       let assistantText = "";
-      let officialWebSources: GovernanceChatSource[] =
-        governanceEvidenceContext?.sources.map((source, index) => ({
-          id: `web-evidence-${index + 1}`,
-          title: source.title,
-          url: source.url,
-          type: "fonte oficial validada antes da geração",
-        })) ?? [];
 
       try {
         const response = await openai!.responses.create({
           model: OPENAI_MODEL_GOVERNANCE,
           instructions,
           input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
-          ...(forceWebFirst && officialWeb && !governanceEvidenceContext
-            ? {
-                tools: [
-                  {
-                    type: "web_search",
-                    filters: {
-                      allowed_domains: officialWeb.allowedDomains,
-                    },
-                    external_web_access: true,
-                    search_context_size: "medium",
-                  },
-                ],
-                tool_choice: "required",
-                include: ["web_search_call.action.sources"],
-              }
-            : {}),
           temperature: 0.3,
         } as any);
 
         assistantText = response.output_text?.trim() ?? "";
-        officialWebSources = collectOfficialWebSources(response, {
-          allowedDomains: officialWeb?.allowedDomains ?? [],
-          maxItems: 8,
-        }).map((source, index) => ({
-          id: `web-${index + 1}`,
-          title: source.title,
-          url: source.url,
-          type: "fonte oficial web",
-        }));
-
-        const answerOfficialWebSources = governanceEvidenceContext
-          ? []
-          : collectOfficialWebSourcesFromText(assistantText, {
-              allowedDomains: officialWeb?.allowedDomains ?? [],
-              maxItems: 8,
-            }).map((source, index) => ({
-              id: `web-answer-${index + 1}`,
-              title: source.title,
-              url: source.url,
-              type: "fonte oficial web citada na resposta",
-            }));
-
-        if (answerOfficialWebSources.length > 0) {
-          const mergedOfficialWebSources = new Map<string, GovernanceChatSource>();
-
-          for (const source of [
-            ...answerOfficialWebSources,
-            ...officialWebSources,
-          ]) {
-            const key = String(source.url ?? source.title).trim().toLowerCase();
-            const existing = mergedOfficialWebSources.get(key);
-
-            if (
-              !existing ||
-              String(source.title ?? "").length >
-                String(existing.title ?? "").length
-            ) {
-              mergedOfficialWebSources.set(key, source);
-            }
-          }
-
-          officialWebSources = Array.from(
-            mergedOfficialWebSources.values(),
-          ).slice(0, 8);
-        }
       } catch (error) {
-        const detail = getCompactErrorMessage(error);
-
-        if (isRecoverableExternalError(error)) {
-          console.warn(
-            `[governance/chat] Geração interrompida por falha temporária: ${detail}`,
-          );
-        } else {
-          console.error(
-            `[governance/chat] Falha não recuperável na geração: ${detail}`,
-          );
-        }
+        console.error("[governance/chat] Erro OpenAI:", error);
 
         return NextResponse.json(
-          {
-            error: isRecoverableExternalError(error)
-              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
-              : "Erro ao gerar resposta da IA institucional.",
-          },
+          { error: "Erro ao gerar resposta da IA institucional." },
           { status: 500 },
         );
       }
@@ -5013,16 +4701,6 @@ export async function POST(request: Request) {
         institutionalSources: responseSources.institutional,
       });
 
-      responseReferences = mergeGovernanceChatReferences(
-        responseReferences,
-        buildGovernanceChatReferences({
-          institutional: [],
-          officialGazette: [],
-          officialSources: [],
-          externalSources: officialWebSources,
-        }),
-      );
-
       const officialLegalReferences = buildOfficialLegalReferencesForGovernance({
         question: content,
         answer: assistantText,
@@ -5034,15 +4712,10 @@ export async function POST(request: Request) {
         officialLegalReferences,
       );
 
-      const finalResponseSources: GovernanceChatSources = {
-        ...responseSources,
-        externalSources: officialWebSources,
-      };
-
       assistantText = buildGovernanceFinalAnswer({
         answer: assistantText,
         question: content,
-        sources: finalResponseSources,
+        sources: responseSources,
         references: responseReferences,
       });
 
@@ -5051,45 +4724,6 @@ export async function POST(request: Request) {
           question: content,
           answer: assistantText,
         });
-
-      const conversationAvailableBeforeSave =
-        await isGovernanceConversationAvailable({
-          supabase,
-          conversationId: conversation.id,
-          organizationId: context.organization.id,
-        });
-
-      if (conversationAvailableBeforeSave === false) {
-        console.info(
-          "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
-        );
-
-        const transientAssistantMessage = buildTransientAssistantMessage({
-          organizationId: context.organization.id,
-          conversationId: conversation.id,
-          content: assistantText,
-          responseMode: effectiveResponseMode,
-          streaming: false,
-        });
-
-        const suggestions = await generateGovernanceFollowUpSuggestions({
-          userContent: content,
-          assistantText,
-          responseMode: effectiveResponseMode,
-          hasSelectedPdfAttachments,
-          selectedPdfAttachmentNames,
-        });
-
-        return NextResponse.json({
-          userMessage,
-          assistantMessage: transientAssistantMessage,
-          conversationTitle,
-          suggestions,
-          sources: finalResponseSources,
-          references: responseReferencesForClient,
-          persistenceSkipped: "conversation_removed_during_generation",
-        });
-      }
 
       const { data: assistantMessage, error: assistantMessageError } =
         await supabase
@@ -5114,16 +4748,9 @@ export async function POST(request: Request) {
               official_gazette_context_enabled: responseSources.officialGazette.length > 0,
               official_gazette_chunks_used: knowledgeContextResult.items.filter((item) => item.provider === "official_gazette").length,
               official_gazette_reference_links: responseSources.officialGazette,
-              sources: finalResponseSources,
+              sources: responseSources,
               references: responseReferencesForClient,
               official_legal_references_used: officialLegalReferences,
-              web_search: {
-                enabled: Boolean(forceWebFirst && officialWeb),
-                evidence_context_ready: Boolean(governanceEvidenceContext),
-                evidence_sources_count: governanceEvidenceContext?.sources.length ?? 0,
-                topic: officialWeb?.topic ?? null,
-                allowed_domains: officialWeb?.allowedDomains ?? [],
-              },
               knowledge_engine: {
                 version: "governance-v2.2.3-knowledge-motor",
                 diagnostics: knowledgeContextResult.diagnostics,
@@ -5161,47 +4788,9 @@ export async function POST(request: Request) {
           .single<GovernanceMessage>();
 
       if (assistantMessageError || !assistantMessage) {
-        const conversationAvailableAfterFailure =
-          await isGovernanceConversationAvailable({
-            supabase,
-            conversationId: conversation.id,
-            organizationId: context.organization.id,
-          });
-
-        if (conversationAvailableAfterFailure === false) {
-          console.info(
-            "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
-          );
-
-          const transientAssistantMessage = buildTransientAssistantMessage({
-            organizationId: context.organization.id,
-            conversationId: conversation.id,
-            content: assistantText,
-            responseMode: effectiveResponseMode,
-            streaming: false,
-          });
-
-          const suggestions = await generateGovernanceFollowUpSuggestions({
-            userContent: content,
-            assistantText,
-            responseMode: effectiveResponseMode,
-            hasSelectedPdfAttachments,
-            selectedPdfAttachmentNames,
-          });
-
-          return NextResponse.json({
-            userMessage,
-            assistantMessage: transientAssistantMessage,
-            conversationTitle,
-            suggestions,
-            sources: finalResponseSources,
-            references: responseReferencesForClient,
-            persistenceSkipped: "conversation_removed_during_generation",
-          });
-        }
-
         console.error(
-          `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+          "[governance/chat] Erro ao salvar resposta da IA:",
+          assistantMessageError,
         );
 
         return NextResponse.json(
@@ -5238,7 +4827,7 @@ export async function POST(request: Request) {
         assistantMessage,
         conversationTitle,
         suggestions,
-        sources: finalResponseSources,
+        sources: responseSources,
         references: responseReferencesForClient,
       });
     }
@@ -5248,13 +4837,6 @@ export async function POST(request: Request) {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         let assistantText = "";
-        let officialWebSources: GovernanceChatSource[] =
-          governanceEvidenceContext?.sources.map((source, index) => ({
-            id: `web-evidence-${index + 1}`,
-            title: source.title,
-            url: source.url,
-            type: "fonte oficial validada antes da geração",
-          })) ?? [];
 
         function send(event: string, data: unknown) {
           controller.enqueue(encoder.encode(sseEvent(event, data)));
@@ -5267,48 +4849,11 @@ export async function POST(request: Request) {
             model: OPENAI_MODEL_GOVERNANCE,
             instructions,
             input: mapMessagesToOpenAIInput(history, { currentMessageOnly: currentQuestionOnly }),
-            ...(forceWebFirst && officialWeb && !governanceEvidenceContext
-              ? {
-                  tools: [
-                    {
-                      type: "web_search",
-                      filters: {
-                        allowed_domains: officialWeb.allowedDomains,
-                      },
-                      external_web_access: true,
-                      search_context_size: "medium",
-                    },
-                  ],
-                  tool_choice: "required",
-                  include: ["web_search_call.action.sources"],
-                }
-              : {}),
             temperature: 0.3,
             stream: true,
           } as any);
 
           for await (const event of openaiStream as any) {
-            if (forceWebFirst && officialWeb && !governanceEvidenceContext) {
-              const collectedSources = collectOfficialWebSources(event, {
-                allowedDomains: officialWeb.allowedDomains,
-                maxItems: 8,
-              }).map((source, index) => ({
-                id: `web-${index + 1}`,
-                title: source.title,
-                url: source.url,
-                type: "fonte oficial web",
-              }));
-
-              if (collectedSources.length > 0) {
-                const uniqueSources = new Map<string, GovernanceChatSource>();
-                for (const source of [...officialWebSources, ...collectedSources]) {
-                  const key = String(source.url ?? source.title).toLowerCase();
-                  if (!uniqueSources.has(key)) uniqueSources.set(key, source);
-                }
-                officialWebSources = Array.from(uniqueSources.values()).slice(0, 8);
-              }
-            }
-
             if (event?.type === "response.output_text.delta") {
               const delta = String(event.delta ?? "");
 
@@ -5319,64 +4864,15 @@ export async function POST(request: Request) {
             }
           }
         } catch (error) {
-          const detail = getCompactErrorMessage(error);
-
-          if (isRecoverableExternalError(error)) {
-            console.warn(
-              `[governance/chat] Streaming interrompido por falha temporária: ${detail}`,
-            );
-          } else {
-            console.error(
-              `[governance/chat] Falha não recuperável no streaming: ${detail}`,
-            );
-          }
-
+          console.error("[governance/chat] Erro OpenAI streaming:", error);
           send("error", {
-            error: isRecoverableExternalError(error)
-              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
-              : "Erro ao gerar resposta da IA institucional.",
+            error: "Erro ao gerar resposta da IA institucional.",
           });
           controller.close();
           return;
         }
 
         assistantText = assistantText.trim();
-
-        const answerOfficialWebSources = governanceEvidenceContext
-          ? []
-          : collectOfficialWebSourcesFromText(assistantText, {
-              allowedDomains: officialWeb?.allowedDomains ?? [],
-              maxItems: 8,
-            }).map((source, index) => ({
-              id: `web-answer-${index + 1}`,
-              title: source.title,
-              url: source.url,
-              type: "fonte oficial web citada na resposta",
-            }));
-
-        if (answerOfficialWebSources.length > 0) {
-          const mergedOfficialWebSources = new Map<string, GovernanceChatSource>();
-
-          for (const source of [
-            ...answerOfficialWebSources,
-            ...officialWebSources,
-          ]) {
-            const key = String(source.url ?? source.title).trim().toLowerCase();
-            const existing = mergedOfficialWebSources.get(key);
-
-            if (
-              !existing ||
-              String(source.title ?? "").length >
-                String(existing.title ?? "").length
-            ) {
-              mergedOfficialWebSources.set(key, source);
-            }
-          }
-
-          officialWebSources = Array.from(
-            mergedOfficialWebSources.values(),
-          ).slice(0, 8);
-        }
 
         if (!assistantText) {
           send("error", {
@@ -5394,16 +4890,6 @@ export async function POST(request: Request) {
           institutionalSources: responseSources.institutional,
         });
 
-        responseReferences = mergeGovernanceChatReferences(
-          responseReferences,
-          buildGovernanceChatReferences({
-            institutional: [],
-            officialGazette: [],
-            officialSources: [],
-            externalSources: officialWebSources,
-          }),
-        );
-
         const officialLegalReferences = buildOfficialLegalReferencesForGovernance({
           question: content,
           answer: assistantText,
@@ -5415,15 +4901,10 @@ export async function POST(request: Request) {
           officialLegalReferences,
         );
 
-        const finalResponseSources: GovernanceChatSources = {
-          ...responseSources,
-          externalSources: officialWebSources,
-        };
-
         const finalAssistantText = buildGovernanceFinalAnswer({
           answer: assistantText,
           question: content,
-          sources: finalResponseSources,
+          sources: responseSources,
           references: responseReferences,
         });
 
@@ -5440,52 +4921,6 @@ export async function POST(request: Request) {
           question: content,
           answer: assistantText,
         });
-
-        const conversationAvailableBeforeSave =
-          await isGovernanceConversationAvailable({
-            supabase,
-            conversationId: conversation.id,
-            organizationId: context.organization.id,
-          });
-
-        if (conversationAvailableBeforeSave === false) {
-          console.info(
-            "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
-          );
-
-          const transientAssistantMessage = buildTransientAssistantMessage({
-            organizationId: context.organization.id,
-            conversationId: conversation.id,
-            content: assistantText,
-            responseMode: effectiveResponseMode,
-            streaming: true,
-          });
-
-          const suggestions = await generateGovernanceFollowUpSuggestions({
-            userContent: content,
-            assistantText,
-            responseMode: effectiveResponseMode,
-            hasSelectedPdfAttachments,
-            selectedPdfAttachmentNames,
-          });
-
-          if (suggestions.length > 0) {
-            send("suggestions", { suggestions });
-          }
-
-          send("done", {
-            userMessage,
-            assistantMessage: transientAssistantMessage,
-            conversationTitle,
-            suggestions,
-            sources: finalResponseSources,
-            references: responseReferencesForClient,
-            persistenceSkipped: "conversation_removed_during_generation",
-          });
-
-          controller.close();
-          return;
-        }
 
         const { data: assistantMessage, error: assistantMessageError } =
           await supabase
@@ -5510,16 +4945,9 @@ export async function POST(request: Request) {
                 official_gazette_context_enabled: responseSources.officialGazette.length > 0,
                 official_gazette_chunks_used: knowledgeContextResult.items.filter((item) => item.provider === "official_gazette").length,
                 official_gazette_reference_links: responseSources.officialGazette,
-                sources: finalResponseSources,
+                sources: responseSources,
               references: responseReferencesForClient,
               official_legal_references_used: officialLegalReferences,
-              web_search: {
-                enabled: Boolean(forceWebFirst && officialWeb),
-                evidence_context_ready: Boolean(governanceEvidenceContext),
-                evidence_sources_count: governanceEvidenceContext?.sources.length ?? 0,
-                topic: officialWeb?.topic ?? null,
-                allowed_domains: officialWeb?.allowedDomains ?? [],
-              },
               knowledge_engine: {
                 version: "governance-v2.2.3-knowledge-motor",
                 diagnostics: knowledgeContextResult.diagnostics,
@@ -5556,54 +4984,9 @@ export async function POST(request: Request) {
             .single<GovernanceMessage>();
 
         if (assistantMessageError || !assistantMessage) {
-          const conversationAvailableAfterFailure =
-            await isGovernanceConversationAvailable({
-              supabase,
-              conversationId: conversation.id,
-              organizationId: context.organization.id,
-            });
-
-          if (conversationAvailableAfterFailure === false) {
-            console.info(
-              "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
-            );
-
-            const transientAssistantMessage = buildTransientAssistantMessage({
-              organizationId: context.organization.id,
-              conversationId: conversation.id,
-              content: assistantText,
-              responseMode: effectiveResponseMode,
-              streaming: true,
-            });
-
-            const suggestions = await generateGovernanceFollowUpSuggestions({
-              userContent: content,
-              assistantText,
-              responseMode: effectiveResponseMode,
-              hasSelectedPdfAttachments,
-              selectedPdfAttachmentNames,
-            });
-
-            if (suggestions.length > 0) {
-              send("suggestions", { suggestions });
-            }
-
-            send("done", {
-              userMessage,
-              assistantMessage: transientAssistantMessage,
-              conversationTitle,
-              suggestions,
-              sources: finalResponseSources,
-              references: responseReferencesForClient,
-              persistenceSkipped: "conversation_removed_during_generation",
-            });
-
-            controller.close();
-            return;
-          }
-
           console.error(
-            `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+            "[governance/chat] Erro ao salvar resposta da IA:",
+            assistantMessageError,
           );
 
           send("error", {
@@ -5645,7 +5028,7 @@ export async function POST(request: Request) {
           assistantMessage,
           conversationTitle,
           suggestions,
-          sources: finalResponseSources,
+          sources: responseSources,
           references: responseReferencesForClient,
         });
 

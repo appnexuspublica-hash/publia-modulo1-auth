@@ -1058,7 +1058,10 @@ function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
         return link;
       }
 
-      return `${link} — Artigos utilizados: ${articles.join("; ")}`;
+      return [
+        link,
+        `Artigos utilizados: ${articles.join("; ")}`,
+      ].join("\n");
     })
     .filter(Boolean);
 
@@ -1067,8 +1070,9 @@ function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
   }
 
   return [
-    "**Base Legal:**  ",
-    blocks.join("  \n"),
+    "**Base Legal:**",
+    "",
+    blocks.join("\n\n"),
   ].join("\n");
 }
 

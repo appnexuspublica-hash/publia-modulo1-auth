@@ -34,6 +34,7 @@ const allowedResponseModes: GovernanceResponseMode[] = [
   "summary",
   "checklist",
   "technical_opinion",
+  "legal_opinion",
   "risk_analysis",
   "attention_points",
   "action_plan",

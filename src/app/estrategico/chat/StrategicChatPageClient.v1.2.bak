@@ -2001,8 +2001,6 @@ export default function StrategicChatPageClient({
                 )
               );
             }
-
-            setResponseMode("objective");
           }
 
           if (parsed.event === "error") {
@@ -2706,45 +2704,6 @@ export default function StrategicChatPageClient({
     });
   }
 
-  const renderStrategicAttachmentButton = () => (
-    <>
-      <button
-        type="button"
-        onClick={handlePdfButtonClick}
-        disabled={isBlocked || accessLoading || isUploadingPdf}
-        className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
-          isBlocked || accessLoading || isUploadingPdf
-            ? "cursor-not-allowed border border-[#dedede] bg-white text-[#5A5A5A] opacity-50"
-            : "border border-[#dedede] bg-white text-[#0D2B4D] transition hover:border-[#14933D] hover:text-[#14933D]"
-        }`}
-        aria-label="Anexar PDF"
-        title="Anexar PDF"
-      >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          className="h-[18px] w-[18px]"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-        <span className="sr-only">Anexar PDF</span>
-      </button>
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="application/pdf"
-        className="hidden"
-        onChange={handlePdfChange}
-      />
-    </>
-  );
-
   const toastStyles = useMemo(() => {
     if (!toast) {
       return {
@@ -2788,7 +2747,6 @@ export default function StrategicChatPageClient({
     quickMenuItemStyle?: CSSProperties;
     uploadTextStyle?: CSSProperties;
     maxLabel?: number;
-    attachmentButtonIcon?: boolean;
   }) => {
     const hint = getPdfHint(attachedPdf);
     const showHint =
@@ -2835,9 +2793,7 @@ export default function StrategicChatPageClient({
             type="button"
             onClick={handlePdfButtonClick}
             disabled={isBlocked || accessLoading || isUploadingPdf}
-            className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
-              options.attachmentButtonIcon ? "w-10 px-0" : "px-4"
-            } ${
+            className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
               isBlocked || accessLoading || isUploadingPdf
                 ? options.buttonDisabledClassName
                 : options.buttonClassName
@@ -2847,28 +2803,8 @@ export default function StrategicChatPageClient({
                 ? options.buttonDisabledStyle
                 : options.buttonStyle
             }
-            aria-label="Anexar PDF"
-            title="Anexar PDF"
           >
-            {options.attachmentButtonIcon ? (
-              <>
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 24 24"
-                  className="h-[18px] w-[18px]"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                </svg>
-                <span className="sr-only">Anexar PDF</span>
-              </>
-            ) : (
-              "ANEXAR PDF"
-            )}
+            ANEXAR PDF
           </button>
 
           <input
@@ -3147,13 +3083,9 @@ export default function StrategicChatPageClient({
             )}
 
             {isStrategic
-              ? attachedPdfs.length
-                ? renderPdfRow({
-                  buttonClassName:
-                    "border border-[#dedede] bg-white text-[#0D2B4D] transition hover:border-[#14933D] hover:text-[#14933D]",
-                  buttonDisabledClassName:
-                    "cursor-not-allowed border border-[#dedede] bg-white text-[#5A5A5A] opacity-50",
-                  attachmentButtonIcon: true,
+              ? renderPdfRow({
+                  buttonClassName: strategicButtonClassName,
+                  buttonDisabledClassName: strategicDisabledButtonClassName,
                   quickActionsClassName: strategicButtonClassName,
                   quickActionsDisabledClassName: strategicDisabledButtonClassName,
                   itemActiveClassName: strategicChipClassName,
@@ -3166,6 +3098,8 @@ export default function StrategicChatPageClient({
                     "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border py-2 text-xs text-[#0D2B4D] shadow-lg",
                   quickMenuItemClassName: strategicMenuItemClassName,
                   uploadTextClassName: "mb-2 text-[11px] text-[#5A5A5A]",
+                  buttonStyle: strategicButtonStyle,
+                  buttonDisabledStyle: strategicDisabledButtonStyle,
                   quickActionsStyle: strategicButtonStyle,
                   quickActionsDisabledStyle: strategicDisabledButtonStyle,
                   itemActiveStyle: strategicItemActiveStyle,
@@ -3180,7 +3114,6 @@ export default function StrategicChatPageClient({
                   },
                   maxLabel: 9,
                 })
-                : null
               : renderPdfRow({
                   buttonClassName:
                     "border border-slate-400 bg-[#dcdcdc] text-slate-700 hover:bg-[#d6d6d6]",
@@ -3208,6 +3141,21 @@ export default function StrategicChatPageClient({
                   maxLabel: 9,
                 })}
 
+            {!attachedPdfs.length &&
+              typeof access?.capabilities?.maxPdfsPerConversation === "number" && (
+                <div className="mb-2 flex justify-end">
+                  <span
+                    className="text-[11px]"
+                    style={{
+                      color: isStrategic ? theme.colors.textMuted : "#475569",
+                    }}
+                  >
+                    Limite por conversa: {access.capabilities.maxPdfsPerConversation} PDF
+                    {access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"}
+                  </span>
+                </div>
+              )}
+
             {isPdfBlockingSend && (
               <div
                 className={`mb-2 rounded-xl border px-3 py-2 text-[12px] ${
@@ -3220,64 +3168,20 @@ export default function StrategicChatPageClient({
               </div>
             )}
 
-            {isStrategic && !attachedPdfs.length ? (
-              <div className="flex items-start gap-3">
-                <div className="pt-[9px]">
-                  {renderStrategicAttachmentButton()}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <ChatInput
-                    onSend={handleSend}
-                    isSending={isSending}
-                    onStop={handleStop}
-                    disabled={isBlocked || accessLoading || isPdfBlockingSend}
-                    responseMode={responseMode}
-                    onResponseModeChange={setResponseMode}
-                    showResponseModes={showResponseModes}
-                    availableResponseModes={strategicResponseModes}
-                    isStrategic={isStrategic}
-                    inputValue={draftMessage}
-                    onInputValueChange={setDraftMessage}
-                    externalTextareaRef={chatInputTextareaRef}
-                    helperText={
-                      typeof access?.capabilities?.maxPdfsPerConversation ===
-                      "number"
-                        ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
-                            access.capabilities.maxPdfsPerConversation === 1
-                              ? ""
-                              : "s"
-                          }`
-                        : undefined
-                    }
-                  />
-                </div>
-              </div>
-            ) : (
-              <ChatInput
-                onSend={handleSend}
-                isSending={isSending}
-                onStop={handleStop}
-                disabled={isBlocked || accessLoading || isPdfBlockingSend}
-                responseMode={responseMode}
-                onResponseModeChange={setResponseMode}
-                showResponseModes={showResponseModes}
-                availableResponseModes={strategicResponseModes}
-                isStrategic={isStrategic}
-                inputValue={draftMessage}
-                onInputValueChange={setDraftMessage}
-                externalTextareaRef={chatInputTextareaRef}
-                helperText={
-                  !isStrategic &&
-                  !attachedPdfs.length &&
-                  typeof access?.capabilities?.maxPdfsPerConversation === "number"
-                    ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
-                        access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
-                      }`
-                    : undefined
-                }
-              />
-            )}
+            <ChatInput
+              onSend={handleSend}
+              isSending={isSending}
+              onStop={handleStop}
+              disabled={isBlocked || accessLoading || isPdfBlockingSend}
+              responseMode={responseMode}
+              onResponseModeChange={setResponseMode}
+              showResponseModes={showResponseModes}
+              availableResponseModes={strategicResponseModes}
+              isStrategic={isStrategic}
+              inputValue={draftMessage}
+              onInputValueChange={setDraftMessage}
+              externalTextareaRef={chatInputTextareaRef}
+            />
           </div>
         </div>
       </div>

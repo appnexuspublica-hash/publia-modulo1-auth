@@ -55,7 +55,6 @@ export type GovernanceResponseMode =
   | "summary"
   | "checklist"
   | "technical_opinion"
-  | "legal_opinion"
   | "risk_analysis"
   | "attention_points"
   | "action_plan"
@@ -266,7 +265,6 @@ export function getGovernanceResponseModeLabel(
     summary: "Resumo",
     checklist: "Checklist",
     technical_opinion: "Parecer técnico",
-    legal_opinion: "Parecer jurídico",
     risk_analysis: "Análise de risco",
     attention_points: "Pontos de atenção",
     action_plan: "Plano de ação",

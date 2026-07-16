@@ -53,7 +53,6 @@ import {
   type GovernanceContext,
   type GovernanceConversation,
   type GovernanceMessage,
-  type GovernanceResponseMode,
 } from "@/types/governance";
 
 type GovernanceChatClientProps = {
@@ -250,167 +249,12 @@ const responseModeOptions = [
   { value: "manager_guidance", label: "Orientação ao gestor" },
   { value: "checklist", label: "Checklist" },
   { value: "technical_opinion", label: "Parecer técnico" },
-  { value: "legal_opinion", label: "Parecer jurídico" },
   { value: "risk_analysis", label: "Análise de risco" },
   { value: "attention_points", label: "Pontos de atenção" },
   { value: "action_plan", label: "Plano de ação" },
   { value: "draft", label: "Minuta" },
   { value: "comparison", label: "Comparativo" },
 ] as const;
-
-
-type GovernanceModeHeadingLevel = "title" | "section" | "subsection";
-
-const governanceResponseModes = new Set<GovernanceResponseMode>(
-  responseModeOptions.map((item) => item.value),
-);
-
-function getMessageResponseMode(
-  message: GovernanceMessage,
-): GovernanceResponseMode {
-  const rawMode = String(message.metadata?.response_mode ?? "").trim();
-
-  return governanceResponseModes.has(rawMode as GovernanceResponseMode)
-    ? (rawMode as GovernanceResponseMode)
-    : "objective";
-}
-
-function normalizeModeHeadingText(value: string) {
-  return String(value ?? "")
-    .replace(/[*_`#]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[:：]+$/g, "")
-    .toLowerCase();
-}
-
-function getModeHeadingLevel(
-  mode: GovernanceResponseMode,
-  value: string,
-): GovernanceModeHeadingLevel | null {
-  const text = normalizeModeHeadingText(value);
-
-  if (!text || text.length > 110) {
-    return null;
-  }
-
-  const titlePatterns: Partial<Record<GovernanceResponseMode, RegExp>> = {
-    summary: /^resumo(?: executivo)?$/,
-    checklist: /^checklist(?: prático)?$/,
-    technical_opinion: /^parecer técnico$/,
-    legal_opinion: /^parecer jurídico$/,
-    risk_analysis: /^(?:análise|matriz) de riscos?$/,
-    attention_points: /^pontos de atenção$/,
-    action_plan: /^plano de ação$/,
-    draft: /^minuta(?: .+)?$/,
-    comparison: /^(?:quadro |análise )?comparativ[oa]$/,
-  };
-
-  if (titlePatterns[mode]?.test(text)) {
-    return "title";
-  }
-
-  const sectionPatterns: Record<GovernanceResponseMode, RegExp> = {
-    objective:
-      /^(?:[1-5][.)]\s*)?(?:resposta objetiva|fundamentação|entendimento atual|aplicação ao município|cuidados)$/,
-    summary:
-      /^(?:resposta direta|síntese|principais pontos|conclusão(?: prática)?)$/,
-    manager_guidance:
-      /^(?:decisão necessária|o que observar|providências recomendadas|riscos (?:da inação|se nada for feito)|próximo passo(?: sugerido)?)$/,
-    checklist:
-      /^(?:etapa|tema|documentos|verificações|ações recomendadas|observações)(?:\s+.+)?$/,
-    technical_opinion:
-      /^(?:[1-6][.)]\s*)?(?:assunto|relatório|fundamentação técnica|análise|conclusão|recomendação técnica)$/,
-    legal_opinion:
-      /^(?:ementa|identificação|[ivxlcdm]+[.)\s–-]+(?:relatório|delimitação da consulta|fundamentação jurídica|análise do caso concreto|riscos jurídicos e condicionantes|conclusão|recomendações)|assinatura)$/,
-    risk_analysis:
-      /^(?:matriz de riscos?|análise|impactos?|medidas mitigadoras|mitigação|prioridades de controle|resposta objetiva à pergunta(?: contextualizada no risco)?)$/,
-    attention_points:
-      /^(?:atenção(?:\s+\d+)?|providências|validações|recomendações)$/,
-    action_plan:
-      /^(?:objetivo|prioridades imediatas|responsáveis|prazo sugerido|resultado esperado)$/,
-    draft:
-      /^(?:interessado|assunto|objeto|considerando|resolve|cláusula(?:\s+\w+)?|conclusão|local e data|assinatura)$/,
-    comparison:
-      /^(?:critérios?|conclusão comparativa|recomendação)$/,
-  };
-
-  if (sectionPatterns[mode].test(text)) {
-    return "section";
-  }
-
-  if (
-    mode === "legal_opinion" &&
-    /^(?:processo nº|interessado|órgão consulente|assunto)\b/.test(text)
-  ) {
-    return "subsection";
-  }
-
-  return null;
-}
-
-function getModeHeadingClass(
-  mode: GovernanceResponseMode,
-  level: GovernanceModeHeadingLevel,
-) {
-  if (level === "title") {
-    if (mode === "legal_opinion" || mode === "draft") {
-      return "mb-5 mt-1 border-b border-slate-300 pb-3 text-center text-lg font-black uppercase tracking-[0.08em] text-slate-950";
-    }
-
-    if (mode === "technical_opinion") {
-      return "mb-5 mt-1 border-b border-slate-300 pb-3 text-lg font-black uppercase tracking-[0.06em] text-slate-950";
-    }
-
-    return "mb-4 mt-1 text-lg font-black uppercase tracking-[0.06em] text-[#0f3a4a]";
-  }
-
-  if (level === "subsection") {
-    return "mb-1 mt-3 text-sm font-bold text-slate-900";
-  }
-
-  if (mode === "legal_opinion") {
-    return "mb-3 mt-7 border-b border-slate-200 pb-2 text-[15px] font-black uppercase tracking-[0.04em] text-slate-950";
-  }
-
-  if (mode === "technical_opinion") {
-    return "mb-3 mt-7 border-b border-slate-200 pb-2 text-[15px] font-black uppercase tracking-[0.03em] text-slate-950";
-  }
-
-  if (mode === "manager_guidance") {
-    return "mb-3 mt-7 border-b border-slate-200 pb-2 text-base font-black text-[#0f3a4a]";
-  }
-
-  if (
-    mode === "risk_analysis" ||
-    mode === "action_plan" ||
-    mode === "comparison"
-  ) {
-    return "mb-3 mt-6 text-[15px] font-black uppercase tracking-wide text-[#0f3a4a]";
-  }
-
-  if (mode === "attention_points") {
-    return "mb-3 mt-6 border-l-4 border-[#0f3a4a] pl-3 text-[15px] font-black text-slate-950";
-  }
-
-  return "mb-3 mt-6 text-base font-black text-[#0f3a4a]";
-}
-
-function getModeContainerClass(mode: GovernanceResponseMode) {
-  if (mode === "legal_opinion" || mode === "draft") {
-    return "governance-answer-document";
-  }
-
-  if (
-    mode === "risk_analysis" ||
-    mode === "action_plan" ||
-    mode === "comparison"
-  ) {
-    return "governance-answer-structured";
-  }
-
-  return "governance-answer-consultive";
-}
 
 
 function normalizeCsvText(csv: string) {
@@ -3392,7 +3236,6 @@ export default function GovernanceChatClient({
   }
 
   function renderAssistantContent(message: GovernanceMessage) {
-    const responseMode = getMessageResponseMode(message);
     const { contentWithoutSuggestion, suggestionText } =
       splitAssistantInlineSuggestion(message.content);
     const csvDownloads = csvDownloadsToSpreadsheetDownloads(
@@ -3422,13 +3265,7 @@ export default function GovernanceChatClient({
       }
 
       return (
-        <div
-          data-response-mode={responseMode}
-          className={[
-            "governance-answer prose max-w-none prose-slate text-[15px] leading-8 prose-headings:font-bold prose-headings:text-slate-950 prose-p:my-3 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:pl-1 prose-hr:my-5 prose-hr:border-[#dedede]",
-            getModeContainerClass(responseMode),
-          ].join(" ")}
-        >
+        <div className="governance-answer prose max-w-none prose-slate text-[15px] leading-8 prose-headings:font-bold prose-headings:text-slate-950 prose-p:my-3 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:pl-1 prose-hr:my-5 prose-hr:border-[#dedede]">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -3443,25 +3280,25 @@ export default function GovernanceChatClient({
               h1: ({ node, ...props }) => (
                 <h1
                   {...props}
-                  className={getModeHeadingClass(responseMode, "title")}
+                  className="mb-4 mt-2 text-xl font-black leading-tight text-slate-950"
                 />
               ),
               h2: ({ node, ...props }) => (
                 <h2
                   {...props}
-                  className={getModeHeadingClass(responseMode, "section")}
+                  className="!mb-3 !mt-7 !rounded-none !border-0 !bg-transparent !p-0 text-base font-black leading-snug text-[#0f3a4a] shadow-none"
                 />
               ),
               h3: ({ node, ...props }) => (
                 <h3
                   {...props}
-                  className={getModeHeadingClass(responseMode, "section")}
+                  className="!mb-2 !mt-6 !rounded-none !border-0 !bg-transparent !p-0 text-[15px] font-black uppercase tracking-wide text-[#0f3a4a] shadow-none"
                 />
               ),
               h4: ({ node, ...props }) => (
                 <h4
                   {...props}
-                  className={getModeHeadingClass(responseMode, "subsection")}
+                  className="mb-2 mt-5 text-[15px] font-bold text-slate-950"
                 />
               ),
               p: ({ node, ...props }) => {
@@ -3478,44 +3315,10 @@ export default function GovernanceChatClient({
                   );
                 }
 
-                const modeHeadingLevel = getModeHeadingLevel(responseMode, text);
-
-                if (modeHeadingLevel === "title") {
-                  return (
-                    <h1 className={getModeHeadingClass(responseMode, "title")}>
-                      {props.children}
-                    </h1>
-                  );
-                }
-
-                if (modeHeadingLevel === "section") {
-                  return (
-                    <h2 className={getModeHeadingClass(responseMode, "section")}>
-                      {props.children}
-                    </h2>
-                  );
-                }
-
-                if (modeHeadingLevel === "subsection") {
-                  return (
-                    <h3 className={getModeHeadingClass(responseMode, "subsection")}>
-                      {props.children}
-                    </h3>
-                  );
-                }
-
                 const isHighlightedParagraph =
                   /^(aten[cç][aã]o|importante|observa[cç][aã]o|risco|alerta|recomenda[cç][aã]o|ponto de aten[cç][aã]o)\s*[:：-]/i.test(text);
 
                 if (isHighlightedParagraph) {
-                  if (responseMode === "attention_points") {
-                    return (
-                      <div className="my-4 border-l-4 border-[#0f3a4a] pl-4 text-[15px] leading-8 text-slate-800">
-                        {props.children}
-                      </div>
-                    );
-                  }
-
                   return (
                     <div className="my-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[15px] leading-8 text-amber-950">
                       {props.children}
@@ -3611,16 +3414,7 @@ export default function GovernanceChatClient({
                 );
               },
               table: ({ node, ...props }) => (
-                <div
-                  className={[
-                    "my-4 overflow-x-auto border border-[#dedede] bg-white",
-                    responseMode === "risk_analysis" ||
-                    responseMode === "action_plan" ||
-                    responseMode === "comparison"
-                      ? "rounded-xl shadow-sm"
-                      : "rounded-2xl shadow-sm",
-                  ].join(" ")}
-                >
+                <div className="my-4 overflow-x-auto rounded-2xl border border-[#dedede] bg-white shadow-sm">
                   <table
                     {...props}
                     className="m-0 min-w-full border-collapse text-left text-[13px]"
@@ -4221,9 +4015,7 @@ export default function GovernanceChatClient({
                                 user_id: null,
                                 role: "assistant",
                                 content: streamingAssistantText,
-                                metadata: {
-                                  response_mode: selectedResponseMode,
-                                },
+                                metadata: {},
                                 created_at: new Date().toISOString(),
                               })
                             ) : (

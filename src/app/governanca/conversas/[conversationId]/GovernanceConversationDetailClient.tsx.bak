@@ -299,7 +299,7 @@ export default function GovernanceConversationDetailClient({
                             size={16}
                             className="animate-spin text-[#0f3a4a]"
                           />
-                          <span>Gerando resposta...</span>
+                          <span>Elaborando resposta institucional...</span>
                         </div>
                       </div>
                     </div>

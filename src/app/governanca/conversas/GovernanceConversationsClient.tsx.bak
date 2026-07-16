@@ -49,7 +49,6 @@ const responseModes: Array<{
   { value: "summary", label: "Resumo" },
   { value: "checklist", label: "Checklist" },
   { value: "technical_opinion", label: "Parecer técnico" },
-  { value: "legal_opinion", label: "Parecer jurídico" },
   { value: "risk_analysis", label: "Análise de risco" },
   { value: "draft", label: "Minuta" },
   { value: "manager_guidance", label: "Orientação ao gestor" },

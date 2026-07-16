@@ -4,7 +4,6 @@ type GovernancePromptMode =
   | "objective"
   | "checklist"
   | "technical_opinion"
-  | "legal_opinion"
   | "risk_analysis"
   | "draft"
   | "comparison"

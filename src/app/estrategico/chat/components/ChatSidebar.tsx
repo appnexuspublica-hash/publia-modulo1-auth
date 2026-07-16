@@ -952,16 +952,18 @@ export function ChatSidebar({
                   isBlocked ? "cursor-not-allowed" : ""
                 }`}
                 style={{
-                  backgroundColor: strategicSidebarBg,
-                  borderColor: isBlocked ? "rgba(13,43,77,0.12)" : strategicSearchBorder,
-                  color: isBlocked ? "#9CA3AF" : strategicHeaderText,
+                  backgroundColor: isBlocked ? strategicSidebarBg : "#063749",
+                  borderColor: isBlocked ? "rgba(13,43,77,0.12)" : "#063749",
+                  color: isBlocked ? "#9CA3AF" : "#ffffff",
                 }}
                 onMouseEnter={(e) => {
                   if (isBlocked) return;
-                  e.currentTarget.style.backgroundColor = strategicSearchHover;
+                  e.currentTarget.style.backgroundColor = "#0A4A60";
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = strategicSidebarBg;
+                  e.currentTarget.style.backgroundColor = isBlocked
+                    ? strategicSidebarBg
+                    : "#063749";
                 }}
               >
                 + NOVA CONVERSA

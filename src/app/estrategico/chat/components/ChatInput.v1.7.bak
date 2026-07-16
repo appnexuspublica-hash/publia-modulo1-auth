@@ -229,7 +229,7 @@ export function ChatInput({
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
                   ? "Validando..."
-                  : "Digite sua pergunta..."
+                  : "Envie sua pergunta..."
             }
             value={value}
             onChange={handleChange}

@@ -16,7 +16,6 @@
  * - organization_id
  */
 import { NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -85,104 +84,6 @@ const SSE_HEADERS: HeadersInit = {
   "X-Accel-Buffering": "no",
 };
 
-function getCompactErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const cause = (error as Error & {
-      cause?: { code?: string; message?: string };
-    }).cause;
-
-    const causeCode =
-      cause && typeof cause.code === "string" ? cause.code : null;
-    const causeMessage =
-      cause && typeof cause.message === "string" ? cause.message : null;
-
-    return [
-      error.name || "Error",
-      causeCode,
-      causeMessage || error.message,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
-
-  if (error && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-
-    return [
-      typeof record.code === "string" ? record.code : null,
-      typeof record.message === "string" ? record.message : null,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
-
-  return String(error);
-}
-
-function isRecoverableExternalError(error: unknown): boolean {
-  const message = getCompactErrorMessage(error).toLowerCase();
-
-  return [
-    "apiconnectionerror",
-    "apiconnectiontimeouterror",
-    "request timed out",
-    "eai_again",
-    "etimedout",
-    "und_err_connect_timeout",
-    "fetch failed",
-    "connection error",
-  ].some((token) => message.includes(token));
-}
-
-async function isGovernanceConversationAvailable(params: {
-  supabase: any;
-  conversationId: string;
-  organizationId: string;
-}): Promise<boolean | null> {
-  const { data, error } = await params.supabase
-    .from("governance_conversations")
-    .select("id")
-    .eq("id", params.conversationId)
-    .eq("organization_id", params.organizationId)
-    .eq("status", "active")
-    .is("deleted_at", null)
-    .maybeSingle();
-
-  if (error) {
-    console.warn(
-      `[governance/chat] Não foi possível confirmar a conversa antes de persistir: ${getCompactErrorMessage(error)}`,
-    );
-    return null;
-  }
-
-  return Boolean(data);
-}
-
-function buildTransientAssistantMessage(params: {
-  organizationId: string;
-  conversationId: string;
-  content: string;
-  responseMode: GovernanceResponseMode;
-  streaming: boolean;
-}): GovernanceMessage {
-  return {
-    id: `unsaved-${randomUUID()}`,
-    organization_id: params.organizationId,
-    conversation_id: params.conversationId,
-    user_id: null,
-    role: "assistant",
-    content: params.content,
-    metadata: {
-      source: "openai",
-      product_tier: "governance",
-      response_mode: params.responseMode,
-      streaming: params.streaming,
-      persistence_skipped: "conversation_removed_during_generation",
-    },
-    created_at: new Date().toISOString(),
-  };
-}
-
 
 let openai: OpenAI | null = null;
 
@@ -234,7 +135,6 @@ const allowedResponseModes: GovernanceResponseMode[] = [
   "summary",
   "checklist",
   "technical_opinion",
-  "legal_opinion",
   "risk_analysis",
   "attention_points",
   "action_plan",
@@ -318,7 +218,6 @@ function mapGovernanceModeToPromptMode(
       return "checklist";
 
     case "technical_opinion":
-    case "legal_opinion":
     case "draft":
       return "document_draft";
 
@@ -383,29 +282,6 @@ function buildGovernanceModeInstruction(mode: GovernanceResponseMode): string {
         "",
         "É proibido começar com introdução conversacional do tipo 'Na prática' ou 'O ponto central é'.",
         "É proibido responder apenas com tópicos soltos. O formato deve parecer um parecer técnico institucional.",
-      ].join("\n");
-
-    case "legal_opinion":
-      return [
-        "MODO DE RESPOSTA ATIVO: PARECER JURÍDICO.",
-        "OBEDEÇA AO FORMATO: a resposta deve iniciar obrigatoriamente com o título PARECER JURÍDICO.",
-        "Escreva como manifestação jurídica institucional completa, não como parecer técnico, conversa, resumo, checklist, minuta ou orientação ao gestor.",
-        "Use obrigatoriamente estes blocos, nesta ordem:",
-        "PARECER JURÍDICO",
-        "EMENTA",
-        "IDENTIFICAÇÃO",
-        "I. RELATÓRIO",
-        "II. DELIMITAÇÃO DA CONSULTA",
-        "III. FUNDAMENTAÇÃO JURÍDICA",
-        "IV. ANÁLISE DO CASO CONCRETO",
-        "V. RISCOS JURÍDICOS E CONDICIONANTES",
-        "VI. CONCLUSÃO",
-        "VII. RECOMENDAÇÕES",
-        "ASSINATURA",
-        "A conclusão deve classificar o caso como: viável, viável com condicionantes, inviável ou insuficientemente instruído.",
-        "Use campos entre colchetes para dados ausentes. Nunca invente processo, interessado, procurador, cargo, OAB, local ou data.",
-        "Não trate o parecer como vinculante sem norma expressa no contexto.",
-        "Não repita Base Legal nem Fontes consultadas; o backend acrescentará essas seções.",
       ].join("\n");
 
     case "risk_analysis":
@@ -1126,19 +1002,6 @@ function buildFinalConsultativeOverride(
   mode: GovernanceResponseMode,
   relation: ConversationRelation = "INICIAL",
 ): string {
-  if (mode === "legal_opinion") {
-    return [
-      "REGRA FINAL OBRIGATÓRIA PARA PARECER JURÍDICO",
-      "A resposta deve iniciar obrigatoriamente com o título: PARECER JURÍDICO.",
-      "Use exatamente os blocos: EMENTA, IDENTIFICAÇÃO, I. RELATÓRIO, II. DELIMITAÇÃO DA CONSULTA, III. FUNDAMENTAÇÃO JURÍDICA, IV. ANÁLISE DO CASO CONCRETO, V. RISCOS JURÍDICOS E CONDICIONANTES, VI. CONCLUSÃO, VII. RECOMENDAÇÕES e ASSINATURA.",
-      "A conclusão deve declarar uma destas posições: viabilidade, viabilidade condicionada, inviabilidade ou impossibilidade de concluir por insuficiência documental.",
-      "Não invente fatos, normas, jurisprudência, documentos, nome de parecerista ou número de OAB.",
-      "Use linguagem jurídica formal, impessoal, fundamentada e prudente.",
-      "O parecer deve ser apresentado como opinativo e não vinculante, salvo norma expressa em sentido diverso presente no contexto.",
-      "Não gere Base Legal ou Fontes consultadas dentro do corpo, pois essas seções são montadas pelo backend.",
-    ].join("\n");
-  }
-
   if (mode === "technical_opinion") {
     return [
       "REGRA FINAL OBRIGATÓRIA PARA PARECER TÉCNICO",
@@ -4612,17 +4475,10 @@ export async function POST(request: Request) {
           researchChecklist: officialWeb.researchChecklist,
         });
       } catch (error) {
-        const detail = getCompactErrorMessage(error);
-
-        if (isRecoverableExternalError(error)) {
-          console.warn(
-            `[governance/chat] Dossiê prévio indisponível; seguindo com fallback: ${detail}`,
-          );
-        } else {
-          console.error(
-            `[governance/chat] Falha não recuperável no dossiê prévio: ${detail}`,
-          );
-        }
+        console.error(
+          "[governance/chat] Falha ao montar dossiê prévio de evidências:",
+          error,
+        );
       }
     }
 
@@ -4976,24 +4832,10 @@ export async function POST(request: Request) {
           ).slice(0, 8);
         }
       } catch (error) {
-        const detail = getCompactErrorMessage(error);
-
-        if (isRecoverableExternalError(error)) {
-          console.warn(
-            `[governance/chat] Geração interrompida por falha temporária: ${detail}`,
-          );
-        } else {
-          console.error(
-            `[governance/chat] Falha não recuperável na geração: ${detail}`,
-          );
-        }
+        console.error("[governance/chat] Erro OpenAI:", error);
 
         return NextResponse.json(
-          {
-            error: isRecoverableExternalError(error)
-              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
-              : "Erro ao gerar resposta da IA institucional.",
-          },
+          { error: "Erro ao gerar resposta da IA institucional." },
           { status: 500 },
         );
       }
@@ -5051,45 +4893,6 @@ export async function POST(request: Request) {
           question: content,
           answer: assistantText,
         });
-
-      const conversationAvailableBeforeSave =
-        await isGovernanceConversationAvailable({
-          supabase,
-          conversationId: conversation.id,
-          organizationId: context.organization.id,
-        });
-
-      if (conversationAvailableBeforeSave === false) {
-        console.info(
-          "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
-        );
-
-        const transientAssistantMessage = buildTransientAssistantMessage({
-          organizationId: context.organization.id,
-          conversationId: conversation.id,
-          content: assistantText,
-          responseMode: effectiveResponseMode,
-          streaming: false,
-        });
-
-        const suggestions = await generateGovernanceFollowUpSuggestions({
-          userContent: content,
-          assistantText,
-          responseMode: effectiveResponseMode,
-          hasSelectedPdfAttachments,
-          selectedPdfAttachmentNames,
-        });
-
-        return NextResponse.json({
-          userMessage,
-          assistantMessage: transientAssistantMessage,
-          conversationTitle,
-          suggestions,
-          sources: finalResponseSources,
-          references: responseReferencesForClient,
-          persistenceSkipped: "conversation_removed_during_generation",
-        });
-      }
 
       const { data: assistantMessage, error: assistantMessageError } =
         await supabase
@@ -5161,47 +4964,9 @@ export async function POST(request: Request) {
           .single<GovernanceMessage>();
 
       if (assistantMessageError || !assistantMessage) {
-        const conversationAvailableAfterFailure =
-          await isGovernanceConversationAvailable({
-            supabase,
-            conversationId: conversation.id,
-            organizationId: context.organization.id,
-          });
-
-        if (conversationAvailableAfterFailure === false) {
-          console.info(
-            "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
-          );
-
-          const transientAssistantMessage = buildTransientAssistantMessage({
-            organizationId: context.organization.id,
-            conversationId: conversation.id,
-            content: assistantText,
-            responseMode: effectiveResponseMode,
-            streaming: false,
-          });
-
-          const suggestions = await generateGovernanceFollowUpSuggestions({
-            userContent: content,
-            assistantText,
-            responseMode: effectiveResponseMode,
-            hasSelectedPdfAttachments,
-            selectedPdfAttachmentNames,
-          });
-
-          return NextResponse.json({
-            userMessage,
-            assistantMessage: transientAssistantMessage,
-            conversationTitle,
-            suggestions,
-            sources: finalResponseSources,
-            references: responseReferencesForClient,
-            persistenceSkipped: "conversation_removed_during_generation",
-          });
-        }
-
         console.error(
-          `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+          "[governance/chat] Erro ao salvar resposta da IA:",
+          assistantMessageError,
         );
 
         return NextResponse.json(
@@ -5319,22 +5084,9 @@ export async function POST(request: Request) {
             }
           }
         } catch (error) {
-          const detail = getCompactErrorMessage(error);
-
-          if (isRecoverableExternalError(error)) {
-            console.warn(
-              `[governance/chat] Streaming interrompido por falha temporária: ${detail}`,
-            );
-          } else {
-            console.error(
-              `[governance/chat] Falha não recuperável no streaming: ${detail}`,
-            );
-          }
-
+          console.error("[governance/chat] Erro OpenAI streaming:", error);
           send("error", {
-            error: isRecoverableExternalError(error)
-              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
-              : "Erro ao gerar resposta da IA institucional.",
+            error: "Erro ao gerar resposta da IA institucional.",
           });
           controller.close();
           return;
@@ -5441,52 +5193,6 @@ export async function POST(request: Request) {
           answer: assistantText,
         });
 
-        const conversationAvailableBeforeSave =
-          await isGovernanceConversationAvailable({
-            supabase,
-            conversationId: conversation.id,
-            organizationId: context.organization.id,
-          });
-
-        if (conversationAvailableBeforeSave === false) {
-          console.info(
-            "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
-          );
-
-          const transientAssistantMessage = buildTransientAssistantMessage({
-            organizationId: context.organization.id,
-            conversationId: conversation.id,
-            content: assistantText,
-            responseMode: effectiveResponseMode,
-            streaming: true,
-          });
-
-          const suggestions = await generateGovernanceFollowUpSuggestions({
-            userContent: content,
-            assistantText,
-            responseMode: effectiveResponseMode,
-            hasSelectedPdfAttachments,
-            selectedPdfAttachmentNames,
-          });
-
-          if (suggestions.length > 0) {
-            send("suggestions", { suggestions });
-          }
-
-          send("done", {
-            userMessage,
-            assistantMessage: transientAssistantMessage,
-            conversationTitle,
-            suggestions,
-            sources: finalResponseSources,
-            references: responseReferencesForClient,
-            persistenceSkipped: "conversation_removed_during_generation",
-          });
-
-          controller.close();
-          return;
-        }
-
         const { data: assistantMessage, error: assistantMessageError } =
           await supabase
             .from("governance_messages")
@@ -5556,54 +5262,9 @@ export async function POST(request: Request) {
             .single<GovernanceMessage>();
 
         if (assistantMessageError || !assistantMessage) {
-          const conversationAvailableAfterFailure =
-            await isGovernanceConversationAvailable({
-              supabase,
-              conversationId: conversation.id,
-              organizationId: context.organization.id,
-            });
-
-          if (conversationAvailableAfterFailure === false) {
-            console.info(
-              "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
-            );
-
-            const transientAssistantMessage = buildTransientAssistantMessage({
-              organizationId: context.organization.id,
-              conversationId: conversation.id,
-              content: assistantText,
-              responseMode: effectiveResponseMode,
-              streaming: true,
-            });
-
-            const suggestions = await generateGovernanceFollowUpSuggestions({
-              userContent: content,
-              assistantText,
-              responseMode: effectiveResponseMode,
-              hasSelectedPdfAttachments,
-              selectedPdfAttachmentNames,
-            });
-
-            if (suggestions.length > 0) {
-              send("suggestions", { suggestions });
-            }
-
-            send("done", {
-              userMessage,
-              assistantMessage: transientAssistantMessage,
-              conversationTitle,
-              suggestions,
-              sources: finalResponseSources,
-              references: responseReferencesForClient,
-              persistenceSkipped: "conversation_removed_during_generation",
-            });
-
-            controller.close();
-            return;
-          }
-
           console.error(
-            `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+            "[governance/chat] Erro ao salvar resposta da IA:",
+            assistantMessageError,
           );
 
           send("error", {

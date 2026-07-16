@@ -35,7 +35,6 @@ type ChatInputProps = {
   inputValue?: string;
   onInputValueChange?: (value: string) => void;
   externalTextareaRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
-  helperText?: string;
 };
 
 const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
@@ -75,7 +74,6 @@ export function ChatInput({
   inputValue,
   onInputValueChange,
   externalTextareaRef,
-  helperText,
 }: ChatInputProps) {
   const [internalValue, setInternalValue] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -201,7 +199,7 @@ export function ChatInput({
         className="flex flex-col gap-3 lg:flex-row lg:items-end"
       >
         <div
-          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-2 text-sm shadow-sm ${
+          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-3 text-sm shadow-sm ${
             isBlockedState
               ? "border-amber-300/70 opacity-90"
               : !isStrategic
@@ -229,7 +227,7 @@ export function ChatInput({
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
                   ? "Validando..."
-                  : "Digite sua pergunta..."
+                  : "Envie sua pergunta..."
             }
             value={value}
             onChange={handleChange}
@@ -375,24 +373,18 @@ export function ChatInput({
         )}
       </form>
 
-      {helperText ? (
-        <div className="w-full px-4">
+      {showResponseModes && (
+        <div className="mx-auto w-full max-w-3xl px-3">
           <div
             className="text-[11px]"
             style={{
               color: isStrategic ? theme.colors.textMuted : "#475569",
             }}
           >
-            {helperText}
-          </div>
-        </div>
-      ) : showResponseModes && !isStrategic ? (
-        <div className="mx-auto w-full max-w-3xl px-3">
-          <div className="text-[11px]" style={{ color: "#475569" }}>
             Modo de Resposta: {selectedModeLabel}
           </div>
         </div>
-      ) : null}
+      )}
 
       <div
         className="w-full px-4 py-3 text-center text-[12px] leading-relaxed"

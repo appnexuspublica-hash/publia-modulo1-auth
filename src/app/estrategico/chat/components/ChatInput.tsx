@@ -35,6 +35,7 @@ type ChatInputProps = {
   inputValue?: string;
   onInputValueChange?: (value: string) => void;
   externalTextareaRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
+  helperText?: string;
 };
 
 const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
@@ -74,6 +75,7 @@ export function ChatInput({
   inputValue,
   onInputValueChange,
   externalTextareaRef,
+  helperText,
 }: ChatInputProps) {
   const [internalValue, setInternalValue] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -194,16 +196,20 @@ export function ChatInput({
 
   return (
     <div className="flex flex-col gap-2">
-      <form onSubmit={handleSubmit} className="flex justify-center">
+      <form
+        onSubmit={handleSubmit}
+        className="flex flex-col gap-3 lg:flex-row lg:items-end"
+      >
         <div
-          className={`flex w-full max-w-3xl items-center rounded-2xl px-4 py-2 ${
+          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-2 text-sm shadow-sm ${
             isBlockedState
-              ? "border border-amber-300/70 opacity-90"
+              ? "border-amber-300/70 opacity-90"
               : !isStrategic
-                ? "border border-slate-300 shadow-sm"
-                : "border shadow-sm"
+                ? "border-slate-300"
+                : ""
           }`}
           style={{
+            minHeight: "58px",
             backgroundColor: isBlockedState
               ? "#efefef"
               : isStrategic
@@ -216,90 +222,6 @@ export function ChatInput({
                 : undefined,
           }}
         >
-          {showResponseModes && (
-            <div ref={menuRef} className="relative mr-3 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  if (isDisabled) return;
-                  setIsMenuOpen((prev) => !prev);
-                }}
-                disabled={isDisabled}
-                className={`inline-flex h-10 w-10 items-center justify-center rounded-full bg-transparent text-[28px] font-medium leading-none transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                  isStrategic ? "publia-strategic-plus-btn" : ""
-                }`}
-                style={{
-                  color: isStrategic ? theme.colors.textMuted : "#64748b",
-                }}
-                aria-label="Abrir menu de opções"
-                title="Abrir opções"
-              >
-                +
-              </button>
-
-              {isMenuOpen && (
-                <div
-                  className={`absolute bottom-[calc(100%+10px)] left-0 z-30 w-72 rounded-2xl border p-2 shadow-xl ${
-                    isStrategic
-                      ? "publia-strategic-response-menu"
-                      : "border-slate-200 bg-white"
-                  }`}
-                  style={
-                    isStrategic
-                      ? {
-                          borderColor: theme.colors.borderStrong,
-                          backgroundColor: theme.colors.bg,
-                        }
-                      : undefined
-                  }
-                >
-                  <div
-                    className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em]"
-                    style={{
-                      color: isStrategic ? theme.colors.textSoft : "#64748b",
-                    }}
-                  >
-                    Modo de resposta
-                  </div>
-
-                  <div className="flex flex-col gap-1">
-                    {modeOptions.map((option) => {
-                      const isActive = option === effectiveResponseMode;
-
-                      return (
-                        <button
-                          key={option}
-                          type="button"
-                          onClick={() => handleSelectResponseMode(option)}
-                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition ${
-                            isStrategic
-                              ? "publia-strategic-response-option"
-                              : isActive
-                                ? "bg-[#143755] text-white"
-                                : "text-slate-700 hover:bg-slate-100"
-                          }`}
-                          style={
-                            isStrategic
-                              ? {
-                                  color: isActive ? "#0f172a" : theme.colors.text,
-                                  backgroundColor: isActive
-                                    ? "#e5e5e5"
-                                    : "transparent",
-                                }
-                              : undefined
-                          }
-                        >
-                          <span>{RESPONSE_MODE_LABELS[option]}</span>
-                          {isActive && <span className="text-[12px]">✓</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
           <textarea
             ref={textareaRef}
             placeholder={
@@ -307,13 +229,13 @@ export function ChatInput({
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
                   ? "Validando..."
-                  : "Envie sua pergunta..."
+                  : "Digite sua pergunta..."
             }
             value={value}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             rows={1}
-            className="flex-1 resize-none overflow-y-auto border-none bg-transparent text-sm leading-normal outline-none"
+            className="max-h-[120px] min-h-10 flex-1 resize-none overflow-y-auto border-none bg-transparent py-2 text-sm leading-normal outline-none"
             style={{
               color: isBlockedState
                 ? "#64748b"
@@ -328,7 +250,7 @@ export function ChatInput({
             <button
               type="button"
               onClick={onStop}
-              className="ml-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-red-600 text-[14px] font-semibold text-white hover:bg-red-700"
+              className="mb-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-600 text-[14px] font-semibold text-white transition hover:bg-red-700"
               aria-label="Parar geração"
               title="Parar"
             >
@@ -338,7 +260,7 @@ export function ChatInput({
             <button
               type="submit"
               disabled={isDisabled}
-              className={`ml-3 inline-flex h-10 w-10 items-center justify-center rounded-full text-lg font-semibold ${
+              className={`mb-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-lg font-semibold transition ${
                 isBlockedState
                   ? "cursor-not-allowed bg-slate-300 text-slate-500"
                   : !isStrategic
@@ -348,9 +270,9 @@ export function ChatInput({
               style={
                 !isBlockedState && isStrategic
                   ? {
-                      backgroundColor: "#bbbbbb",
-                      color: "#0f172a",
-                      border: `1px solid ${theme.colors.borderStrong}`,
+                      backgroundColor: theme.colors.text,
+                      color: "#ffffff",
+                      border: `1px solid ${theme.colors.text}`,
                     }
                   : undefined
               }
@@ -361,20 +283,116 @@ export function ChatInput({
             </button>
           )}
         </div>
+
+        {showResponseModes && (
+          <div ref={menuRef} className="relative shrink-0 lg:w-52">
+            <button
+              type="button"
+              onClick={() => {
+                if (isDisabled) return;
+                setIsMenuOpen((prev) => !prev);
+              }}
+              disabled={isDisabled}
+              className="flex h-[58px] w-full items-center justify-between gap-3 rounded-3xl border bg-white px-4 text-left text-xs font-semibold outline-none transition disabled:cursor-not-allowed disabled:opacity-70"
+              style={{
+                borderColor: isStrategic
+                  ? theme.colors.borderStrong
+                  : "#dedede",
+                color: isStrategic ? theme.colors.text : "#0f3a4a",
+              }}
+              aria-haspopup="listbox"
+              aria-expanded={isMenuOpen}
+              aria-label="Modo de resposta"
+            >
+              <span>{selectedModeLabel}</span>
+              <span
+                aria-hidden="true"
+                className={`shrink-0 text-sm transition-transform ${
+                  isMenuOpen ? "rotate-180" : ""
+                }`}
+              >
+                ⌄
+              </span>
+            </button>
+
+            {isMenuOpen && (
+              <div
+                className="absolute bottom-[68px] right-0 z-50 w-72 rounded-3xl border bg-white p-2 shadow-xl"
+                style={{
+                  borderColor: isStrategic
+                    ? theme.colors.borderStrong
+                    : "#dedede",
+                  color: isStrategic ? theme.colors.text : "#334155",
+                }}
+                role="listbox"
+                aria-label="Modo de resposta"
+              >
+                <div
+                  className="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-[0.12em]"
+                  style={{
+                    color: isStrategic
+                      ? theme.colors.text
+                      : "#0f3a4a",
+                  }}
+                >
+                  Modo de resposta
+                </div>
+
+                <div className="space-y-0.5">
+                  {modeOptions.map((option) => {
+                    const isActive = option === effectiveResponseMode;
+
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        role="option"
+                        aria-selected={isActive}
+                        onClick={() => handleSelectResponseMode(option)}
+                        className="flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm font-semibold transition"
+                        style={{
+                          color: isStrategic
+                            ? theme.colors.text
+                            : isActive
+                              ? "#0f3a4a"
+                              : "#334155",
+                          backgroundColor: isActive
+                            ? isStrategic
+                              ? theme.colors.bgSecondary
+                              : "#eef5f7"
+                            : "transparent",
+                        }}
+                      >
+                        <span>{RESPONSE_MODE_LABELS[option]}</span>
+                        {isActive && <span className="text-[12px]">✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </form>
 
-      {showResponseModes && (
-        <div className="mx-auto w-full max-w-3xl px-3">
+      {helperText ? (
+        <div className="w-full px-4">
           <div
             className="text-[11px]"
             style={{
               color: isStrategic ? theme.colors.textMuted : "#475569",
             }}
           >
+            {helperText}
+          </div>
+        </div>
+      ) : showResponseModes && !isStrategic ? (
+        <div className="mx-auto w-full max-w-3xl px-3">
+          <div className="text-[11px]" style={{ color: "#475569" }}>
             Modo de Resposta: {selectedModeLabel}
           </div>
         </div>
-      )}
+      ) : null}
 
       <div
         className="w-full px-4 py-3 text-center text-[12px] leading-relaxed"
@@ -431,7 +449,7 @@ export function ChatInput({
             isBlockedState
               ? "#64748b"
               : isStrategic
-                ? "rgba(255, 255, 255, 0.8)"
+                ? theme.colors.textMuted
                 : "#475569"
           };
         }

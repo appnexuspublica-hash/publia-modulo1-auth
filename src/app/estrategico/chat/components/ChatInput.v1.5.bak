@@ -201,7 +201,7 @@ export function ChatInput({
         className="flex flex-col gap-3 lg:flex-row lg:items-end"
       >
         <div
-          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-2 text-sm shadow-sm ${
+          className={`flex min-w-0 flex-1 items-end gap-3 rounded-3xl border px-4 py-3 text-sm shadow-sm ${
             isBlockedState
               ? "border-amber-300/70 opacity-90"
               : !isStrategic
@@ -229,7 +229,7 @@ export function ChatInput({
                 ? "Gerando resposta… (você pode PARAR)"
                 : disabled
                   ? "Validando..."
-                  : "Digite sua pergunta..."
+                  : "Envie sua pergunta..."
             }
             value={value}
             onChange={handleChange}

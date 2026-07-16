@@ -1067,8 +1067,9 @@ function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
   }
 
   return [
-    "**Base Legal:**  ",
-    blocks.join("  \n"),
+    "**Base Legal:**",
+    "",
+    blocks.join("\n"),
   ].join("\n");
 }
 
