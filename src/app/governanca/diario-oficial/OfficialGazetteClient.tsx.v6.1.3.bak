@@ -9,11 +9,9 @@ import {
   useTransition,
 } from "react";
 import {
-  ExternalLink,
   FileText,
   Loader2,
   Newspaper,
-  Pencil,
   RotateCcw,
   Save,
   Search,
@@ -580,20 +578,30 @@ export default function OfficialGazetteClient() {
         ? payload.imported.length
         : 0;
       const failedCount = Array.isArray(payload.failed) ? payload.failed.length : 0;
-      const cutoffEdition = payload?.cutoff?.editionNumber ?? null;
-      const cutoffDate = payload?.cutoff?.publicationDate ?? null;
+      const metadataUpdatedCount = Array.isArray(
+        payload?.metadataBackfill?.updated,
+      )
+        ? payload.metadataBackfill.updated.length
+        : 0;
 
-      const cutoffLabel =
-        cutoffEdition || cutoffDate
-          ? ` Marco atual: ${
-              cutoffEdition ? `edição ${cutoffEdition}` : "edição sem número"
-            }${cutoffDate ? `, publicada em ${formatDate(cutoffDate)}` : ""}.`
-          : "";
+      const successParts: string[] = [];
+
+      if (importedCount > 0) {
+        successParts.push(
+          `${importedCount} nova(s) edição(ões) importada(s) e processada(s).`,
+        );
+      }
+
+      if (metadataUpdatedCount > 0) {
+        successParts.push(
+          `${metadataUpdatedCount} edição(ões) existente(s) numerada(s) a partir do próprio PDF.`,
+        );
+      }
 
       setSuccessMessage(
-        importedCount > 0
-          ? `${importedCount} nova(s) edição(ões) importada(s) e processada(s).${cutoffLabel}`
-          : `Nenhuma nova edição encontrada.${cutoffLabel}`,
+        successParts.length > 0
+          ? successParts.join(" ")
+          : "Nenhuma nova edição encontrada.",
       );
 
       if (failedCount > 0) {
@@ -611,184 +619,6 @@ export default function OfficialGazetteClient() {
       );
     } finally {
       setIsSyncing(false);
-    }
-  }
-
-
-
-
-  async function handleOpenDocumentPdf(document: OfficialGazetteDocumentRow) {
-    setDocumentActionKey(`open:${document.id}`);
-
-    try {
-      const response = await fetch(
-        `/api/governance/official-gazette-documents?action=open&documentId=${encodeURIComponent(document.id)}`,
-        {
-          method: "GET",
-          cache: "no-store",
-        },
-      );
-
-      const payload = await response.json();
-
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Não foi possível abrir o PDF.");
-      }
-
-      const pdfUrl =
-        typeof payload?.url === "string" && payload.url.trim()
-          ? payload.url.trim()
-          : document.pdf_url;
-
-      if (!pdfUrl) {
-        throw new Error("Esta edição não possui um PDF disponível.");
-      }
-
-      window.open(pdfUrl, "_blank", "noopener,noreferrer");
-    } catch (error) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Erro inesperado ao abrir o PDF.",
-        },
-      }));
-    } finally {
-      setDocumentActionKey(null);
-    }
-  }
-
-  async function handleEditDocument(document: OfficialGazetteDocumentRow) {
-    const editionNumberInput = window.prompt(
-      "Número da edição:",
-      document.edition_number ?? "",
-    );
-
-    if (editionNumberInput === null) {
-      return;
-    }
-
-    const currentEditionDate = document.publication_date
-      ? document.publication_date.split("-").reverse().join("/")
-      : "";
-
-    const dateInput = window.prompt(
-      "Data da edição (DD/MM/AAAA):",
-      currentEditionDate,
-    );
-
-    if (dateInput === null) {
-      return;
-    }
-
-    const editionNumber = editionNumberInput.trim();
-    const editionDateInput = dateInput.trim();
-    const editionDateMatch = editionDateInput.match(
-      /^(\d{2})\/(\d{2})\/(\d{4})$/,
-    );
-    const editionDate = editionDateMatch
-      ? `${editionDateMatch[3]}-${editionDateMatch[2]}-${editionDateMatch[1]}`
-      : "";
-
-    if (!editionNumber) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message: "Informe o número da edição.",
-        },
-      }));
-      return;
-    }
-
-    if (!editionDateMatch) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message: "Informe a data no formato DD/MM/AAAA.",
-        },
-      }));
-      return;
-    }
-
-    const parsedEditionDate = new Date(`${editionDate}T00:00:00`);
-
-    if (
-      Number.isNaN(parsedEditionDate.getTime()) ||
-      parsedEditionDate.getFullYear() !== Number(editionDateMatch[3]) ||
-      parsedEditionDate.getMonth() + 1 !== Number(editionDateMatch[2]) ||
-      parsedEditionDate.getDate() !== Number(editionDateMatch[1])
-    ) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message: "Informe uma data válida no formato DD/MM/AAAA.",
-        },
-      }));
-      return;
-    }
-
-    setDocumentActionKey(`edit:${document.id}`);
-
-    try {
-      const response = await fetch("/api/governance/official-gazette-documents", {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          documentId: document.id,
-          editionNumber,
-          editionDate,
-        }),
-      });
-
-      const payload = await response.json();
-
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Não foi possível editar a edição.");
-      }
-
-      const updatedDocument =
-        payload?.document as OfficialGazetteDocumentRow | undefined;
-
-      if (updatedDocument) {
-        setDocuments((currentDocuments) =>
-          sortDocumentsByEditionDesc(
-            currentDocuments.map((currentDocument) =>
-              currentDocument.id === updatedDocument.id
-                ? updatedDocument
-                : currentDocument,
-            ),
-          ),
-        );
-      }
-
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "success",
-          message: "Edição atualizada com sucesso.",
-        },
-      }));
-    } catch (error) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Erro inesperado ao editar a edição.",
-        },
-      }));
-    } finally {
-      setDocumentActionKey(null);
     }
   }
 
@@ -1181,8 +1011,7 @@ export default function OfficialGazetteClient() {
                 )}
                 {isSyncing ? "Verificando..." : "Verificar novas edições"}
               </button>
-
-                          </div>
+            </div>
 
             {isSyncing ? (
               <div
@@ -1350,36 +1179,18 @@ export default function OfficialGazetteClient() {
                       className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4"
                     >
                       <div className="flex flex-col gap-3">
-                        <div className="min-w-0">
+                        <div>
                           <p className="flex items-center gap-2 whitespace-nowrap text-sm text-slate-600">
-                            {document.storage_path || document.pdf_url ? (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenDocumentPdf(document)}
-                                disabled={documentActionKey !== null}
-                                aria-label={`Abrir PDF da edição ${document.edition_number ?? document.title}`}
-                                title="Abrir PDF"
-                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#dedede] bg-white text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                {documentActionKey === `open:${document.id}` ? (
-                                  <Loader2 size={13} className="animate-spin" />
-                                ) : (
-                                  <ExternalLink size={13} />
-                                )}
-                              </button>
-                            ) : (
-                              <FileText
-                                size={16}
-                                className="shrink-0 text-[#0f3a4a]"
-                              />
-                            )}
-
+                            <FileText
+                              size={16}
+                              className="shrink-0 text-[#0f3a4a]"
+                            />
                             <span className="min-w-0 overflow-hidden text-ellipsis">
-                              Edição: {document.edition_number || "Não informada"} · Data: {formatDate(document.publication_date)}
+                              Edição: {document.edition_number || "Não informada"} · Publicação: {formatDate(document.publication_date)}
                             </span>
                           </p>
 
-                          <p className="mt-1 truncate pl-9 text-xs text-slate-500">
+                          <p className="mt-1 truncate pl-6 text-xs text-slate-500">
                             {formatFileSize(document.file_size)} · Cadastrado em{" "}
                             {formatDateTime(document.created_at)}
                           </p>
@@ -1441,7 +1252,7 @@ export default function OfficialGazetteClient() {
                             ) : (
                               <FileText size={14} />
                             )}
-                            {isExpanded ? "Ocultar" : "Atos"}
+                            {isExpanded ? "Ocultar atos" : "Ver atos"}
                           </button>
 
                           <button
@@ -1460,31 +1271,16 @@ export default function OfficialGazetteClient() {
 
                           <button
                             type="button"
-                            onClick={() => handleEditDocument(document)}
-                            disabled={documentActionKey !== null}
-                            className="inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl border border-[#dedede] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {documentActionKey === `edit:${document.id}` ? (
-                              <Loader2 size={14} className="animate-spin" />
-                            ) : (
-                              <Pencil size={14} />
-                            )}
-                            Editar
-                          </button>
-
-                          <button
-                            type="button"
                             onClick={() => handleDeleteDocument(document)}
                             disabled={documentActionKey !== null}
-                            aria-label={`Excluir ${document.title}`}
-                            title="Excluir"
-                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            className="inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             {documentActionKey === `delete:${document.id}` ? (
                               <Loader2 size={14} className="animate-spin" />
                             ) : (
                               <Trash2 size={14} />
                             )}
+                            Excluir
                           </button>
                         </div>
 

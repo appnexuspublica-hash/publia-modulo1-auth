@@ -10,7 +10,6 @@ import {
   sanitizeExtractedText,
 } from "@/lib/pdf/extract";
 import { normalizeOfficialGazetteActs } from "@/lib/pdf/officialGazetteActNormalizer";
-import { buildOfficialGazetteActIndex } from "@/lib/governance/official-gazette/act-index";
 
 export const dynamic = "force-dynamic";
 
@@ -351,26 +350,6 @@ async function processOfficialGazetteDocumentBuffer({
 
   const chunks = splitOfficialGazetteActs(extraction.text);
 
-  const { data: documentMetadata, error: documentMetadataError } = await supabase
-    .from("governance_official_gazette_documents")
-    .select("edition_number, publication_date")
-    .eq("id", documentId)
-    .eq("organization_id", organizationId)
-    .maybeSingle();
-
-  if (documentMetadataError) {
-    console.warn(
-      "[governance] Não foi possível carregar os metadados da edição para o índice de atos:",
-      documentMetadataError,
-    );
-  }
-
-  await supabase
-    .from("governance_official_gazette_acts")
-    .delete()
-    .eq("document_id", documentId)
-    .eq("organization_id", organizationId);
-
   await supabase
     .from("governance_official_gazette_chunks")
     .delete()
@@ -378,7 +357,7 @@ async function processOfficialGazetteDocumentBuffer({
     .eq("organization_id", organizationId);
 
   if (chunks.length > 0) {
-    const { data: insertedChunks, error: chunksError } = await supabase
+    const { error: chunksError } = await supabase
       .from("governance_official_gazette_chunks")
       .insert(
         chunks.map((chunk) => ({
@@ -389,8 +368,7 @@ async function processOfficialGazetteDocumentBuffer({
           title: chunk.title,
           content: chunk.content,
         })),
-      )
-      .select("id, page_number, section_type, title, content");
+      );
 
     if (chunksError) {
       console.error(
@@ -420,61 +398,6 @@ async function processOfficialGazetteDocumentBuffer({
         },
         httpStatus: 500,
       };
-    }
-
-    const actIndex = buildOfficialGazetteActIndex({
-      chunks: insertedChunks ?? [],
-      documentId,
-      editionNumber:
-        typeof documentMetadata?.edition_number === "string"
-          ? documentMetadata.edition_number
-          : null,
-      publicationDate:
-        typeof documentMetadata?.publication_date === "string"
-          ? documentMetadata.publication_date
-          : null,
-    });
-
-    if (actIndex.length > 0) {
-      const { error: actsError } = await supabase
-        .from("governance_official_gazette_acts")
-        .insert(
-          actIndex.map((act) => ({
-            ...act,
-            organization_id: organizationId,
-          })),
-        );
-
-      if (actsError) {
-        console.error(
-          "[governance] Erro ao salvar o índice estruturado de atos:",
-          actsError,
-        );
-
-        const { data: updatedDocument } = await supabase
-          .from("governance_official_gazette_documents")
-          .update({
-            extraction_status: "completed",
-            indexing_status: "error",
-          })
-          .eq("id", documentId)
-          .eq("organization_id", organizationId)
-          .select(DOCUMENT_SELECT)
-          .single();
-
-        return {
-          document: updatedDocument,
-          extraction: {
-            ok: false,
-            status: "completed",
-            indexingStatus: "error",
-            message:
-              "Texto e trechos foram salvos, mas o índice estruturado de atos falhou.",
-            chunksCount: chunks.length,
-          },
-          httpStatus: 500,
-        };
-      }
     }
   }
 
@@ -561,95 +484,6 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
     const gazetteId = searchParams.get("gazetteId");
-    const action = searchParams.get("action");
-    const documentId = searchParams.get("documentId");
-
-    if (action === "open") {
-      if (!documentId) {
-        return NextResponse.json(
-          { error: "Documento não informado." },
-          { status: 400 },
-        );
-      }
-
-      const { data: document, error: documentError } = await supabase
-        .from("governance_official_gazette_documents")
-        .select("id, storage_path, pdf_url")
-        .eq("organization_id", context.organization.id)
-        .eq("id", documentId)
-        .eq("active", true)
-        .maybeSingle();
-
-      if (documentError) {
-        console.error(
-          "[governance] Erro ao localizar PDF do Diário Oficial:",
-          documentError,
-        );
-
-        return NextResponse.json(
-          { error: "Não foi possível localizar o PDF da edição." },
-          { status: 500 },
-        );
-      }
-
-      if (!document) {
-        return NextResponse.json(
-          { error: "Edição não encontrada." },
-          { status: 404 },
-        );
-      }
-
-      const storagePath =
-        typeof document.storage_path === "string"
-          ? document.storage_path.trim()
-          : "";
-
-      if (storagePath) {
-        const bucket =
-          process.env.SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
-          process.env.NEXT_PUBLIC_SUPABASE_GOVERNANCE_DOCUMENTS_BUCKET ||
-          DEFAULT_BUCKET;
-
-        const { data: signedData, error: signedError } = await supabase.storage
-          .from(bucket)
-          .createSignedUrl(storagePath, 300);
-
-        if (signedError || !signedData?.signedUrl) {
-          console.error(
-            "[governance] Erro ao gerar link temporário do Diário Oficial:",
-            signedError,
-          );
-
-          return NextResponse.json(
-            {
-              error:
-                "Não foi possível gerar o link do PDF. Verifique o bucket configurado no Supabase.",
-            },
-            { status: 500 },
-          );
-        }
-
-        return NextResponse.json({
-          url: signedData.signedUrl,
-          expiresIn: 300,
-        });
-      }
-
-      const fallbackUrl =
-        typeof document.pdf_url === "string" ? document.pdf_url.trim() : "";
-
-      if (fallbackUrl) {
-        return NextResponse.json({
-          url: fallbackUrl,
-          expiresIn: null,
-        });
-      }
-
-      return NextResponse.json(
-        { error: "Esta edição não possui arquivo PDF disponível." },
-        { status: 404 },
-      );
-    }
 
     let query = supabase
       .from("governance_official_gazette_documents")
@@ -1136,134 +970,6 @@ export async function POST(request: Request) {
   }
 }
 
-
-
-export async function PUT(request: Request) {
-  try {
-    const { supabase, context, response } =
-      await getAuthenticatedGovernanceContext();
-
-    if (response || !context) {
-      return response;
-    }
-
-    const allowedTechnicalRoles = ["owner", "admin", "manager"];
-
-    if (!allowedTechnicalRoles.includes(context.membership.technical_role)) {
-      return NextResponse.json(
-        { error: "Seu perfil não pode editar edições do Diário Oficial." },
-        { status: 403 },
-      );
-    }
-
-    const body = await request.json().catch(() => null);
-    const documentId =
-      typeof body?.documentId === "string" ? body.documentId.trim() : "";
-    const editionNumber =
-      typeof body?.editionNumber === "string" ? body.editionNumber.trim() : "";
-    const editionDate =
-      typeof body?.editionDate === "string" ? body.editionDate.trim() : "";
-
-    if (!documentId) {
-      return NextResponse.json(
-        { error: "Informe a edição do Diário Oficial." },
-        { status: 400 },
-      );
-    }
-
-    if (!editionNumber) {
-      return NextResponse.json(
-        { error: "Informe o número da edição." },
-        { status: 400 },
-      );
-    }
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(editionDate)) {
-      return NextResponse.json(
-        { error: "Informe a data no formato AAAA-MM-DD." },
-        { status: 400 },
-      );
-    }
-
-    const parsedDate = new Date(`${editionDate}T00:00:00Z`);
-
-    if (
-      Number.isNaN(parsedDate.getTime()) ||
-      parsedDate.toISOString().slice(0, 10) !== editionDate
-    ) {
-      return NextResponse.json(
-        { error: "Informe uma data válida." },
-        { status: 400 },
-      );
-    }
-
-    const { data: document, error: documentError } = await supabase
-      .from("governance_official_gazette_documents")
-      .select("id")
-      .eq("id", documentId)
-      .eq("organization_id", context.organization.id)
-      .eq("active", true)
-      .maybeSingle();
-
-    if (documentError) {
-      console.error(
-        "[governance] Erro ao buscar edição do Diário Oficial para editar:",
-        documentError,
-      );
-
-      return NextResponse.json(
-        { error: "Não foi possível localizar a edição." },
-        { status: 500 },
-      );
-    }
-
-    if (!document) {
-      return NextResponse.json(
-        { error: "Edição do Diário Oficial não encontrada." },
-        { status: 404 },
-      );
-    }
-
-    const { data: updatedDocument, error: updateError } = await supabase
-      .from("governance_official_gazette_documents")
-      .update({
-        title: `Diário Oficial nº ${editionNumber}`,
-        edition_number: editionNumber,
-        publication_date: editionDate,
-      })
-      .eq("id", documentId)
-      .eq("organization_id", context.organization.id)
-      .select(DOCUMENT_SELECT)
-      .single();
-
-    if (updateError) {
-      console.error(
-        "[governance] Erro ao editar edição do Diário Oficial:",
-        updateError,
-      );
-
-      return NextResponse.json(
-        { error: "Não foi possível editar a edição." },
-        { status: 500 },
-      );
-    }
-
-    return NextResponse.json({
-      ok: true,
-      document: updatedDocument,
-    });
-  } catch (error) {
-    console.error(
-      "[governance] Erro inesperado ao editar edição do Diário Oficial:",
-      error,
-    );
-
-    return NextResponse.json(
-      { error: "Erro inesperado ao editar edição do Diário Oficial." },
-      { status: 500 },
-    );
-  }
-}
 
 export async function PATCH(request: Request) {
   try {

@@ -5,6 +5,10 @@ import { createServerClient } from "@supabase/ssr";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 import { extractPdfTextFromBuffer, sanitizeExtractedText } from "@/lib/pdf/extract";
+import {
+  buildInstitutionalDocumentChunks,
+  institutionalChunkStatusFromReviewStatus,
+} from "@/lib/governance/institutional-documents/chunk-index";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -338,6 +342,77 @@ async function fetchInstitutionalDocument(
     .single();
 }
 
+async function replaceInstitutionalDocumentChunks(options: {
+  supabase: ReturnType<typeof createWritableSupabaseRouteClient>;
+  organizationId: string;
+  documentId: string;
+  extractedText: string | null;
+  reviewStatus: unknown;
+}) {
+  const { supabase, organizationId, documentId, extractedText, reviewStatus } =
+    options;
+
+  const { error: deleteError } = await supabase
+    .from("institutional_document_chunks")
+    .delete()
+    .eq("organization_id", organizationId)
+    .eq("document_id", documentId);
+
+  if (deleteError) {
+    throw new Error(
+      `Não foi possível limpar os chunks institucionais anteriores: ${deleteError.message}`,
+    );
+  }
+
+  if (!extractedText) {
+    return 0;
+  }
+
+  const chunks = buildInstitutionalDocumentChunks({
+    documentId,
+    organizationId,
+    extractedText,
+    status: institutionalChunkStatusFromReviewStatus(reviewStatus),
+  });
+
+  if (chunks.length === 0) {
+    return 0;
+  }
+
+  const { error: insertError } = await supabase
+    .from("institutional_document_chunks")
+    .insert(chunks);
+
+  if (insertError) {
+    throw new Error(
+      `Não foi possível gravar os chunks institucionais: ${insertError.message}`,
+    );
+  }
+
+  return chunks.length;
+}
+
+async function updateInstitutionalChunkStatus(options: {
+  supabase: ReturnType<typeof createWritableSupabaseRouteClient>;
+  organizationId: string;
+  documentId: string;
+  reviewStatus: unknown;
+}) {
+  const { error } = await options.supabase
+    .from("institutional_document_chunks")
+    .update({
+      status: institutionalChunkStatusFromReviewStatus(options.reviewStatus),
+    })
+    .eq("organization_id", options.organizationId)
+    .eq("document_id", options.documentId);
+
+  if (error) {
+    throw new Error(
+      `Não foi possível atualizar o status dos chunks institucionais: ${error.message}`,
+    );
+  }
+}
+
 export async function GET() {
   try {
     const auth = await getAuthenticatedReadContext();
@@ -515,6 +590,53 @@ export async function POST(request: Request) {
       );
     }
 
+    if (extraction.indexingStatus === "indexed" && extraction.text) {
+      try {
+        const chunkCount = await replaceInstitutionalDocumentChunks({
+          supabase,
+          organizationId,
+          documentId: document.id,
+          extractedText: extraction.text,
+          reviewStatus: document.review_status,
+        });
+
+        document.metadata = {
+          ...(document.metadata ?? {}),
+          institutional_chunk_count: chunkCount,
+          institutional_chunks_indexed_at: new Date().toISOString(),
+        };
+      } catch (chunkError) {
+        console.error(
+          "[governance] Erro ao persistir chunks institucionais:",
+          chunkError,
+        );
+
+        await supabase
+          .from("institutional_documents")
+          .update({
+            indexing_status: "failed",
+            metadata: {
+              ...(document.metadata ?? {}),
+              extraction_message:
+                chunkError instanceof Error
+                  ? chunkError.message
+                  : "Falha ao persistir os chunks institucionais.",
+            },
+          })
+          .eq("organization_id", organizationId)
+          .eq("id", document.id);
+
+        return NextResponse.json(
+          {
+            error:
+              "Documento salvo, mas os chunks persistentes não puderam ser criados. Use Reprocessar após verificar a migration 6.1.8-B.",
+            documentId: document.id,
+          },
+          { status: 500 },
+        );
+      }
+    }
+
     return NextResponse.json({
       document,
     });
@@ -656,6 +778,66 @@ export async function PATCH(request: Request) {
         );
       }
 
+      if (extraction.indexingStatus === "indexed" && extraction.text) {
+        try {
+          const chunkCount = await replaceInstitutionalDocumentChunks({
+            supabase,
+            organizationId,
+            documentId,
+            extractedText: extraction.text,
+            reviewStatus: document.review_status,
+          });
+
+          await supabase
+            .from("institutional_documents")
+            .update({
+              metadata: {
+                ...(document.metadata ?? {}),
+                institutional_chunk_count: chunkCount,
+                institutional_chunks_indexed_at: new Date().toISOString(),
+              },
+            })
+            .eq("organization_id", organizationId)
+            .eq("id", documentId);
+        } catch (chunkError) {
+          console.error(
+            "[governance] Erro ao reindexar chunks institucionais:",
+            chunkError,
+          );
+
+          await supabase
+            .from("institutional_documents")
+            .update({
+              indexing_status: "failed",
+              metadata: {
+                ...(document.metadata ?? {}),
+                extraction_message:
+                  chunkError instanceof Error
+                    ? chunkError.message
+                    : "Falha ao reindexar os chunks institucionais.",
+              },
+            })
+            .eq("organization_id", organizationId)
+            .eq("id", documentId);
+
+          return NextResponse.json(
+            {
+              error:
+                "O texto foi extraído, mas os chunks persistentes não puderam ser reindexados.",
+            },
+            { status: 500 },
+          );
+        }
+      } else {
+        await replaceInstitutionalDocumentChunks({
+          supabase,
+          organizationId,
+          documentId,
+          extractedText: null,
+          reviewStatus: document.review_status,
+        });
+      }
+
       return NextResponse.json({ document });
     }
 
@@ -743,6 +925,30 @@ export async function PATCH(request: Request) {
         { error: "Não foi possível atualizar o documento institucional." },
         { status: 500 },
       );
+    }
+
+    if (["approve", "archive", "restore"].includes(action)) {
+      try {
+        await updateInstitutionalChunkStatus({
+          supabase,
+          organizationId,
+          documentId,
+          reviewStatus: document.review_status,
+        });
+      } catch (chunkStatusError) {
+        console.error(
+          "[governance] Erro ao sincronizar status dos chunks institucionais:",
+          chunkStatusError,
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "O documento foi atualizado, mas o status dos chunks não pôde ser sincronizado.",
+          },
+          { status: 500 },
+        );
+      }
     }
 
     return NextResponse.json({ document });

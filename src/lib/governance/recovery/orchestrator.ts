@@ -1,0 +1,202 @@
+import { classifyGovernanceRecoveryIntent } from "./intent";
+import {
+  recoverInstitutionalEvidence,
+  recoverLegalEvidence,
+  recoverOfficialGazetteEvidence,
+} from "./providers";
+import { normalizeRecoveryText } from "./normalize";
+import type {
+  GovernanceRecoveryEvidence,
+  GovernanceRecoveryParams,
+  GovernanceRecoveryResponsePolicy,
+  GovernanceRecoveryResult,
+} from "./types";
+
+const DEFAULT_MAX_EVIDENCE = 12;
+const DEFAULT_MAX_CONTEXT_CHARS = 24000;
+
+function deduplicate(items: GovernanceRecoveryEvidence[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.provider}:${item.documentId ?? ""}:${item.chunkId ?? item.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildContext(items: GovernanceRecoveryEvidence[], maxChars: number) {
+  const parts: string[] = [];
+  let used = 0;
+
+  for (const item of items) {
+    const header = [
+      `[FONTE: ${item.provider}]`,
+      `Título: ${item.title}`,
+      item.metadata.edition_number ? `Edição: ${item.metadata.edition_number}` : "",
+      item.metadata.publication_date ? `Data: ${item.metadata.publication_date}` : "",
+      item.metadata.page_number ? `Página: ${item.metadata.page_number}` : "",
+      item.sourceUrl ? `URL: ${item.sourceUrl}` : "",
+    ].filter(Boolean).join("\n");
+
+    const block = `${header}\n${item.content}`.trim();
+    if (used + block.length > maxChars) {
+      const remaining = maxChars - used;
+      if (remaining > 300) parts.push(block.slice(0, remaining));
+      break;
+    }
+    parts.push(block);
+    used += block.length;
+  }
+
+  return parts.join("\n\n---\n\n");
+}
+
+function isComparisonQuestion(question: string) {
+  const normalized = normalizeRecoveryText(question);
+  return /\b(compare|comparar|comparacao|confronte|relacione)\b/.test(normalized);
+}
+
+function isDirectDocumentQuestion(question: string) {
+  const normalized = normalizeRecoveryText(question);
+  return /\b(o que dispoe|o que estabelece|o que determina|o que diz|qual o conteudo|resuma)\b/.test(normalized);
+}
+
+function buildResponsePolicy(params: {
+  question: string;
+  selected: GovernanceRecoveryEvidence[];
+  exactAct: GovernanceRecoveryEvidence[];
+  exactInstitutional: GovernanceRecoveryEvidence[];
+}): GovernanceRecoveryResponsePolicy {
+  const comparisonRequested = isComparisonQuestion(params.question);
+  const hasInstitutional = params.selected.some((item) => item.provider === "institutional");
+  const hasGazette = params.selected.some((item) => item.provider === "official_gazette");
+  const comparisonReady = comparisonRequested && hasInstitutional && hasGazette;
+  const municipalEvidenceSufficient = params.selected.some(
+    (item) => item.provider === "institutional" || item.provider === "official_gazette",
+  );
+
+  if (comparisonRequested && !comparisonReady) {
+    return {
+      mode: "insufficient_evidence",
+      municipalEvidenceSufficient,
+      comparisonReady: false,
+      externalSourcesAllowed: false,
+      reason: "A comparação solicitada não possui duas evidências municipais tematicamente compatíveis.",
+    };
+  }
+
+  if (comparisonReady) {
+    return {
+      mode: "comparison",
+      municipalEvidenceSufficient: true,
+      comparisonReady: true,
+      externalSourcesAllowed: false,
+      reason: "Há evidência institucional e ato do Diário Oficial para comparação.",
+    };
+  }
+
+  if (params.exactAct.length > 0 || params.exactInstitutional.length > 0) {
+    return {
+      mode: isDirectDocumentQuestion(params.question) ? "direct_document" : "document_summary",
+      municipalEvidenceSufficient: true,
+      comparisonReady: false,
+      externalSourcesAllowed: false,
+      reason: "A pergunta aponta para documento municipal identificado de forma exata.",
+    };
+  }
+
+  return {
+    mode: municipalEvidenceSufficient ? "document_summary" : "legal_analysis",
+    municipalEvidenceSufficient,
+    comparisonReady: false,
+    externalSourcesAllowed: !municipalEvidenceSufficient,
+    reason: municipalEvidenceSufficient
+      ? "Há evidência municipal suficiente para responder sem fontes externas."
+      : "Não foi localizada evidência municipal suficiente.",
+  };
+}
+
+export async function orchestrateGovernanceRecovery(
+  params: GovernanceRecoveryParams,
+): Promise<GovernanceRecoveryResult> {
+  const intent = classifyGovernanceRecoveryIntent(params);
+  const queriedProviders = [...intent.allowedProviders];
+  const tasks: Promise<GovernanceRecoveryEvidence[]>[] = [];
+
+  for (const provider of intent.allowedProviders) {
+    if (provider === "official_gazette") {
+      tasks.push(recoverOfficialGazetteEvidence(params));
+    } else if (provider === "institutional") {
+      tasks.push(recoverInstitutionalEvidence(params));
+    } else if (provider === "legal") {
+      tasks.push(recoverLegalEvidence(params.question));
+    }
+  }
+
+  const settled = await Promise.allSettled(tasks);
+  const candidates = settled.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : []
+  );
+
+  const ranked = deduplicate(candidates)
+    .sort((a, b) => b.score - a.score || b.confidence - a.confidence);
+
+  const exactAct = ranked.filter(
+    (item) => item.provider === "official_gazette" && item.metadata.exact_reference === true,
+  );
+  const exactInstitutional = ranked.filter(
+    (item) => item.provider === "institutional" && item.metadata.exact_document === true,
+  );
+
+  const comparisonRequested = isComparisonQuestion(params.question);
+  let selectedPool = ranked;
+
+  if (comparisonRequested) {
+    const institutionalPool = exactInstitutional.length > 0
+      ? exactInstitutional
+      : ranked.filter((item) => item.provider === "institutional" && item.score >= 20);
+    const gazettePool = exactAct.length > 0
+      ? exactAct
+      : ranked.filter((item) => item.provider === "official_gazette" && item.score >= 45);
+
+    selectedPool = [
+      ...institutionalPool.slice(0, 6),
+      ...gazettePool.slice(0, 3),
+    ];
+  } else if (exactAct.length > 0) {
+    selectedPool = exactAct.slice(0, 1);
+  } else if (exactInstitutional.length > 0) {
+    selectedPool = exactInstitutional;
+  }
+
+  const selected = selectedPool.slice(
+    0,
+    Math.max(1, params.maxEvidence ?? DEFAULT_MAX_EVIDENCE),
+  );
+
+  const returnedByProvider = selected.reduce<Record<string, number>>((acc, item) => {
+    acc[item.provider] = (acc[item.provider] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  const responsePolicy = buildResponsePolicy({
+    question: params.question,
+    selected,
+    exactAct,
+    exactInstitutional,
+  });
+
+  return {
+    intent,
+    evidence: selected,
+    contextText: buildContext(selected, params.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS),
+    diagnostics: {
+      queriedProviders,
+      returnedByProvider,
+      totalCandidates: candidates.length,
+      selectedEvidence: selected.length,
+    },
+    responsePolicy,
+  };
+}

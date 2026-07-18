@@ -9,7 +9,6 @@ import {
   useTransition,
 } from "react";
 import {
-  ExternalLink,
   FileText,
   Loader2,
   Newspaper,
@@ -615,51 +614,6 @@ export default function OfficialGazetteClient() {
   }
 
 
-
-
-  async function handleOpenDocumentPdf(document: OfficialGazetteDocumentRow) {
-    setDocumentActionKey(`open:${document.id}`);
-
-    try {
-      const response = await fetch(
-        `/api/governance/official-gazette-documents?action=open&documentId=${encodeURIComponent(document.id)}`,
-        {
-          method: "GET",
-          cache: "no-store",
-        },
-      );
-
-      const payload = await response.json();
-
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Não foi possível abrir o PDF.");
-      }
-
-      const pdfUrl =
-        typeof payload?.url === "string" && payload.url.trim()
-          ? payload.url.trim()
-          : document.pdf_url;
-
-      if (!pdfUrl) {
-        throw new Error("Esta edição não possui um PDF disponível.");
-      }
-
-      window.open(pdfUrl, "_blank", "noopener,noreferrer");
-    } catch (error) {
-      setDocumentFeedbackById((currentFeedbacks) => ({
-        ...currentFeedbacks,
-        [document.id]: {
-          type: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Erro inesperado ao abrir o PDF.",
-        },
-      }));
-    } finally {
-      setDocumentActionKey(null);
-    }
-  }
 
   async function handleEditDocument(document: OfficialGazetteDocumentRow) {
     const editionNumberInput = window.prompt(
@@ -1350,36 +1304,18 @@ export default function OfficialGazetteClient() {
                       className="rounded-2xl border border-[#dedede] bg-[#f8f8f8] p-4"
                     >
                       <div className="flex flex-col gap-3">
-                        <div className="min-w-0">
+                        <div>
                           <p className="flex items-center gap-2 whitespace-nowrap text-sm text-slate-600">
-                            {document.storage_path || document.pdf_url ? (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenDocumentPdf(document)}
-                                disabled={documentActionKey !== null}
-                                aria-label={`Abrir PDF da edição ${document.edition_number ?? document.title}`}
-                                title="Abrir PDF"
-                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#dedede] bg-white text-slate-700 transition hover:bg-[#f8f8f8] disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                {documentActionKey === `open:${document.id}` ? (
-                                  <Loader2 size={13} className="animate-spin" />
-                                ) : (
-                                  <ExternalLink size={13} />
-                                )}
-                              </button>
-                            ) : (
-                              <FileText
-                                size={16}
-                                className="shrink-0 text-[#0f3a4a]"
-                              />
-                            )}
-
+                            <FileText
+                              size={16}
+                              className="shrink-0 text-[#0f3a4a]"
+                            />
                             <span className="min-w-0 overflow-hidden text-ellipsis">
                               Edição: {document.edition_number || "Não informada"} · Data: {formatDate(document.publication_date)}
                             </span>
                           </p>
 
-                          <p className="mt-1 truncate pl-9 text-xs text-slate-500">
+                          <p className="mt-1 truncate pl-6 text-xs text-slate-500">
                             {formatFileSize(document.file_size)} · Cadastrado em{" "}
                             {formatDateTime(document.created_at)}
                           </p>

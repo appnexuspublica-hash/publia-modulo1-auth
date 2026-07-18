@@ -1,0 +1,238 @@
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+
+import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
+import { HtmlOfficialGazetteConnector } from "@/lib/governance/connectors/official-gazette";
+import { POST as processOfficialGazetteDocument } from "../../official-gazette-documents/route";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+function createWritableSupabaseRouteClient() {
+  const cookieStore = cookies();
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    },
+  );
+}
+
+function normalizeNullable(value: string | null) {
+  const normalized = value?.trim() ?? "";
+  return normalized || null;
+}
+
+export async function POST(request: Request) {
+  try {
+    const supabase = createWritableSupabaseRouteClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return NextResponse.json({ error: "Usuário não autenticado." }, { status: 401 });
+    }
+
+    const context = await getCurrentGovernanceOrganization(user.id);
+
+    if (!context) {
+      return NextResponse.json(
+        { error: "Usuário não vinculado a uma organização ativa." },
+        { status: 403 },
+      );
+    }
+
+    if (!["owner", "admin", "manager"].includes(context.membership.technical_role)) {
+      return NextResponse.json(
+        { error: "Seu perfil não pode sincronizar o Diário Oficial." },
+        { status: 403 },
+      );
+    }
+
+    const body = await request.json().catch(() => null);
+    const gazetteId = typeof body?.gazetteId === "string" ? body.gazetteId.trim() : "";
+
+    if (!gazetteId) {
+      return NextResponse.json(
+        { error: "Selecione a fonte do Diário Oficial." },
+        { status: 400 },
+      );
+    }
+
+    const { data: gazette, error: gazetteError } = await supabase
+      .from("governance_official_gazettes")
+      .select("id, url, active")
+      .eq("id", gazetteId)
+      .eq("organization_id", context.organization.id)
+      .maybeSingle();
+
+    if (gazetteError) {
+      console.error("[governance] Erro ao carregar fonte para sincronização:", gazetteError);
+      return NextResponse.json(
+        { error: "Não foi possível carregar a fonte do Diário Oficial." },
+        { status: 500 },
+      );
+    }
+
+    if (!gazette || !gazette.active) {
+      return NextResponse.json(
+        { error: "Fonte ativa do Diário Oficial não encontrada." },
+        { status: 404 },
+      );
+    }
+
+    const connector = new HtmlOfficialGazetteConnector();
+    const discovered = await connector.discover(gazette.url);
+
+    const { data: existingDocuments, error: documentsError } = await supabase
+      .from("governance_official_gazette_documents")
+      .select("pdf_url, edition_number, publication_date")
+      .eq("organization_id", context.organization.id)
+      .eq("gazette_id", gazette.id)
+      .eq("active", true);
+
+    if (documentsError) {
+      console.error("[governance] Erro ao comparar edições existentes:", documentsError);
+      return NextResponse.json(
+        { error: "Não foi possível comparar as edições encontradas." },
+        { status: 500 },
+      );
+    }
+
+    const existingUrls = new Set(
+      (existingDocuments ?? []).map((item) => normalizeNullable(item.pdf_url)).filter(Boolean),
+    );
+    const existingEditionDates = new Set(
+      (existingDocuments ?? [])
+        .map((item) => {
+          const edition = normalizeNullable(item.edition_number);
+          const date = normalizeNullable(item.publication_date);
+          return edition && date ? `${edition}|${date}` : null;
+        })
+        .filter(Boolean),
+    );
+
+    const newEditions = discovered.filter((edition) => {
+      if (existingUrls.has(edition.pdfUrl)) return false;
+      if (
+        edition.editionNumber &&
+        edition.publicationDate &&
+        existingEditionDates.has(`${edition.editionNumber}|${edition.publicationDate}`)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const imported: Array<{ title: string; pdfUrl: string }> = [];
+    const skipped: Array<{ title: string; reason: string }> = [];
+    const failed: Array<{ title: string; error: string }> = [];
+
+    for (const edition of newEditions) {
+      try {
+        const pdfResponse = await fetch(edition.pdfUrl, {
+          cache: "no-store",
+          headers: {
+            "User-Agent": "Publ.IA/6.1 (+sincronizacao-diario-oficial)",
+            Accept: "application/pdf",
+          },
+        });
+
+        if (!pdfResponse.ok) {
+          throw new Error(`Download respondeu com status ${pdfResponse.status}.`);
+        }
+
+        const contentType = pdfResponse.headers.get("content-type") ?? "";
+        const fileBuffer = await pdfResponse.arrayBuffer();
+        const fileName =
+          decodeURIComponent(new URL(edition.pdfUrl).pathname.split("/").pop() || "diario-oficial.pdf");
+
+        const formData = new FormData();
+        formData.append("gazetteId", gazette.id);
+        formData.append("title", edition.title);
+        formData.append("editionNumber", edition.editionNumber ?? "");
+        formData.append("publicationDate", edition.publicationDate ?? "");
+        formData.append(
+          "file",
+          new File([fileBuffer], fileName, {
+            type: contentType.includes("application/pdf") ? "application/pdf" : "application/pdf",
+          }),
+        );
+
+        const pipelineRequest = new Request(
+          new URL("/api/governance/official-gazette-documents", request.url),
+          {
+            method: "POST",
+            headers: {
+              cookie: request.headers.get("cookie") ?? "",
+            },
+            body: formData,
+          },
+        );
+
+        const pipelineResponse = await processOfficialGazetteDocument(pipelineRequest);
+        const payload = await pipelineResponse.json();
+
+        if (pipelineResponse.status === 409) {
+          skipped.push({ title: edition.title, reason: payload?.error ?? "PDF já cadastrado." });
+          continue;
+        }
+
+        if (!pipelineResponse.ok) {
+          throw new Error(payload?.error ?? "Falha no pipeline do Diário Oficial.");
+        }
+
+        imported.push({ title: edition.title, pdfUrl: edition.pdfUrl });
+      } catch (error) {
+        failed.push({
+          title: edition.title,
+          error: error instanceof Error ? error.message : "Erro inesperado.",
+        });
+      }
+    }
+
+    const synchronizedAt = new Date().toISOString();
+
+    await supabase
+      .from("governance_official_gazettes")
+      .update({ last_sync_at: synchronizedAt })
+      .eq("id", gazette.id)
+      .eq("organization_id", context.organization.id);
+
+    return NextResponse.json({
+      discovered: discovered.length,
+      newEditions: newEditions.length,
+      imported,
+      skipped,
+      failed,
+      synchronizedAt,
+    });
+  } catch (error) {
+    console.error("[governance] Erro na sincronização do Diário Oficial:", error);
+
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado ao verificar novas edições.",
+      },
+      { status: 500 },
+    );
+  }
+}

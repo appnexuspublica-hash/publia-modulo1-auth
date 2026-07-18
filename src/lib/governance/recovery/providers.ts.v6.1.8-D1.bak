@@ -1,0 +1,123 @@
+import { analyzeGovernanceQuery } from "@/lib/governance/knowledge-engine/analyzer";
+import { getGovernanceLegalCatalogForQuery } from "@/lib/governance/knowledge-engine/legal-catalog";
+import { normalizeRecoveryText, scoreLexicalEvidence } from "./normalize";
+import type { GovernanceRecoveryEvidence } from "./types";
+
+function confidence(score: number) {
+  return Math.max(0, Math.min(1, score / 60));
+}
+
+function structuredActReference(question: string) {
+  const q = normalizeRecoveryText(question);
+  const match = q.match(/\b(decreto|portaria|resolucao|lei|edital|contrato)\s+(?:n\s*)?0*(\d{1,8})(?:[./-](\d{2,4}))?/i);
+  if (!match) return null;
+  const year = match[3] ? Number(match[3].length === 2 ? `20${match[3]}` : match[3]) : null;
+  return { type: match[1], number: String(Number(match[2])), year };
+}
+
+export async function recoverOfficialGazetteEvidence(params: {
+  client: any; organizationId: string; question: string;
+}): Promise<GovernanceRecoveryEvidence[]> {
+  const reference = structuredActReference(params.question);
+  let query = params.client
+    .from("governance_official_gazette_acts")
+    .select("id,document_id,chunk_id,act_type,act_number,act_year,edition_number,publication_date,page_number,title,content,normalized_content")
+    .eq("organization_id", params.organizationId)
+    .eq("status", "active");
+
+  if (reference) {
+    query = query.eq("act_type", reference.type).eq("act_number", reference.number);
+    if (reference.year) query = query.eq("act_year", reference.year);
+  }
+
+  const { data, error } = await query.limit(reference ? 30 : 250);
+  if (error) throw new Error(`Falha na recuperação do Diário Oficial: ${error.message}`);
+
+  return (data ?? []).map((row: any) => {
+    const lexical = scoreLexicalEvidence(params.question, row.title, row.normalized_content || row.content);
+    const structuredBonus = reference ? 45 : 0;
+    const score = lexical + structuredBonus;
+    return {
+      id: String(row.id),
+      provider: "official_gazette" as const,
+      title: String(row.title ?? "Ato do Diário Oficial"),
+      content: String(row.content ?? ""),
+      normalizedContent: String(row.normalized_content ?? ""),
+      score,
+      confidence: confidence(score),
+      sourceUrl: null,
+      documentId: row.document_id ?? null,
+      chunkId: row.chunk_id ?? null,
+      metadata: {
+        act_type: row.act_type, act_number: row.act_number, act_year: row.act_year,
+        edition_number: row.edition_number, publication_date: row.publication_date,
+        page_number: row.page_number,
+      },
+    };
+  }).filter((item: GovernanceRecoveryEvidence) => item.score > 0);
+}
+
+export async function recoverInstitutionalEvidence(params: {
+  client: any; organizationId: string; question: string;
+}): Promise<GovernanceRecoveryEvidence[]> {
+  const { data: chunks, error } = await params.client
+    .from("institutional_document_chunks")
+    .select("id,document_id,chunk_index,page,content,normalized_content,keywords,status")
+    .eq("organization_id", params.organizationId)
+    .eq("status", "active")
+    .limit(500);
+
+  if (error) throw new Error(`Falha na recuperação institucional: ${error.message}`);
+
+  const documentIds = Array.from(new Set((chunks ?? []).map((row: any) => row.document_id)));
+  const titles = new Map<string, { title: string; storage_path?: string | null }>();
+
+  if (documentIds.length > 0) {
+    const { data: documents } = await params.client
+      .from("institutional_documents")
+      .select("id,title,storage_path")
+      .in("id", documentIds);
+    for (const document of documents ?? []) {
+      titles.set(String(document.id), {
+        title: String(document.title ?? "Documento institucional"),
+        storage_path: document.storage_path ?? null,
+      });
+    }
+  }
+
+  return (chunks ?? []).map((row: any) => {
+    const doc = titles.get(String(row.document_id));
+    const title = doc?.title ?? "Documento institucional";
+    const score = scoreLexicalEvidence(params.question, title, row.normalized_content || row.content);
+    return {
+      id: String(row.id),
+      provider: "institutional" as const,
+      title,
+      content: String(row.content ?? ""),
+      normalizedContent: String(row.normalized_content ?? ""),
+      score,
+      confidence: confidence(score),
+      sourceUrl: null,
+      documentId: row.document_id ?? null,
+      chunkId: String(row.id),
+      metadata: { chunk_index: row.chunk_index, page: row.page, keywords: row.keywords ?? [] },
+    };
+  }).filter((item: GovernanceRecoveryEvidence) => item.score > 0);
+}
+
+export async function recoverLegalEvidence(question: string): Promise<GovernanceRecoveryEvidence[]> {
+  const analysis = analyzeGovernanceQuery(question);
+  return getGovernanceLegalCatalogForQuery(analysis).map((item) => ({
+    id: item.id,
+    provider: "legal" as const,
+    title: item.title,
+    content: item.notes ?? item.title,
+    normalizedContent: normalizeRecoveryText(`${item.title} ${item.notes ?? ""}`),
+    score: 35,
+    confidence: 0.75,
+    sourceUrl: item.url,
+    documentId: null,
+    chunkId: null,
+    metadata: { legal_type: item.type },
+  }));
+}

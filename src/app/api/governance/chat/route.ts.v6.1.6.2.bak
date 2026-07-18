@@ -25,7 +25,6 @@ import OpenAI from "openai";
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 import { buildGovernancePrompt } from "@/lib/prompts/governance/prompt";
 import { buildGovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine";
-import { orchestrateGovernanceRecovery } from "@/lib/governance/recovery";
 import { analyzeGovernanceQuery } from "@/lib/governance/knowledge-engine/analyzer";
 import { buildGovernanceFinalAnswer } from "@/lib/governance/knowledge-engine/response-builder";
 import { buildGovernanceEvidenceContext } from "@/lib/governance/evidence-context";
@@ -3775,13 +3774,11 @@ async function loadExactOfficialGazetteActRows(params: {
     return [] as OfficialGazetteContextChunkRow[];
   }
 
-  /*
-   * Busca ampla pelo ano e validação estrita em memória.
-   *
-   * Não usamos somente ILIKE "%012/2026%" porque PDFs podem extrair o mesmo
-   * cabeçalho como "012 / 2026", "12/2026", "Nº 012 / 2026" ou com quebra
-   * de linha entre o número e o ano.
-   */
+  const filters = exactReference.variants.flatMap((variant) => [
+    `title.ilike.%${variant}%`,
+    `content.ilike.%${variant}%`,
+  ]);
+
   const { data, error } = await params.client
     .from("governance_official_gazette_chunks")
     .select(
@@ -3802,10 +3799,9 @@ async function loadExactOfficialGazetteActRows(params: {
       `,
     )
     .eq("organization_id", params.organizationId)
-    .or(`title.ilike.%${exactReference.year}%,content.ilike.%${exactReference.year}%`)
-    .order("document_id", { ascending: false })
+    .or(filters.join(","))
     .order("page_number", { ascending: true, nullsFirst: false })
-    .limit(5000);
+    .limit(80);
 
   if (error) {
     console.warn(
@@ -3815,38 +3811,22 @@ async function loadExactOfficialGazetteActRows(params: {
     return [] as OfficialGazetteContextChunkRow[];
   }
 
-  const actType = normalizeOfficialGazetteSearchText(exactReference.actType);
-  const escapedNumber = exactReference.number.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedYear = exactReference.year.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const exactActPattern = new RegExp(
-    `\\b${actType}(?:\\s+municipal)?(?:\\s+n)?\\s*0*${escapedNumber}\\s*[/\\-]\\s*${escapedYear}\\b`,
-    "i",
+  const normalizedActType = normalizeOfficialGazetteSearchText(
+    exactReference.actType,
   );
 
   return ((data ?? []) as OfficialGazetteContextChunkRow[])
     .filter((row) => String(row.content ?? "").trim().length > 0)
     .filter((row) => {
       const searchable = normalizeOfficialGazetteSearchText(
-        `${row.title ?? ""}\n${row.content ?? ""}`,
+        `${row.title ?? ""} ${row.content ?? ""}`,
       );
 
-      return exactActPattern.test(searchable);
+      return (
+        searchable.includes(normalizedActType) &&
+        exactReference.variants.some((variant) => searchable.includes(variant))
+      );
     });
-}
-
-function isExclusiveOfficialGazetteExactActQuery(question: string) {
-  return Boolean(
-    extractOfficialGazetteExactActReference(question) &&
-      shouldUseOfficialGazetteContext(question),
-  );
-}
-
-function isMunicipalAnchoredRecoveryQuery(question: string) {
-  const normalized = normalizeOfficialGazetteSearchText(question);
-
-  return /\b(diario oficial|portaria|decreto|resolucao|edital|codigo tributario|lei organica|plano diretor|estatuto dos servidores|documento institucional)\b/.test(
-    normalized,
-  );
 }
 
 function extractOfficialGazetteEditionNumber(question: string) {
@@ -4555,27 +4535,16 @@ async function buildOfficialGazetteContext(params: {
           .slice(0, MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS)
           .map((item) => item.row);
 
-    const exactReference = extractOfficialGazetteExactActReference(question);
     const selectedRows =
       exactRows.length > 0
         ? exactRows
-        : exactReference
-          ? []
-          : completeRows ?? (scoredRows.length > 0 ? scoredRows : rows.slice(0, 20));
+        : completeRows ?? (scoredRows.length > 0 ? scoredRows : rows.slice(0, 20));
     const completeListMode = Boolean(completeRows);
-    const contextText =
-      exactReference && selectedRows.length === 0
-        ? [
-            "RESULTADO EXCLUSIVO DA BUSCA NO DIÁRIO OFICIAL MUNICIPAL:",
-            `Ato procurado: ${exactReference.actType} ${exactReference.number}/${exactReference.year}.`,
-            "Nenhum chunk do Diário Oficial cadastrado para esta organização contém correspondência exata desse ato.",
-            "Não use busca web, base institucional ou atos parecidos para substituir esse resultado.",
-          ].join("\n")
-        : buildOfficialGazetteContextText({
-            chunks: selectedRows,
-            question,
-            completeListMode,
-          });
+    const contextText = buildOfficialGazetteContextText({
+      chunks: selectedRows,
+      question,
+      completeListMode,
+    });
 
     return {
       contextText,
@@ -4743,16 +4712,10 @@ export async function POST(request: Request) {
     );
 
     const queryAnalysis = analyzeGovernanceQuery(content);
-    const exclusiveOfficialGazetteQuery =
-      isExclusiveOfficialGazetteExactActQuery(content);
     const shouldUseMunicipalKnowledgeContext =
-      queryAnalysis.queryNature !== "legal_general" &&
-      !exclusiveOfficialGazetteQuery;
+      queryAnalysis.queryNature !== "legal_general";
 
-    const forceWebFirst =
-      !exclusiveOfficialGazetteQuery &&
-      !isMunicipalAnchoredRecoveryQuery(content) &&
-      shouldForceWebFirst(content);
+    const forceWebFirst = shouldForceWebFirst(content);
     const officialWeb = forceWebFirst
       ? resolveEssentialOfficialWeb(content)
       : null;
@@ -4806,7 +4769,6 @@ export async function POST(request: Request) {
           ].join("\n")
         : "";
     const currentQuestionOnly =
-      exclusiveOfficialGazetteQuery ||
       hasSelectedPdfAttachments ||
       hasLegalGuardrails ||
       queryAnalysis.queryNature === "legal_general";
@@ -4887,66 +4849,6 @@ export async function POST(request: Request) {
       question: content,
     });
 
-    const unifiedRecoveryResult = await orchestrateGovernanceRecovery({
-      client: supabase,
-      organizationId: context.organization.id,
-      question: content,
-      allowWeb: false,
-      maxEvidence: 12,
-      maxContextChars: 24000,
-    });
-
-    const unifiedResponsePolicyInstruction = (() => {
-      const policy = unifiedRecoveryResult.responsePolicy;
-
-      if (policy.mode === "direct_document") {
-        return [
-          "POLÍTICA FINAL DE RESPOSTA — DOCUMENTO MUNICIPAL EXATO",
-          "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
-          "Responda diretamente ao que foi perguntado, usando apenas a evidência municipal recuperada.",
-          "Máximo de 140 palavras e no máximo 3 parágrafos curtos.",
-          "Não use títulos numerados, Fundamentação, Entendimento atual, Aplicação ao Município ou Cuidados.",
-          "Não acrescente práticas administrativas, interpretações gerais ou recomendações que não constem do documento.",
-          "Informe edição e data somente quando esses metadados estiverem no contexto.",
-        ].join("\n");
-      }
-
-      if (policy.mode === "document_summary") {
-        return [
-          "POLÍTICA FINAL DE RESPOSTA — DOCUMENTO INSTITUCIONAL",
-          "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
-          "Responda somente com base nos trechos do documento municipal recuperado.",
-          "Máximo de 280 palavras. Use texto direto e, apenas se necessário, uma lista curta.",
-          "Não use a estrutura fixa de cinco seções.",
-          "Não cite códigos tributários, leis ou portais de outros municípios.",
-          "Não complete lacunas com conhecimento geral. Diga claramente quando o trecho recuperado não for suficiente.",
-        ].join("\n");
-      }
-
-      if (policy.mode === "comparison") {
-        return [
-          "POLÍTICA FINAL DE RESPOSTA — COMPARAÇÃO DOCUMENTAL",
-          "Compare apenas as duas evidências municipais presentes no contexto.",
-          "Identifique a regra institucional, o ato do Diário e a relação concreta entre eles.",
-          "Máximo de 350 palavras. Não transforme a comparação em parecer genérico.",
-          "Não use fontes externas nem documentos de outros municípios.",
-        ].join("\n");
-      }
-
-      if (policy.mode === "insufficient_evidence") {
-        return [
-          "POLÍTICA FINAL DE RESPOSTA — EVIDÊNCIA INSUFICIENTE",
-          "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
-          "Não produza comparação hipotética, fundamentação geral, parecer ou roteiro de análise.",
-          "Explique em no máximo 90 palavras que não foi localizado um segundo documento municipal tematicamente compatível.",
-          "Informe objetivamente qual evidência foi encontrada e qual evidência faltou.",
-          "Não use títulos numerados e não ofereça conteúdo especulativo.",
-        ].join("\n");
-      }
-
-      return "";
-    })();
-
     const knowledgeContextResult = await buildGovernanceKnowledgeContext({
       client: supabase,
       organizationId: context.organization.id,
@@ -4968,42 +4870,14 @@ export async function POST(request: Request) {
         type: "Diário Oficial",
       }));
 
-    const unifiedInstitutionalSources: GovernanceChatSource[] =
-      unifiedRecoveryResult.evidence
-        .filter((item) => item.provider === "institutional")
-        .map((item) => ({
-          id: item.id,
-          title: item.title,
-          url: item.sourceUrl,
-          type: "Documento institucional",
-        }));
-
-    const unifiedGazetteSources: GovernanceChatSource[] =
-      unifiedRecoveryResult.evidence
-        .filter((item) => item.provider === "official_gazette")
-        .map((item) => ({
-          id: item.id,
-          title: item.title,
-          url: item.sourceUrl,
-          type: "Diário Oficial",
-        }));
-
-    const unifiedLegalSources: GovernanceChatSource[] =
-      unifiedRecoveryResult.evidence
-        .filter((item) => item.provider === "legal")
-        .map((item) => ({
-          id: item.id,
-          title: item.title,
-          url: item.sourceUrl,
-          type: "Base legal",
-        }));
-
-    const rawResponseSources: GovernanceChatSources =
-      normalizeGovernanceChatSourcesForResponse({
-        institutional: unifiedInstitutionalSources,
-        officialGazette: unifiedGazetteSources,
-        officialSources: unifiedLegalSources,
-      });
+    const rawResponseSources: GovernanceChatSources = normalizeGovernanceChatSourcesForResponse({
+      institutional: knowledgeContextResult.sources.institutional,
+      officialGazette: [
+        ...directOfficialGazetteSources,
+        ...knowledgeContextResult.sources.officialGazette,
+      ],
+      officialSources: knowledgeContextResult.sources.officialSources,
+    });
 
     const responseSources: GovernanceChatSources = filterGovernanceSourcesForResponse({
       sources: rawResponseSources,
@@ -5060,9 +4934,7 @@ export async function POST(request: Request) {
     });
 
     const instructions = [
-      unifiedRecoveryResult.responsePolicy.mode === "legal_analysis"
-        ? governancePrompt
-        : "",
+      governancePrompt,
       "",
       criticalKnowledgeInstruction,
       "",
@@ -5078,32 +4950,24 @@ export async function POST(request: Request) {
         currentUserQuestion: content,
       }),
       "",
-      unifiedRecoveryResult.responsePolicy.mode === "legal_analysis"
-        ? buildGovernanceModeInstruction(effectiveResponseMode)
-        : "",
+      buildGovernanceModeInstruction(effectiveResponseMode),
       "",
-      unifiedRecoveryResult.responsePolicy.mode === "legal_analysis"
-        ? buildGovernanceAnswerPlan({
-            responseMode: effectiveResponseMode,
-            question: content,
-            hasEvidenceContext: Boolean(governanceEvidenceContext),
-            hasMunicipalContext:
-              shouldUseMunicipalKnowledgeContext &&
-              Boolean(knowledgeContextResult.contextText),
-          })
-        : "",
+      buildGovernanceAnswerPlan({
+        responseMode: effectiveResponseMode,
+        question: content,
+        hasEvidenceContext: Boolean(governanceEvidenceContext),
+        hasMunicipalContext:
+          shouldUseMunicipalKnowledgeContext &&
+          Boolean(knowledgeContextResult.contextText),
+      }),
       "",
-      unifiedRecoveryResult.responsePolicy.mode === "legal_analysis"
-        ? buildGovernanceConsultantStyleInstruction(
-            effectiveResponseMode,
-            content,
-            conversationRelation,
-          )
-        : "",
+      buildGovernanceConsultantStyleInstruction(
+        effectiveResponseMode,
+        content,
+        conversationRelation,
+      ),
       "",
-      unifiedRecoveryResult.responsePolicy.mode === "legal_analysis"
-        ? buildFinalConsultativeOverride(effectiveResponseMode, conversationRelation)
-        : "",
+      buildFinalConsultativeOverride(effectiveResponseMode, conversationRelation),
       "",
       [
         "REGRA DE REFERÊNCIAS E LINGUAGEM:",
@@ -5135,15 +4999,20 @@ export async function POST(request: Request) {
         : "",
       governanceEvidenceContext?.instruction ?? "",
       legalGuardrails,
-      unifiedResponsePolicyInstruction,
-      unifiedRecoveryResult.contextText
+      officialGazetteContextResult.contextText
         ? [
-            "CONTEXTO UNIFICADO DE RECUPERAÇÃO INSTITUCIONAL:",
-            "Use somente fatos sustentados pelos trechos abaixo. Não complete lacunas por memória.",
-            "Quando houver ato ou documento exato, não misture outras fontes concorrentes.",
-            "Para perguntas diretas como 'o que dispõe' ou 'o que estabelece', responda objetivamente em poucos parágrafos, sem criar automaticamente seções de fundamentação, entendimento, aplicação e cuidados.",
-            "Para comparação, só compare evidências que tratem efetivamente do mesmo tema. Se não houver ato tematicamente compatível, informe a limitação.",
-            unifiedRecoveryResult.contextText,
+            "CONTEXTO DIRETO DO DIÁRIO OFICIAL MUNICIPAL:",
+            "Quando a pergunta pedir em qual edição um ato foi publicado, localize o ato exato neste contexto e responda com o número da edição e a data cadastrada. Não diga que o Diário não foi consultado quando este bloco estiver preenchido.",
+            extractOfficialGazetteExactActReference(userMessage)
+              ? "Para esta pergunta específica, responda em no máximo 3 frases. Não crie seções, fundamentação genérica, recomendações, cuidados nem sugestões de próxima pergunta."
+              : "",
+            officialGazetteContextResult.contextText,
+          ].join("\n\n")
+        : "",
+      shouldUseMunicipalKnowledgeContext && knowledgeContextResult.contextText
+        ? [
+            "CONTEXTO ESTRUTURADO DO KNOWLEDGE ENGINE:",
+            knowledgeContextResult.contextText,
           ].join("\n\n")
         : "",
       hasSelectedPdfAttachments
@@ -5353,15 +5222,13 @@ export async function POST(request: Request) {
           streaming: false,
         });
 
-        const suggestions = exclusiveOfficialGazetteQuery
-          ? []
-          : await generateGovernanceFollowUpSuggestions({
-              userContent: content,
-              assistantText,
-              responseMode: effectiveResponseMode,
-              hasSelectedPdfAttachments,
-              selectedPdfAttachmentNames,
-            });
+        const suggestions = await generateGovernanceFollowUpSuggestions({
+          userContent: content,
+          assistantText,
+          responseMode: effectiveResponseMode,
+          hasSelectedPdfAttachments,
+          selectedPdfAttachmentNames,
+        });
 
         return NextResponse.json({
           userMessage,
@@ -5408,14 +5275,14 @@ export async function POST(request: Request) {
                 allowed_domains: officialWeb?.allowedDomains ?? [],
               },
               knowledge_engine: {
-                version: "governance-v6.1.8-D2-policy-anchored-recovery",
-                diagnostics: unifiedRecoveryResult.diagnostics,
-                selected_items: unifiedRecoveryResult.evidence.map((item) => ({
+                version: "governance-v2.2.3-knowledge-motor",
+                diagnostics: knowledgeContextResult.diagnostics,
+                selected_items: knowledgeContextResult.items.map((item) => ({
                   id: item.id,
                   provider: item.provider,
                   title: item.title,
-                  type: item.provider,
-                  url: item.sourceUrl,
+                  type: item.type,
+                  url: item.url,
                   score: item.score,
                 })),
               },
@@ -5804,14 +5671,14 @@ export async function POST(request: Request) {
                 allowed_domains: officialWeb?.allowedDomains ?? [],
               },
               knowledge_engine: {
-                version: "governance-v6.1.8-D2-policy-anchored-recovery",
-                diagnostics: unifiedRecoveryResult.diagnostics,
-                selected_items: unifiedRecoveryResult.evidence.map((item) => ({
+                version: "governance-v2.2.3-knowledge-motor",
+                diagnostics: knowledgeContextResult.diagnostics,
+                selected_items: knowledgeContextResult.items.map((item) => ({
                   id: item.id,
                   provider: item.provider,
                   title: item.title,
-                  type: item.provider,
-                  url: item.sourceUrl,
+                  type: item.type,
+                  url: item.url,
                   score: item.score,
                 })),
               },
@@ -5911,15 +5778,13 @@ export async function POST(request: Request) {
           );
         }
 
-        const suggestions = exclusiveOfficialGazetteQuery
-          ? []
-          : await generateGovernanceFollowUpSuggestions({
-              userContent: content,
-              assistantText,
-              responseMode: effectiveResponseMode,
-              hasSelectedPdfAttachments,
-              selectedPdfAttachmentNames,
-            });
+        const suggestions = await generateGovernanceFollowUpSuggestions({
+          userContent: content,
+          assistantText,
+          responseMode: effectiveResponseMode,
+          hasSelectedPdfAttachments,
+          selectedPdfAttachmentNames,
+        });
 
         if (suggestions.length > 0) {
           send("suggestions", { suggestions });

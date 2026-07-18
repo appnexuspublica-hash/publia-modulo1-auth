@@ -10,7 +10,6 @@ import {
   sanitizeExtractedText,
 } from "@/lib/pdf/extract";
 import { normalizeOfficialGazetteActs } from "@/lib/pdf/officialGazetteActNormalizer";
-import { buildOfficialGazetteActIndex } from "@/lib/governance/official-gazette/act-index";
 
 export const dynamic = "force-dynamic";
 
@@ -351,26 +350,6 @@ async function processOfficialGazetteDocumentBuffer({
 
   const chunks = splitOfficialGazetteActs(extraction.text);
 
-  const { data: documentMetadata, error: documentMetadataError } = await supabase
-    .from("governance_official_gazette_documents")
-    .select("edition_number, publication_date")
-    .eq("id", documentId)
-    .eq("organization_id", organizationId)
-    .maybeSingle();
-
-  if (documentMetadataError) {
-    console.warn(
-      "[governance] Não foi possível carregar os metadados da edição para o índice de atos:",
-      documentMetadataError,
-    );
-  }
-
-  await supabase
-    .from("governance_official_gazette_acts")
-    .delete()
-    .eq("document_id", documentId)
-    .eq("organization_id", organizationId);
-
   await supabase
     .from("governance_official_gazette_chunks")
     .delete()
@@ -378,7 +357,7 @@ async function processOfficialGazetteDocumentBuffer({
     .eq("organization_id", organizationId);
 
   if (chunks.length > 0) {
-    const { data: insertedChunks, error: chunksError } = await supabase
+    const { error: chunksError } = await supabase
       .from("governance_official_gazette_chunks")
       .insert(
         chunks.map((chunk) => ({
@@ -389,8 +368,7 @@ async function processOfficialGazetteDocumentBuffer({
           title: chunk.title,
           content: chunk.content,
         })),
-      )
-      .select("id, page_number, section_type, title, content");
+      );
 
     if (chunksError) {
       console.error(
@@ -420,61 +398,6 @@ async function processOfficialGazetteDocumentBuffer({
         },
         httpStatus: 500,
       };
-    }
-
-    const actIndex = buildOfficialGazetteActIndex({
-      chunks: insertedChunks ?? [],
-      documentId,
-      editionNumber:
-        typeof documentMetadata?.edition_number === "string"
-          ? documentMetadata.edition_number
-          : null,
-      publicationDate:
-        typeof documentMetadata?.publication_date === "string"
-          ? documentMetadata.publication_date
-          : null,
-    });
-
-    if (actIndex.length > 0) {
-      const { error: actsError } = await supabase
-        .from("governance_official_gazette_acts")
-        .insert(
-          actIndex.map((act) => ({
-            ...act,
-            organization_id: organizationId,
-          })),
-        );
-
-      if (actsError) {
-        console.error(
-          "[governance] Erro ao salvar o índice estruturado de atos:",
-          actsError,
-        );
-
-        const { data: updatedDocument } = await supabase
-          .from("governance_official_gazette_documents")
-          .update({
-            extraction_status: "completed",
-            indexing_status: "error",
-          })
-          .eq("id", documentId)
-          .eq("organization_id", organizationId)
-          .select(DOCUMENT_SELECT)
-          .single();
-
-        return {
-          document: updatedDocument,
-          extraction: {
-            ok: false,
-            status: "completed",
-            indexingStatus: "error",
-            message:
-              "Texto e trechos foram salvos, mas o índice estruturado de atos falhou.",
-            chunksCount: chunks.length,
-          },
-          httpStatus: 500,
-        };
-      }
     }
   }
 
