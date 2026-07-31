@@ -4,8 +4,10 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
+import { assertSafeOfficialGazetteUrl } from "@/lib/governance/security/official-gazette-remote-access";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type GazettePayload = {
   id?: unknown;
@@ -195,6 +197,20 @@ export async function POST(request: Request) {
     if (!url) {
       return NextResponse.json(
         { error: "Informe a URL do Diário Oficial." },
+        { status: 400 },
+      );
+    }
+
+    try {
+      await assertSafeOfficialGazetteUrl(url);
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "A URL informada não pode ser validada com segurança.",
+        },
         { status: 400 },
       );
     }

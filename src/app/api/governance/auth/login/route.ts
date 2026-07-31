@@ -88,6 +88,7 @@ export async function POST(request: Request) {
       {
         ok: true,
         email: profile.email,
+        organizationId: organization.id,
         redirectTo: "/governanca/chat",
       },
       { status: 200, headers: { "Cache-Control": "no-store" } },

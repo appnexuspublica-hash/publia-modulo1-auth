@@ -1,0 +1,94 @@
+// src/lib/governance/chat/decision-policy.ts
+import type { GovernanceRecoveryResult } from "@/lib/governance/recovery/types";
+import type { GovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine";
+import type {
+  GovernanceQuestionClassification,
+  GovernanceQuestionIntent,
+} from "@/lib/governance/chat/question-classifier";
+import type { OfficialGazetteContextResult } from "@/lib/governance/chat/official-gazette-context";
+
+export type GovernanceDecisionPolicy = {
+  intent: GovernanceQuestionIntent;
+  useRecovery: boolean;
+  useWeb: boolean;
+  useMunicipalKnowledge: boolean;
+  useOfficialGazette: boolean;
+};
+
+export function decideGovernancePolicy(
+  classification: GovernanceQuestionClassification,
+): GovernanceDecisionPolicy {
+  if (classification.intent === "specific_document") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: false,
+      useMunicipalKnowledge: true,
+      useOfficialGazette: true,
+    };
+  }
+
+  return {
+    intent: classification.intent,
+    useRecovery: false,
+    useWeb: true,
+    useMunicipalKnowledge: false,
+    useOfficialGazette: false,
+  };
+}
+
+export function buildSkippedGovernanceRecoveryResult(
+  question: string,
+): GovernanceRecoveryResult {
+  return {
+    intent: {
+      topic: "general",
+      queryNature: "general",
+      normalizedQuestion: question.trim().toLowerCase(),
+      allowedProviders: [],
+      allowWeb: false,
+    },
+    evidence: [],
+    contextText: "",
+    diagnostics: {
+      queriedProviders: [],
+      returnedByProvider: {},
+      totalCandidates: 0,
+      selectedEvidence: 0,
+    },
+    responsePolicy: {
+      mode: "legal_analysis",
+      municipalEvidenceSufficient: false,
+      comparisonReady: false,
+      externalSourcesAllowed: false,
+      reason: "Consulta documental dispensada pela política da pergunta geral.",
+    },
+  };
+}
+
+export function buildEmptyGovernanceKnowledgeContext(): GovernanceKnowledgeContext {
+  return {
+    contextText: "",
+    items: [],
+    sources: {
+      institutional: [],
+      officialGazette: [],
+      officialSources: [],
+    },
+    diagnostics: {
+      totalItems: 0,
+      selectedItems: 0,
+      minScore: 0,
+    },
+  };
+}
+
+export function buildEmptyOfficialGazetteContext(): OfficialGazetteContextResult {
+  return {
+    contextText: "",
+    chunksUsed: 0,
+    totalChunksRead: 0,
+    enabled: false,
+    referenceLinks: [],
+  };
+}

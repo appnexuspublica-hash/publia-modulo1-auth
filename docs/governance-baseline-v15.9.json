@@ -1,0 +1,12 @@
+{
+  "version": "15.9",
+  "name": "single-query-plan",
+  "base": "publia-modulo1-auth-atual(19).zip",
+  "scope": [
+    "single query plan shared by route and orchestrator",
+    "central pipeline and snapshot version constants",
+    "removal of stale v15.3 telemetry labels"
+  ],
+  "behavioral_change": false,
+  "validation_command": "npm run validate:baseline"
+}

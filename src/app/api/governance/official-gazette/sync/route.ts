@@ -7,9 +7,14 @@ import { createServerClient } from "@supabase/ssr";
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
 import { HtmlOfficialGazetteConnector } from "@/lib/governance/connectors/official-gazette";
 import { extractOfficialGazetteMetadataFromPdfBuffer } from "@/lib/governance/official-gazette/extract-pdf-metadata";
+import {
+  fetchOfficialGazettePdf,
+  OfficialGazetteRemoteAccessError,
+} from "@/lib/governance/security/official-gazette-remote-access";
 import { POST as processOfficialGazetteDocument } from "../../official-gazette-documents/route";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 export const maxDuration = 300;
 
 type ExistingDocument = {
@@ -66,6 +71,14 @@ function createSha256Hex(fileBuffer: Buffer) {
   return createHash("sha256").update(new Uint8Array(fileBuffer)).digest("hex");
 }
 
+function safeDecodeURIComponent(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function isCandidateNewer({
   editionNumber,
   publicationDate,
@@ -88,32 +101,6 @@ function isCandidateNewer({
   }
 
   return false;
-}
-
-async function downloadPdf(pdfUrl: string) {
-  const response = await fetch(pdfUrl, {
-    cache: "no-store",
-    headers: {
-      "User-Agent": "Publ.IA/6.1 (+sincronizacao-diario-oficial)",
-      Accept: "application/pdf",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Download respondeu com status ${response.status}.`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const fileBuffer = Buffer.from(arrayBuffer);
-
-  if (fileBuffer.length === 0) {
-    throw new Error("O portal retornou um PDF vazio.");
-  }
-
-  return {
-    fileBuffer,
-    contentType: response.headers.get("content-type") ?? "application/pdf",
-  };
 }
 
 export async function POST(request: Request) {
@@ -276,7 +263,10 @@ export async function POST(request: Request) {
 
     for (const edition of candidates) {
       try {
-        const { fileBuffer, contentType } = await downloadPdf(edition.pdfUrl);
+        const { fileBuffer, finalUrl } = await fetchOfficialGazettePdf(
+          edition.pdfUrl,
+          gazette.url,
+        );
         const fileHash = createSha256Hex(fileBuffer);
 
         if (existingHashes.has(fileHash)) {
@@ -326,8 +316,8 @@ export async function POST(request: Request) {
         );
 
         const fileName =
-          decodeURIComponent(
-            new URL(edition.pdfUrl).pathname.split("/").pop() ||
+          safeDecodeURIComponent(
+            new URL(finalUrl).pathname.split("/").pop() ||
               "diario-oficial.pdf",
           );
 
@@ -345,9 +335,7 @@ export async function POST(request: Request) {
         formData.append(
           "file",
           new File([fileBuffer], fileName, {
-            type: contentType.includes("application/pdf")
-              ? "application/pdf"
-              : "application/pdf",
+            type: "application/pdf",
           }),
         );
 
@@ -386,7 +374,7 @@ export async function POST(request: Request) {
 
         imported.push({
           title,
-          pdfUrl: edition.pdfUrl,
+          pdfUrl: finalUrl,
           editionNumber: metadata.editionNumber,
           publicationDate: metadata.publicationDate,
         });
@@ -432,6 +420,17 @@ export async function POST(request: Request) {
       error,
     );
 
+    const status =
+      error instanceof OfficialGazetteRemoteAccessError
+        ? error.code === "timeout"
+          ? 504
+          : ["dns_failure", "http_status", "network_failure"].includes(
+                error.code,
+              )
+            ? 502
+            : 400
+        : 500;
+
     return NextResponse.json(
       {
         error:
@@ -439,7 +438,7 @@ export async function POST(request: Request) {
             ? error.message
             : "Erro inesperado ao verificar novas edições.",
       },
-      { status: 500 },
+      { status },
     );
   }
 }

@@ -1,0 +1,57 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { GovernanceMessage } from "@/types/governance";
+
+type GovernanceIdempotencyParams = {
+  supabase: SupabaseClient;
+  organizationId: string;
+  conversationId: string;
+  userId: string;
+  clientRequestId: string;
+};
+
+export type GovernanceIdempotencyCheck =
+  | { status: "available" }
+  | { status: "duplicate"; userMessage: GovernanceMessage }
+  | { status: "unavailable"; reason: string };
+
+export async function checkGovernanceClientRequestId(
+  params: GovernanceIdempotencyParams,
+): Promise<GovernanceIdempotencyCheck> {
+  const {
+    supabase,
+    organizationId,
+    conversationId,
+    userId,
+    clientRequestId,
+  } = params;
+
+  const { data, error } = await supabase
+    .from("governance_messages")
+    .select(
+      "id, organization_id, conversation_id, user_id, role, content, metadata, created_at",
+    )
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
+    .eq("role", "user")
+    .eq("metadata->>client_request_id", clientRequestId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      status: "unavailable",
+      reason: error.message || "Falha ao consultar a chave idempotente.",
+    };
+  }
+
+  if (data) {
+    return {
+      status: "duplicate",
+      userMessage: data as GovernanceMessage,
+    };
+  }
+
+  return { status: "available" };
+}

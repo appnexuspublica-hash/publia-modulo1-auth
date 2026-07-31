@@ -36,6 +36,8 @@ type ChatInputProps = {
   onInputValueChange?: (value: string) => void;
   externalTextareaRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
   helperText?: string;
+  onAttachPdf?: () => void;
+  attachmentDisabled?: boolean;
 };
 
 const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
@@ -76,6 +78,8 @@ export function ChatInput({
   onInputValueChange,
   externalTextareaRef,
   helperText,
+  onAttachPdf,
+  attachmentDisabled = false,
 }: ChatInputProps) {
   const [internalValue, setInternalValue] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -222,6 +226,39 @@ export function ChatInput({
                 : undefined,
           }}
         >
+          {onAttachPdf && (
+            <button
+              type="button"
+              onClick={onAttachPdf}
+              disabled={attachmentDisabled}
+              className={`mb-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border bg-white transition ${
+                attachmentDisabled
+                  ? "cursor-not-allowed opacity-50"
+                  : "hover:border-[#14933D] hover:text-[#14933D]"
+              }`}
+              style={{
+                borderColor: isStrategic ? theme.colors.borderStrong : "#dedede",
+                color: isStrategic ? theme.colors.text : "#0D2B4D",
+              }}
+              aria-label="Anexar PDF"
+              title="Anexar PDF"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-[18px] w-[18px]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+              <span className="sr-only">Anexar PDF</span>
+            </button>
+          )}
+
           <textarea
             ref={textareaRef}
             placeholder={
@@ -285,7 +322,7 @@ export function ChatInput({
         </div>
 
         {showResponseModes && (
-          <div ref={menuRef} className="relative shrink-0 lg:w-52">
+          <div ref={menuRef} className="relative shrink-0 lg:w-44">
             <button
               type="button"
               onClick={() => {

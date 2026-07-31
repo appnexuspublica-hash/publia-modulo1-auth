@@ -5,6 +5,11 @@ import { notFound } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createClient } from "@supabase/supabase-js";
+import {
+  flattenGovernanceResultReferences,
+  parseGovernanceResultSnapshot,
+} from "@/lib/governance/chat/governance-result";
+import type { GovernanceChatReference } from "@/lib/governance/chat/references";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -34,6 +39,7 @@ type SharedMessage = {
   conversation_id: string | null;
   role: string;
   content: string;
+  metadata: Record<string, unknown> | null;
   created_at: string | null;
 };
 
@@ -388,6 +394,125 @@ function linkLegalReferences(markdown: string) {
   });
 }
 
+
+function getPersistedReferences(message: SharedMessage): GovernanceChatReference[] {
+  const metadata = message.metadata ?? {};
+  const snapshot = parseGovernanceResultSnapshot(metadata);
+
+  if (snapshot) {
+    return flattenGovernanceResultReferences(snapshot);
+  }
+
+  const references = metadata.references;
+  if (Array.isArray(references)) {
+    return references as GovernanceChatReference[];
+  }
+
+  const sources = metadata.sources;
+  if (!sources || typeof sources !== "object" || Array.isArray(sources)) {
+    return [];
+  }
+
+  const sourceGroups = sources as Record<string, unknown>;
+  return [
+    ...(Array.isArray(sourceGroups.institutional)
+      ? (sourceGroups.institutional as GovernanceChatReference[]).map((item) => ({
+          ...item,
+          kind: "institutional" as const,
+        }))
+      : []),
+    ...(Array.isArray(sourceGroups.officialSources)
+      ? (sourceGroups.officialSources as GovernanceChatReference[]).map((item) => ({
+          ...item,
+          kind: "consultation" as const,
+        }))
+      : []),
+    ...(Array.isArray(sourceGroups.officialGazette)
+      ? (sourceGroups.officialGazette as GovernanceChatReference[]).map((item) => ({
+          ...item,
+          kind: "official" as const,
+        }))
+      : []),
+  ];
+}
+
+function normalizePersistedReferences(references: GovernanceChatReference[]) {
+  const unique = new Map<string, GovernanceChatReference>();
+
+  for (const reference of references) {
+    const title = String(reference?.title ?? "").trim();
+    if (!title) continue;
+
+    const url = String(reference?.url ?? "").trim() || null;
+    const key = `${String(reference?.kind ?? "")}::${title.toLocaleLowerCase("pt-BR")}::${url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, { ...reference, title, url });
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+function hasMarkdownSection(content: string, heading: string) {
+  const normalizedHeading = heading
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  return String(content ?? "")
+    .split(/\r?\n/)
+    .some((line) => {
+      const normalizedLine = line
+        .trim()
+        .replace(/^#{1,6}\s*/, "")
+        .replace(/\*\*|__/g, "")
+        .replace(/[:：]+$/, "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+
+      return normalizedLine === normalizedHeading;
+    });
+}
+
+function PersistedReferenceSection({
+  title,
+  references,
+}: {
+  title: string;
+  references: GovernanceChatReference[];
+}) {
+  if (references.length === 0) return null;
+
+  return (
+    <section className="mt-6 border-t border-slate-300 pt-5">
+      <h2 className="mb-3 text-[15px] font-bold text-slate-950">{title}:</h2>
+      <ul className="ml-5 list-disc space-y-2 text-[15px] leading-7 text-slate-900">
+        {references.map((reference, index) => {
+          const key = `${title}-${reference.title}-${reference.url ?? index}`;
+          return (
+            <li key={key}>
+              {reference.url ? (
+                <a
+                  href={reference.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-semibold text-slate-950 underline decoration-slate-400 underline-offset-2 hover:decoration-slate-700"
+                >
+                  {reference.title}
+                </a>
+              ) : (
+                <span className="font-semibold text-slate-950">{reference.title}</span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 function getQuestion(messages: SharedMessage[]) {
   return messages.find((message) => message.role === "user");
 }
@@ -601,6 +726,15 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
 
   const csvDownloads = extractCsvDownloads(message.content, message.id);
   const cleanCopyText = stripMarkdownForCopy(message.content);
+  const persistedReferences = normalizePersistedReferences(getPersistedReferences(message));
+  const legalReferences = persistedReferences.filter((reference) => reference.kind === "legal");
+  const consultedReferences = persistedReferences.filter(
+    (reference) => reference.kind !== "legal" && reference.kind !== "consultation",
+  );
+  const contentHasBaseLegal = hasMarkdownSection(message.content, "Base legal");
+  const contentHasConsultedSources =
+    hasMarkdownSection(message.content, "Fontes consultadas") ||
+    hasMarkdownSection(message.content, "Referências oficiais consultadas");
 
   return (
     <article
@@ -644,7 +778,7 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
       </div>
 
       <div className="px-4 py-4">
-        <div className="prose prose-slate max-w-none text-[13px] leading-6 prose-headings:font-bold prose-headings:text-[#0f3a4a] prose-h1:text-xl prose-h2:mt-6 prose-h2:border-t prose-h2:border-slate-200 prose-h2:pt-4 prose-h2:text-base prose-h3:mt-5 prose-h3:text-sm prose-h4:mt-4 prose-h4:text-sm prose-p:my-2.5 prose-strong:font-bold prose-strong:text-slate-950 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:font-semibold prose-a:text-[#0f3a4a] prose-a:underline prose-a:underline-offset-2 prose-hr:my-5 prose-hr:border-slate-200">
+        <div className="prose prose-slate max-w-none text-[15px] leading-7 prose-headings:font-bold prose-headings:text-slate-950 prose-h1:text-xl prose-h2:mt-7 prose-h2:text-lg prose-h3:mt-6 prose-h3:text-base prose-h4:mt-5 prose-h4:text-[15px] prose-p:my-4 prose-strong:font-semibold prose-strong:text-slate-950 prose-ul:my-4 prose-ol:my-4 prose-li:my-1.5 prose-a:font-semibold prose-a:text-slate-950 prose-a:underline prose-a:underline-offset-2 prose-hr:my-6 prose-hr:border-slate-300">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -659,12 +793,12 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
                 </a>
               ),
               h2: ({ children }) => (
-                <h2 className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base font-black leading-6 text-[#0f3a4a]">
+                <h2 className="mt-7 text-lg font-bold leading-7 text-slate-950">
                   {children}
                 </h2>
               ),
               h3: ({ children }) => (
-                <h3 className="mt-5 rounded-xl bg-slate-50 px-4 py-2 text-sm font-black uppercase tracking-wide text-[#0f3a4a]">
+                <h3 className="mt-6 text-base font-bold leading-7 text-slate-950">
                   {children}
                 </h3>
               ),
@@ -686,7 +820,7 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
                 }
 
                 return (
-                  <p className="my-3 text-[13px] leading-7 text-slate-800">
+                  <p className="my-4 text-[15px] leading-7 text-slate-900">
                     {children}
                   </p>
                 );
@@ -701,13 +835,13 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
                 }
 
                 return (
-                  <ul className="my-4 list-disc space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
+                  <ul className="my-4 ml-6 list-disc space-y-2 text-[15px] leading-7 text-slate-900">
                     {children}
                   </ul>
                 );
               },
               ol: ({ children }) => (
-                <ol className="my-4 list-decimal space-y-2 rounded-2xl bg-slate-50 px-6 py-4 text-[13px] leading-7 text-slate-800">
+                <ol className="my-4 ml-6 list-decimal space-y-2 text-[15px] leading-7 text-slate-900">
                   {children}
                 </ol>
               ),
@@ -773,6 +907,17 @@ function SharedMessageCard({ message }: { message: SharedMessage }) {
           </ReactMarkdown>
         </div>
 
+        {!contentHasBaseLegal && (
+          <PersistedReferenceSection title="Base legal" references={legalReferences} />
+        )}
+
+        {!contentHasConsultedSources && (
+          <PersistedReferenceSection
+            title="Fontes consultadas"
+            references={consultedReferences}
+          />
+        )}
+
         {csvDownloads.length > 0 && (
           <div className="mt-4 flex flex-wrap justify-start gap-2 border-t border-slate-100 pt-4">
             {csvDownloads.map((download) => (
@@ -818,7 +963,7 @@ export default async function GovernanceSharedConversationPage({
   if (selectedMessageId && isUuid(selectedMessageId)) {
     const { data: sharedMessage, error: sharedMessageError } = await supabase
       .from("governance_messages")
-      .select("id, conversation_id, role, content, created_at")
+      .select("id, conversation_id, role, content, metadata, created_at")
       .eq("id", selectedMessageId)
       .maybeSingle<SharedMessage>();
 
@@ -896,7 +1041,7 @@ export default async function GovernanceSharedConversationPage({
 
       const { data: nextAssistant, error: nextAssistantError } = await supabase
         .from("governance_messages")
-        .select("id, conversation_id, role, content, created_at")
+        .select("id, conversation_id, role, content, metadata, created_at")
         .eq("conversation_id", conversation.id)
         .neq("role", "user")
         .gt("created_at", directSelectedMessage.created_at ?? "")
@@ -918,7 +1063,7 @@ export default async function GovernanceSharedConversationPage({
       const { data: previousQuestion, error: previousQuestionError } =
         await supabase
           .from("governance_messages")
-          .select("id, conversation_id, role, content, created_at")
+          .select("id, conversation_id, role, content, metadata, created_at")
           .eq("conversation_id", conversation.id)
           .eq("role", "user")
           .lt("created_at", directSelectedMessage.created_at ?? "")
@@ -939,7 +1084,7 @@ export default async function GovernanceSharedConversationPage({
 
   const { data: messages, error: messagesError } = await supabase
     .from("governance_messages")
-    .select("id, conversation_id, role, content, created_at")
+    .select("id, conversation_id, role, content, metadata, created_at")
     .eq("conversation_id", conversation.id)
     .order("created_at", { ascending: true })
     .returns<SharedMessage[]>();

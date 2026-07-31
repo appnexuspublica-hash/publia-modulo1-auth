@@ -1,0 +1,361 @@
+import type { GovernanceQueryNature } from "@/lib/governance/knowledge-engine/analyzer";
+import { filterGovernanceSourcesForResponse } from "@/lib/governance/knowledge-engine/source-filter";
+import type { GovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine/types";
+import type { GovernanceRecoveryResult } from "@/lib/governance/recovery/types";
+
+import type { OfficialGazetteContextResult } from "./official-gazette-context";
+import { normalizeGovernanceChatSourcesForResponse } from "./official-gazette-urls";
+import {
+  buildGovernanceChatReferences,
+  type GovernanceChatReference,
+  type GovernanceChatSource,
+  type GovernanceChatSources,
+} from "./references";
+
+const DEFAULT_MAX_CONTEXT_CHARS = 48_000;
+const MIN_CONTEXT_SECTION_CHARS = 500;
+
+type EvidenceSectionId =
+  | "unified_recovery"
+  | "municipal_knowledge"
+  | "official_gazette";
+
+type EvidenceSection = {
+  id: EvidenceSectionId;
+  title: string;
+  content: string;
+  enabled: boolean;
+  limit: number;
+};
+
+export type GovernanceEvidenceBundleDiagnostics = {
+  maxContextChars: number;
+  contextChars: number;
+  includedSections: EvidenceSectionId[];
+  sections: Array<{
+    id: EvidenceSectionId;
+    originalChars: number;
+    includedChars: number;
+    truncated: boolean;
+    omittedReason: "empty" | "disabled" | "duplicate" | "budget" | null;
+  }>;
+  sourceCounts: {
+    institutional: number;
+    officialGazette: number;
+    officialSources: number;
+  };
+};
+
+export type GovernanceEvidenceBundle = {
+  contextText: string;
+  sources: GovernanceChatSources;
+  references: GovernanceChatReference[];
+  diagnostics: GovernanceEvidenceBundleDiagnostics;
+};
+
+type BuildGovernanceEvidenceBundleParams = {
+  question: string;
+  queryNature: GovernanceQueryNature;
+  baseSources: GovernanceChatSources;
+  unifiedRecoveryResult: GovernanceRecoveryResult;
+  knowledgeContextResult: GovernanceKnowledgeContext;
+  officialGazetteContextResult: OfficialGazetteContextResult;
+  includeMunicipalKnowledge: boolean;
+  includeOfficialGazette: boolean;
+  preferOfficialGazette?: boolean;
+  maxContextChars?: number;
+};
+
+function normalizeText(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDuplicateContext(candidate: string, accepted: string[]) {
+  const normalizedCandidate = normalizeText(candidate);
+
+  if (!normalizedCandidate) {
+    return false;
+  }
+
+  return accepted.some((value) => {
+    const normalizedAccepted = normalizeText(value);
+
+    if (!normalizedAccepted) {
+      return false;
+    }
+
+    if (normalizedAccepted.includes(normalizedCandidate)) {
+      return true;
+    }
+
+    const candidateWords = new Set(normalizedCandidate.split(" "));
+    const acceptedWords = new Set(normalizedAccepted.split(" "));
+    let matches = 0;
+
+    for (const word of candidateWords) {
+      if (word.length >= 4 && acceptedWords.has(word)) {
+        matches += 1;
+      }
+    }
+
+    const relevantWords = Array.from(candidateWords).filter(
+      (word) => word.length >= 4,
+    ).length;
+
+    return relevantWords > 0 && matches / relevantWords >= 0.9;
+  });
+}
+
+function clampContext(value: string, maxChars: number) {
+  const text = String(value ?? "").trim();
+
+  if (text.length <= maxChars) {
+    return { text, truncated: false };
+  }
+
+  const cut = text.slice(0, maxChars);
+  const paragraphBreak = cut.lastIndexOf("\n\n");
+  const safeEnd =
+    paragraphBreak >= Math.floor(maxChars * 0.65)
+      ? paragraphBreak
+      : maxChars;
+
+  return {
+    text: `${cut.slice(0, safeEnd).trim()}\n\n[Contexto limitado pelo orçamento desta requisição.]`,
+    truncated: true,
+  };
+}
+
+
+function isOfficialSourceDirectoryQuestion(question: string) {
+  const normalized = normalizeText(question);
+
+  return /\b(onde|qual|quais|link|links|site|portal|fonte|fontes|consultar|acessar|encontrar)\b/.test(
+    normalized,
+  ) && /\b(oficial|transparencia|despesa|despesas|pagamento|pagamentos|licitacao|licitacoes|contrato|contratos)\b/.test(
+    normalized,
+  );
+}
+
+function buildContextSections(params: BuildGovernanceEvidenceBundleParams) {
+  const sections: EvidenceSection[] = [
+    {
+      id: "unified_recovery",
+      title: "RECUPERAÇÃO UNIFICADA",
+      content: params.unifiedRecoveryResult.contextText,
+      enabled: true,
+      limit: params.preferOfficialGazette ? 14_000 : 22_000,
+    },
+    {
+      id: "municipal_knowledge",
+      title: "CONHECIMENTO MUNICIPAL COMPLEMENTAR",
+      content: params.knowledgeContextResult.contextText,
+      enabled:
+        params.includeMunicipalKnowledge &&
+        isOfficialSourceDirectoryQuestion(params.question),
+      limit: params.preferOfficialGazette ? 8_000 : 16_000,
+    },
+    {
+      id: "official_gazette",
+      title: "DIÁRIO OFICIAL MUNICIPAL",
+      content: params.officialGazetteContextResult.contextText,
+      enabled: false,
+      limit: params.preferOfficialGazette ? 30_000 : 16_000,
+    },
+  ];
+
+  return params.preferOfficialGazette
+    ? [sections[2], sections[0], sections[1]]
+    : sections;
+}
+
+function buildIntegratedContext(params: BuildGovernanceEvidenceBundleParams) {
+  const maxContextChars = Math.max(
+    8_000,
+    params.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS,
+  );
+  const acceptedContents: string[] = [];
+  const blocks: string[] = [];
+  const diagnostics: GovernanceEvidenceBundleDiagnostics["sections"] = [];
+  let usedChars = 0;
+
+  for (const section of buildContextSections(params)) {
+    const content = String(section.content ?? "").trim();
+
+    if (!section.enabled || !content) {
+      diagnostics.push({
+        id: section.id,
+        originalChars: content.length,
+        includedChars: 0,
+        truncated: false,
+        omittedReason: section.enabled ? "empty" : "disabled",
+      });
+      continue;
+    }
+
+    if (isDuplicateContext(content, acceptedContents)) {
+      diagnostics.push({
+        id: section.id,
+        originalChars: content.length,
+        includedChars: 0,
+        truncated: false,
+        omittedReason: "duplicate",
+      });
+      continue;
+    }
+
+    const remainingChars = maxContextChars - usedChars;
+
+    if (remainingChars < MIN_CONTEXT_SECTION_CHARS) {
+      diagnostics.push({
+        id: section.id,
+        originalChars: content.length,
+        includedChars: 0,
+        truncated: false,
+        omittedReason: "budget",
+      });
+      continue;
+    }
+
+    const clamped = clampContext(
+      content,
+      Math.min(section.limit, remainingChars),
+    );
+    const block = `SEÇÃO: ${section.title}\n\n${clamped.text}`;
+
+    blocks.push(block);
+    acceptedContents.push(clamped.text);
+    usedChars += block.length;
+    diagnostics.push({
+      id: section.id,
+      originalChars: content.length,
+      includedChars: clamped.text.length,
+      truncated: clamped.truncated,
+      omittedReason: null,
+    });
+  }
+
+  return {
+    contextText:
+      blocks.length > 0
+        ? [
+            "PACOTE INTEGRADO DE EVIDÊNCIAS DA GOVERNANÇA",
+            "Use as evidências abaixo como base factual. Não invente dados para preencher lacunas.",
+            "Em caso de repetição, prefira a evidência mais específica e melhor identificada.",
+            "",
+            blocks.join("\n\n---\n\n"),
+          ].join("\n")
+        : "",
+    maxContextChars,
+    diagnostics,
+  };
+}
+
+function sourceKey(source: GovernanceChatSource) {
+  return `${normalizeText(source.title)}::${normalizeText(source.url ?? "")}`;
+}
+
+function mergeSourceLists(...lists: GovernanceChatSource[][]) {
+  const merged = new Map<string, GovernanceChatSource>();
+
+  for (const source of lists.flat()) {
+    const normalizedSource: GovernanceChatSource = {
+      id: String(source.id ?? "").trim(),
+      title: String(source.title ?? "").trim(),
+      url: String(source.url ?? "").trim() || null,
+      type: String(source.type ?? "").trim() || null,
+      supportText: String(source.supportText ?? "").trim() || null,
+    };
+
+    if (!normalizedSource.title) {
+      continue;
+    }
+
+    const key = sourceKey(normalizedSource);
+    const current = merged.get(key);
+
+    if (!current || (!current.url && normalizedSource.url)) {
+      merged.set(key, normalizedSource);
+    }
+  }
+
+  return Array.from(merged.values());
+}
+
+function mapKnowledgeSources(
+  sources: GovernanceKnowledgeContext["sources"]["institutional"],
+): GovernanceChatSource[] {
+  return sources.map(({ id, title, url, type }) => ({ id, title, url, type }));
+}
+
+function buildMergedSources(params: BuildGovernanceEvidenceBundleParams) {
+  const knowledgeSources = params.knowledgeContextResult.sources;
+  const gazetteReferenceSources: GovernanceChatSource[] =
+    params.officialGazetteContextResult.referenceLinks.map((reference, index) => ({
+      id: `official-gazette:${reference.editionNumber ?? "sem-edicao"}:${index}`,
+      title: reference.label || reference.title,
+      url: reference.url,
+      type: "Diário Oficial",
+    }));
+
+  const normalized = normalizeGovernanceChatSourcesForResponse({
+    institutional: mergeSourceLists(
+      params.baseSources.institutional ?? [],
+      mapKnowledgeSources(knowledgeSources.institutional),
+    ),
+    officialGazette: mergeSourceLists(
+      params.baseSources.officialGazette ?? [],
+      mapKnowledgeSources(knowledgeSources.officialGazette),
+      gazetteReferenceSources,
+    ),
+    officialSources: mergeSourceLists(
+      params.baseSources.officialSources ?? [],
+      mapKnowledgeSources(knowledgeSources.officialSources),
+    ),
+  });
+
+  const filtered = filterGovernanceSourcesForResponse({
+    sources: normalized,
+    question: params.question,
+    queryNature: params.queryNature,
+  });
+
+  return {
+    ...filtered,
+    ...(params.baseSources.externalSources
+      ? { externalSources: params.baseSources.externalSources }
+      : {}),
+  };
+}
+
+export function buildGovernanceEvidenceBundle(
+  params: BuildGovernanceEvidenceBundleParams,
+): GovernanceEvidenceBundle {
+  const integratedContext = buildIntegratedContext(params);
+  const sources = buildMergedSources(params);
+
+  return {
+    contextText: integratedContext.contextText,
+    sources,
+    references: buildGovernanceChatReferences(sources),
+    diagnostics: {
+      maxContextChars: integratedContext.maxContextChars,
+      contextChars: integratedContext.contextText.length,
+      includedSections: integratedContext.diagnostics
+        .filter((section) => section.omittedReason === null)
+        .map((section) => section.id),
+      sections: integratedContext.diagnostics,
+      sourceCounts: {
+        institutional: sources.institutional.length,
+        officialGazette: sources.officialGazette.length,
+        officialSources: sources.officialSources.length,
+      },
+    },
+  };
+}

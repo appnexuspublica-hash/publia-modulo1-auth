@@ -1,0 +1,17 @@
+{
+  "version": "15.12",
+  "pipeline": "governance-v15.12-canonical-transient-metadata",
+  "scope": [
+    "plano único por requisição",
+    "finalização unificada entre streaming e não streaming",
+    "snapshot canônico para mensagens persistidas",
+    "snapshot canônico para respostas transitórias",
+    "compatibilidade de leitura com mensagens legadas",
+    "separação entre Base legal, evidências e canais de consulta"
+  ],
+  "knownLimitations": [
+    "o typecheck completo depende das dependências instaladas no projeto local",
+    "respostas transitórias não são recuperáveis após recarga porque a conversa foi removida ou a persistência foi ignorada",
+    "a suíte estrutural não substitui testes funcionais com Supabase e OpenAI ativos"
+  ]
+}

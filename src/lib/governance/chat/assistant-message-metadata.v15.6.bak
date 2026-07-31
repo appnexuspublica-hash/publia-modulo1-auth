@@ -1,0 +1,192 @@
+import type { ConversationRelation } from "@/lib/governance/chat/history";
+import type {
+  GovernanceChatReference,
+  GovernanceChatSources,
+} from "@/lib/governance/chat/references";
+import type { GovernanceRecoveryResponsePolicy } from "@/lib/governance/recovery/types";
+import type { GovernanceRequestTelemetrySnapshot } from "@/lib/governance/chat/request-observability";
+import type { GovernanceResponseMode } from "@/types/governance";
+
+type GovernanceOfficialWebContext = {
+  topic?: string | null;
+  allowedDomains?: string[];
+} | null;
+
+type GovernanceEvidenceContext = {
+  sources: unknown[];
+} | null;
+
+type GovernanceRecoveryEvidenceItem = {
+  id: string;
+  provider: string;
+  title: string;
+  sourceUrl?: string | null;
+  score: number;
+};
+
+type GovernanceAssistantMessageMetadataCommonParams = {
+  model: string;
+  queryAnalysis: unknown;
+  responseMode: GovernanceResponseMode;
+  historyMessagesUsed: number;
+  selectedPdfAttachmentNames: string[];
+  selectedPdfFileIds: string[];
+  hasSelectedPdfAttachments: boolean;
+  hasLegalGuardrails: boolean;
+  forceWebFirst: boolean;
+  officialWeb: GovernanceOfficialWebContext;
+  governanceEvidenceContext: GovernanceEvidenceContext;
+  officialGazetteChunksUsed: number;
+  recoveryDiagnostics: unknown;
+  recoveryEvidence: GovernanceRecoveryEvidenceItem[];
+  responsePolicy: GovernanceRecoveryResponsePolicy;
+  conversationRelation: ConversationRelation;
+  previousUserQuestion: string;
+  clientRequestId: string;
+};
+
+type GovernanceAssistantMessageMetadataFinalParams = {
+  responseSources: GovernanceChatSources;
+  references: GovernanceChatReference[];
+  officialLegalReferences: GovernanceChatReference[];
+  streaming: boolean;
+  observability: GovernanceRequestTelemetrySnapshot;
+};
+
+type BuildGovernanceAssistantMessageMetadataParams =
+  GovernanceAssistantMessageMetadataCommonParams &
+  GovernanceAssistantMessageMetadataFinalParams;
+
+export function countOfficialGazetteKnowledgeItems(
+  items: Array<{ provider: string }>,
+): number {
+  return items.filter((item) => item.provider === "official_gazette").length;
+}
+
+export function createGovernanceAssistantMessageMetadataBuilder(
+  commonParams: GovernanceAssistantMessageMetadataCommonParams,
+) {
+  return function buildAssistantMessageMetadata(
+    finalParams: GovernanceAssistantMessageMetadataFinalParams,
+  ): Record<string, unknown> {
+    return buildGovernanceAssistantMessageMetadata({
+      ...commonParams,
+      ...finalParams,
+    });
+  };
+}
+
+export function buildGovernanceAssistantMessageMetadata(
+  params: BuildGovernanceAssistantMessageMetadataParams,
+): Record<string, unknown> {
+  const {
+    model,
+    queryAnalysis,
+    responseMode,
+    historyMessagesUsed,
+    selectedPdfAttachmentNames,
+    selectedPdfFileIds,
+    hasSelectedPdfAttachments,
+    hasLegalGuardrails,
+    responseSources,
+    references,
+    officialLegalReferences,
+    forceWebFirst,
+    officialWeb,
+    governanceEvidenceContext,
+    officialGazetteChunksUsed,
+    recoveryDiagnostics,
+    recoveryEvidence,
+    responsePolicy,
+    conversationRelation,
+    previousUserQuestion,
+    clientRequestId,
+    observability,
+    streaming,
+  } = params;
+
+  const hasGovernanceEvidenceSources =
+    (governanceEvidenceContext?.sources.length ?? 0) > 0;
+
+  return {
+    source: "openai",
+    request_id: observability.requestId,
+    client_request_id: clientRequestId,
+    pipeline_version: observability.pipelineVersion,
+    observability,
+    product_tier: "governance",
+    model,
+    query_analysis: queryAnalysis,
+    response_mode: responseMode,
+    history_messages_used: historyMessagesUsed,
+    selected_pdf_attachment_names: selectedPdfAttachmentNames,
+    selected_pdf_file_ids: selectedPdfFileIds,
+    current_message_only_for_pdf: hasSelectedPdfAttachments,
+    current_message_only_for_legal_guardrails: hasLegalGuardrails,
+    official_gazette_context_enabled:
+      responseSources.officialGazette.length > 0,
+    official_gazette_chunks_used: officialGazetteChunksUsed,
+    official_gazette_reference_links: responseSources.officialGazette,
+    sources: responseSources,
+    references,
+    official_legal_references_used: officialLegalReferences,
+    governance_result: {
+      version: "15.3",
+      legal_references: references.filter((item) => item.kind === "legal"),
+      evidence_sources: references.filter(
+        (item) => item.kind !== "legal" && item.kind !== "consultation",
+      ),
+      consultation_channels: references.filter(
+        (item) => item.kind === "consultation",
+      ),
+      evidence_status: responsePolicy.mode,
+    },
+    response_policy: {
+      mode: responsePolicy.mode,
+      reason: responsePolicy.reason,
+      municipal_evidence_sufficient:
+        responsePolicy.municipalEvidenceSufficient,
+      comparison_ready: responsePolicy.comparisonReady,
+      external_sources_allowed: responsePolicy.externalSourcesAllowed,
+      degraded: responsePolicy.degraded,
+      unavailable_providers: responsePolicy.unavailableProviders,
+    },
+    web_search: {
+      enabled: Boolean(forceWebFirst && officialWeb),
+      strategy_enabled: Boolean(forceWebFirst && officialWeb),
+      prior_evidence_context_ready: Boolean(governanceEvidenceContext),
+      final_tool_enabled: Boolean(
+        forceWebFirst && officialWeb && !hasGovernanceEvidenceSources,
+      ),
+      evidence_context_ready: Boolean(governanceEvidenceContext),
+      evidence_sources_count: governanceEvidenceContext?.sources.length ?? 0,
+      topic: officialWeb?.topic ?? null,
+      allowed_domains: officialWeb?.allowedDomains ?? [],
+    },
+    knowledge_engine: {
+      version: "governance-v6.1.8-D2-policy-anchored-recovery",
+      diagnostics: recoveryDiagnostics,
+      selected_items: recoveryEvidence.map((item) => ({
+        id: item.id,
+        provider: item.provider,
+        title: item.title,
+        type: item.provider,
+        url: item.sourceUrl,
+        score: item.score,
+      })),
+    },
+    institutional_sources_used: responseSources.institutional,
+    official_sources_context_enabled: responseSources.officialSources.length > 0,
+    official_sources_used: responseSources.officialSources,
+    ...(streaming
+      ? {}
+      : {
+          official_sources_prioritized_source:
+            responseSources.officialSources[0] ?? null,
+        }),
+    official_sources_error: null,
+    conversation_relation: conversationRelation,
+    previous_user_question: previousUserQuestion || null,
+    streaming,
+  };
+}

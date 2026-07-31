@@ -5,15 +5,151 @@ import {
   recoverOfficialGazetteEvidence,
 } from "./providers";
 import { normalizeRecoveryText } from "./normalize";
+import { executeGovernanceRecoveryProvider } from "./provider-status";
 import type {
   GovernanceRecoveryEvidence,
   GovernanceRecoveryParams,
+  GovernanceRecoveryProvider,
+  GovernanceRecoveryProviderDiagnostic,
   GovernanceRecoveryResponsePolicy,
   GovernanceRecoveryResult,
 } from "./types";
 
 const DEFAULT_MAX_EVIDENCE = 12;
 const DEFAULT_MAX_CONTEXT_CHARS = 24000;
+
+function evidenceHaystack(item: GovernanceRecoveryEvidence) {
+  return normalizeRecoveryText(
+    `${item.title}\n${item.content}\n${JSON.stringify(item.metadata ?? {})}`,
+  );
+}
+
+function extractCompanyTerms(question: string) {
+  const normalized = normalizeRecoveryText(question);
+  const match = normalized.match(
+    /\bempresa\s+(.+?)(?:\s+em\s+\d{4}\b|\s+no\s+exercicio\s+de\s+\d{4}\b|$)/,
+  );
+
+  if (!match?.[1]) return [];
+
+  return match[1]
+    .split(/\s+/)
+    .filter((term) => term.length >= 3)
+    .filter((term) => !["ltda", "eireli", "empresa", "municipio"].includes(term));
+}
+
+function extractRoleTerms(question: string) {
+  const normalized = normalizeRecoveryText(question);
+  const match = normalized.match(
+    /\b(?:cargo|funcao|vaga|concurso(?:s)?(?:\s+publico(?:s)?)?)\s+(?:de|para)?\s*(.+?)(?:\s+em\s+\d{4}\b|$)/,
+  );
+
+  if (!match?.[1]) return [];
+
+  return match[1]
+    .split(/\s+/)
+    .filter((term) => term.length >= 4)
+    .filter(
+      (term) =>
+        ![
+          "publico",
+          "publicos",
+          "municipio",
+          "municipal",
+          "publicado",
+          "publicados",
+          "foram",
+        ].includes(term),
+    );
+}
+
+function isTeacherSpecificQuestion(question: string) {
+  const normalized = normalizeRecoveryText(question);
+
+  return /\b(magisterio|professor|professores|docente|docentes|educacao)\b/.test(
+    normalized,
+  );
+}
+
+function isTeacherSpecificEvidence(item: GovernanceRecoveryEvidence) {
+  const text = evidenceHaystack(item);
+
+  return /\b(magisterio|professor|professores|docente|docentes)\b/.test(text);
+}
+
+function isCandidateRelevantToQuestion(
+  question: string,
+  item: GovernanceRecoveryEvidence,
+) {
+  if (item.provider === "legal") return true;
+  if (
+    item.metadata.exact_reference === true ||
+    item.metadata.exact_document === true
+  ) {
+    return true;
+  }
+
+  const q = normalizeRecoveryText(question);
+  const text = evidenceHaystack(item);
+
+  const isPaymentQuery =
+    /\b(valor|valores|pagamento|pagamentos|pago|pagos|empenho|empenhos|credor|favorecido)\b/.test(
+      q,
+    ) && /\bempresa\b/.test(q);
+
+  if (isPaymentQuery) {
+    const companyTerms = extractCompanyTerms(question);
+    const hasCompany =
+      companyTerms.length > 0 &&
+      companyTerms.every((term) => text.includes(term));
+    const hasPaymentEvidence =
+      /\b(pagamento|pagamentos|pago|pagos|empenho|empenhos|liquidacao|liquidado|credor|favorecido|despesa)\b/.test(
+        text,
+      );
+
+    return hasCompany && hasPaymentEvidence;
+  }
+
+  const isContestQuery =
+    /\b(concurso|concursos|processo seletivo|processos seletivos)\b/.test(q);
+
+  if (isContestQuery) {
+    const roleTerms = extractRoleTerms(question);
+    const hasContestEvidence =
+      /\b(concurso|concursos|processo seletivo|processos seletivos|edital de concurso|edital de processo seletivo)\b/.test(
+        text,
+      );
+    const hasRole =
+      roleTerms.length === 0 ||
+      roleTerms.every((term) => text.includes(term));
+
+    return hasContestEvidence && hasRole;
+  }
+
+  const isCareerProgressionQuery =
+    /\b(progressao|progressao funcional|carreira|plano de cargos)\b/.test(q);
+
+  if (isCareerProgressionQuery) {
+    if (!isTeacherSpecificQuestion(question) && isTeacherSpecificEvidence(item)) {
+      return false;
+    }
+
+    return (
+      /\b(progressao|progressao funcional|carreira|plano de cargos|vencimentos)\b/.test(
+        text,
+      )
+    );
+  }
+
+  return true;
+}
+
+function filterCandidatesByQuestionRelevance(
+  question: string,
+  items: GovernanceRecoveryEvidence[],
+) {
+  return items.filter((item) => isCandidateRelevantToQuestion(question, item));
+}
 
 function deduplicate(items: GovernanceRecoveryEvidence[]) {
   const seen = new Set<string>();
@@ -33,11 +169,17 @@ function buildContext(items: GovernanceRecoveryEvidence[], maxChars: number) {
     const header = [
       `[FONTE: ${item.provider}]`,
       `Título: ${item.title}`,
-      item.metadata.edition_number ? `Edição: ${item.metadata.edition_number}` : "",
-      item.metadata.publication_date ? `Data: ${item.metadata.publication_date}` : "",
+      item.metadata.edition_number
+        ? `Edição: ${item.metadata.edition_number}`
+        : "",
+      item.metadata.publication_date
+        ? `Data: ${item.metadata.publication_date}`
+        : "",
       item.metadata.page_number ? `Página: ${item.metadata.page_number}` : "",
       item.sourceUrl ? `URL: ${item.sourceUrl}` : "",
-    ].filter(Boolean).join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const block = `${header}\n${item.content}`.trim();
     if (used + block.length > maxChars) {
@@ -54,12 +196,40 @@ function buildContext(items: GovernanceRecoveryEvidence[], maxChars: number) {
 
 function isComparisonQuestion(question: string) {
   const normalized = normalizeRecoveryText(question);
-  return /\b(compare|comparar|comparacao|confronte|relacione)\b/.test(normalized);
+  return /\b(compare|comparar|comparacao|confronte)\b/.test(normalized);
 }
 
 function isDirectDocumentQuestion(question: string) {
   const normalized = normalizeRecoveryText(question);
-  return /\b(o que dispoe|o que estabelece|o que determina|o que diz|qual o conteudo|resuma)\b/.test(normalized);
+  return /\b(o que dispoe|o que estabelece|o que determina|o que diz|qual o conteudo|resuma)\b/.test(
+    normalized,
+  );
+}
+
+function isDocumentAnalysisQuestion(question: string) {
+  const normalized = normalizeRecoveryText(question);
+  return /\b(analise|analisar|avalie|avaliar|legalidade|juridicidade|risco|riscos|impacto|impactos|conformidade|consequencia|consequencias|providencia|providencias|validade)\b/.test(
+    normalized,
+  );
+}
+
+function getFailedProviders(
+  providerResults: GovernanceRecoveryProviderDiagnostic[],
+): GovernanceRecoveryProvider[] {
+  return providerResults
+    .filter(
+      (result) => result.status !== "success" && result.status !== "empty",
+    )
+    .map((result) => result.provider);
+}
+
+function includesMunicipalProvider(
+  providers: GovernanceRecoveryProvider[],
+): boolean {
+  return providers.some(
+    (provider) =>
+      provider === "institutional" || provider === "official_gazette",
+  );
 }
 
 function buildResponsePolicy(params: {
@@ -67,13 +237,25 @@ function buildResponsePolicy(params: {
   selected: GovernanceRecoveryEvidence[];
   exactAct: GovernanceRecoveryEvidence[];
   exactInstitutional: GovernanceRecoveryEvidence[];
+  providerResults: GovernanceRecoveryProviderDiagnostic[];
 }): GovernanceRecoveryResponsePolicy {
   const comparisonRequested = isComparisonQuestion(params.question);
-  const hasInstitutional = params.selected.some((item) => item.provider === "institutional");
-  const hasGazette = params.selected.some((item) => item.provider === "official_gazette");
+  const hasInstitutional = params.selected.some(
+    (item) => item.provider === "institutional",
+  );
+  const hasGazette = params.selected.some(
+    (item) => item.provider === "official_gazette",
+  );
   const comparisonReady = comparisonRequested && hasInstitutional && hasGazette;
   const municipalEvidenceSufficient = params.selected.some(
-    (item) => item.provider === "institutional" || item.provider === "official_gazette",
+    (item) =>
+      (item.provider === "institutional" && item.score >= 20) ||
+      (item.provider === "official_gazette" && item.score >= 45),
+  );
+  const unavailableProviders = getFailedProviders(params.providerResults);
+  const degraded = unavailableProviders.length > 0;
+  const municipalProviderFailed = includesMunicipalProvider(
+    unavailableProviders,
   );
 
   if (comparisonRequested && !comparisonReady) {
@@ -82,7 +264,11 @@ function buildResponsePolicy(params: {
       municipalEvidenceSufficient,
       comparisonReady: false,
       externalSourcesAllowed: false,
-      reason: "A comparação solicitada não possui duas evidências municipais tematicamente compatíveis.",
+      degraded,
+      unavailableProviders,
+      reason: municipalProviderFailed
+        ? "A comparação não pôde ser concluída porque uma ou mais fontes municipais ficaram indisponíveis durante a recuperação."
+        : "A comparação solicitada não possui duas evidências municipais tematicamente compatíveis.",
     };
   }
 
@@ -92,17 +278,68 @@ function buildResponsePolicy(params: {
       municipalEvidenceSufficient: true,
       comparisonReady: true,
       externalSourcesAllowed: false,
-      reason: "Há evidência institucional e ato do Diário Oficial para comparação.",
+      degraded,
+      unavailableProviders,
+      reason: degraded
+        ? "Há evidência institucional e ato do Diário Oficial para comparação, mas outra fonte consultada falhou."
+        : "Há evidência institucional e ato do Diário Oficial para comparação.",
     };
   }
 
   if (params.exactAct.length > 0 || params.exactInstitutional.length > 0) {
+    const directDocumentQuestion = isDirectDocumentQuestion(params.question);
+    const documentAnalysisQuestion = isDocumentAnalysisQuestion(params.question);
+
     return {
-      mode: isDirectDocumentQuestion(params.question) ? "direct_document" : "document_summary",
+      mode: directDocumentQuestion
+        ? "direct_document"
+        : documentAnalysisQuestion
+          ? "legal_analysis"
+          : "document_summary",
       municipalEvidenceSufficient: true,
       comparisonReady: false,
+      externalSourcesAllowed: documentAnalysisQuestion,
+      degraded,
+      unavailableProviders,
+      reason: documentAnalysisQuestion
+        ? degraded
+          ? "A pergunta solicita análise de documento municipal identificado de forma exata, mas uma fonte complementar falhou."
+          : "A pergunta solicita análise jurídica ou técnica de documento municipal identificado de forma exata."
+        : degraded
+          ? "A pergunta aponta para documento municipal identificado de forma exata, mas uma fonte complementar falhou."
+          : "A pergunta aponta para documento municipal identificado de forma exata.",
+    };
+  }
+
+  if (!municipalEvidenceSufficient && municipalProviderFailed) {
+    return {
+      mode: "insufficient_evidence",
+      municipalEvidenceSufficient: false,
+      comparisonReady: false,
       externalSourcesAllowed: false,
-      reason: "A pergunta aponta para documento municipal identificado de forma exata.",
+      degraded: true,
+      unavailableProviders,
+      reason:
+        "A evidência municipal necessária não pôde ser verificada porque uma ou mais fontes internas ficaram indisponíveis.",
+    };
+  }
+
+  const allQueriedProvidersFailed =
+    params.providerResults.length > 0 &&
+    params.providerResults.every(
+      (result) => result.status !== "success" && result.status !== "empty",
+    );
+
+  if (allQueriedProvidersFailed) {
+    return {
+      mode: "insufficient_evidence",
+      municipalEvidenceSufficient: false,
+      comparisonReady: false,
+      externalSourcesAllowed: true,
+      degraded: true,
+      unavailableProviders,
+      reason:
+        "Nenhuma das fontes previstas para esta consulta pôde ser acessada durante a recuperação.",
     };
   }
 
@@ -111,10 +348,33 @@ function buildResponsePolicy(params: {
     municipalEvidenceSufficient,
     comparisonReady: false,
     externalSourcesAllowed: !municipalEvidenceSufficient,
+    degraded,
+    unavailableProviders,
     reason: municipalEvidenceSufficient
-      ? "Há evidência municipal suficiente para responder sem fontes externas."
-      : "Não foi localizada evidência municipal suficiente.",
+      ? degraded
+        ? "Há evidência municipal suficiente, mas uma fonte complementar falhou."
+        : "Há evidência municipal suficiente para responder sem fontes externas."
+      : "Não foi localizada evidência municipal suficiente nas fontes consultadas com sucesso.",
   };
+}
+
+function createProviderOperation(
+  provider: GovernanceRecoveryProvider,
+  params: GovernanceRecoveryParams,
+): (() => Promise<GovernanceRecoveryEvidence[]>) | null {
+  if (provider === "official_gazette") {
+    return () => recoverOfficialGazetteEvidence(params);
+  }
+
+  if (provider === "institutional") {
+    return () => recoverInstitutionalEvidence(params);
+  }
+
+  if (provider === "legal") {
+    return () => recoverLegalEvidence(params.question);
+  }
+
+  return null;
 }
 
 export async function orchestrateGovernanceRecovery(
@@ -122,43 +382,64 @@ export async function orchestrateGovernanceRecovery(
 ): Promise<GovernanceRecoveryResult> {
   const intent = classifyGovernanceRecoveryIntent(params);
   const queriedProviders = [...intent.allowedProviders];
-  const tasks: Promise<GovernanceRecoveryEvidence[]>[] = [];
 
-  for (const provider of intent.allowedProviders) {
-    if (provider === "official_gazette") {
-      tasks.push(recoverOfficialGazetteEvidence(params));
-    } else if (provider === "institutional") {
-      tasks.push(recoverInstitutionalEvidence(params));
-    } else if (provider === "legal") {
-      tasks.push(recoverLegalEvidence(params.question));
-    }
-  }
+  const executions = await Promise.all(
+    intent.allowedProviders.map(async (provider) => {
+      const operation = createProviderOperation(provider, params);
 
-  const settled = await Promise.allSettled(tasks);
-  const candidates = settled.flatMap((result) =>
-    result.status === "fulfilled" ? result.value : []
+      if (!operation) {
+        return executeGovernanceRecoveryProvider({
+          provider,
+          operation: async () => {
+            throw new Error(`Provider não implementado: ${provider}`);
+          },
+        });
+      }
+
+      return executeGovernanceRecoveryProvider({ provider, operation });
+    }),
   );
 
-  const ranked = deduplicate(candidates)
-    .sort((a, b) => b.score - a.score || b.confidence - a.confidence);
+  const providerResults = executions.map((execution) => execution.diagnostic);
+  const candidates = executions.flatMap((execution) => execution.evidence);
+
+  const relevantCandidates = filterCandidatesByQuestionRelevance(
+    params.question,
+    deduplicate(candidates),
+  );
+
+  const ranked = relevantCandidates.sort(
+    (a, b) => b.score - a.score || b.confidence - a.confidence,
+  );
 
   const exactAct = ranked.filter(
-    (item) => item.provider === "official_gazette" && item.metadata.exact_reference === true,
+    (item) =>
+      item.provider === "official_gazette" &&
+      item.metadata.exact_reference === true,
   );
   const exactInstitutional = ranked.filter(
-    (item) => item.provider === "institutional" && item.metadata.exact_document === true,
+    (item) =>
+      item.provider === "institutional" &&
+      item.metadata.exact_document === true,
   );
 
   const comparisonRequested = isComparisonQuestion(params.question);
   let selectedPool = ranked;
 
   if (comparisonRequested) {
-    const institutionalPool = exactInstitutional.length > 0
-      ? exactInstitutional
-      : ranked.filter((item) => item.provider === "institutional" && item.score >= 20);
-    const gazettePool = exactAct.length > 0
-      ? exactAct
-      : ranked.filter((item) => item.provider === "official_gazette" && item.score >= 45);
+    const institutionalPool =
+      exactInstitutional.length > 0
+        ? exactInstitutional
+        : ranked.filter(
+            (item) => item.provider === "institutional" && item.score >= 20,
+          );
+    const gazettePool =
+      exactAct.length > 0
+        ? exactAct
+        : ranked.filter(
+            (item) =>
+              item.provider === "official_gazette" && item.score >= 45,
+          );
 
     selectedPool = [
       ...institutionalPool.slice(0, 6),
@@ -175,25 +456,52 @@ export async function orchestrateGovernanceRecovery(
     Math.max(1, params.maxEvidence ?? DEFAULT_MAX_EVIDENCE),
   );
 
-  const returnedByProvider = selected.reduce<Record<string, number>>((acc, item) => {
+  const returnedByProvider = providerResults.reduce<
+    Partial<Record<GovernanceRecoveryProvider, number>>
+  >((acc, result) => {
+    acc[result.provider] = result.returnedCandidates;
+    return acc;
+  }, {});
+
+  const selectedByProvider = selected.reduce<
+    Partial<Record<GovernanceRecoveryProvider, number>>
+  >((acc, item) => {
     acc[item.provider] = (acc[item.provider] ?? 0) + 1;
     return acc;
   }, {});
+
+  const successfulProviders = providerResults
+    .filter((result) => result.status === "success")
+    .map((result) => result.provider);
+  const emptyProviders = providerResults
+    .filter((result) => result.status === "empty")
+    .map((result) => result.provider);
+  const failedProviders = getFailedProviders(providerResults);
 
   const responsePolicy = buildResponsePolicy({
     question: params.question,
     selected,
     exactAct,
     exactInstitutional,
+    providerResults,
   });
 
   return {
     intent,
     evidence: selected,
-    contextText: buildContext(selected, params.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS),
+    contextText: buildContext(
+      selected,
+      params.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS,
+    ),
     diagnostics: {
       queriedProviders,
+      providerResults,
+      successfulProviders,
+      emptyProviders,
+      failedProviders,
+      degraded: failedProviders.length > 0,
       returnedByProvider,
+      selectedByProvider,
       totalCandidates: candidates.length,
       selectedEvidence: selected.length,
     },

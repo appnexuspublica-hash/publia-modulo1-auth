@@ -1,0 +1,67 @@
+import { filterGovernanceSourcesForResponse } from "@/lib/governance/knowledge-engine/source-filter";
+import type { GovernanceQueryNature } from "@/lib/governance/knowledge-engine/analyzer";
+import type { GovernanceRecoveryEvidence } from "@/lib/governance/recovery";
+
+import {
+  buildGovernanceChatReferences,
+  type GovernanceChatSource,
+  type GovernanceChatSources,
+} from "./references";
+import { normalizeGovernanceChatSourcesForResponse } from "./official-gazette-urls";
+
+type BuildGovernanceInitialResponseSourcesParams = {
+  evidence: GovernanceRecoveryEvidence[];
+  question: string;
+  queryNature: GovernanceQueryNature;
+};
+
+export function buildGovernanceInitialResponseSources({
+  evidence,
+  question,
+  queryNature,
+}: BuildGovernanceInitialResponseSourcesParams) {
+  const institutionalSources: GovernanceChatSource[] = evidence
+    .filter((item) => item.provider === "institutional")
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      url: item.sourceUrl,
+      type: "Documento institucional",
+    }));
+
+  const officialGazetteSources: GovernanceChatSource[] = evidence
+    .filter((item) => item.provider === "official_gazette")
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      url: item.sourceUrl,
+      type: "Diário Oficial",
+    }));
+
+  const legalSources: GovernanceChatSource[] = evidence
+    .filter((item) => item.provider === "legal")
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      url: item.sourceUrl,
+      type: "Base legal",
+    }));
+
+  const rawResponseSources: GovernanceChatSources =
+    normalizeGovernanceChatSourcesForResponse({
+      institutional: institutionalSources,
+      officialGazette: officialGazetteSources,
+      officialSources: legalSources,
+    });
+
+  const responseSources = filterGovernanceSourcesForResponse({
+    sources: rawResponseSources,
+    question,
+    queryNature,
+  });
+
+  return {
+    responseSources,
+    responseReferences: buildGovernanceChatReferences(responseSources),
+  };
+}

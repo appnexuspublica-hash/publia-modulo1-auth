@@ -1,0 +1,94 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { GovernanceMessage } from "@/types/governance";
+
+type GovernanceIdempotencyParams = {
+  supabase: SupabaseClient;
+  organizationId: string;
+  conversationId: string;
+  userId: string;
+  clientRequestId: string;
+};
+
+export type GovernanceIdempotencyCheck =
+  | { status: "available" }
+  | { status: "in_progress"; userMessage: GovernanceMessage }
+  | {
+      status: "completed";
+      userMessage: GovernanceMessage;
+      assistantMessage: GovernanceMessage;
+    }
+  | { status: "unavailable"; reason: string };
+
+export async function checkGovernanceClientRequestId(
+  params: GovernanceIdempotencyParams,
+): Promise<GovernanceIdempotencyCheck> {
+  const {
+    supabase,
+    organizationId,
+    conversationId,
+    userId,
+    clientRequestId,
+  } = params;
+
+  const { data, error } = await supabase
+    .from("governance_messages")
+    .select(
+      "id, organization_id, conversation_id, user_id, role, content, metadata, created_at",
+    )
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("user_id", userId)
+    .eq("role", "user")
+    .eq("metadata->>client_request_id", clientRequestId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      status: "unavailable",
+      reason: error.message || "Falha ao consultar a chave idempotente.",
+    };
+  }
+
+  if (data) {
+    const userMessage = data as GovernanceMessage;
+
+    const { data: assistantData, error: assistantError } = await supabase
+      .from("governance_messages")
+      .select(
+        "id, organization_id, conversation_id, user_id, role, content, metadata, created_at",
+      )
+      .eq("organization_id", organizationId)
+      .eq("conversation_id", conversationId)
+      .eq("role", "assistant")
+      .eq("metadata->>client_request_id", clientRequestId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (assistantError) {
+      return {
+        status: "unavailable",
+        reason:
+          assistantError.message ||
+          "Falha ao consultar a resposta associada à chave idempotente.",
+      };
+    }
+
+    if (assistantData) {
+      return {
+        status: "completed",
+        userMessage,
+        assistantMessage: assistantData as GovernanceMessage,
+      };
+    }
+
+    return {
+      status: "in_progress",
+      userMessage,
+    };
+  }
+
+  return { status: "available" };
+}

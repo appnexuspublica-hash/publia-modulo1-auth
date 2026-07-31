@@ -987,8 +987,9 @@ export function ChatMessagesList({
 
                     {footer.trim().length > 0 && (
                       <div
-                        className={"publia-footnote mt-4 " + assistantMetaTextClass}
+                        className={"publia-footnote publia-footnote--essential mt-4 " + assistantMetaTextClass}
                         data-footnote
+                        data-essential-footnote
                         style={
                           variant === "chat" && isStrategic
                             ? { color: chatTheme.colors.textMuted }

@@ -6,6 +6,7 @@ type GovernanceResponseSource = {
   url?: string | null;
   type?: string | null;
   articles?: string[] | null;
+  supportText?: string | null;
 };
 
 type GovernanceResponseSources = {
@@ -19,6 +20,7 @@ type GovernanceResponseReference = {
   title?: string | null;
   url?: string | null;
   kind?: string | null;
+  supportText?: string | null;
 };
 
 export type BuildGovernanceFinalAnswerParams = {
@@ -131,12 +133,16 @@ function normalizeUrl(value: unknown) {
     return "";
   }
 
+  if (/^\/(?:governanca|api\/governance)\//i.test(url)) {
+    return url;
+  }
+
   if (!/^https?:\/\//i.test(url)) {
     return "";
   }
 
   if (isBrokenSupabaseGovernanceStorageUrl(url)) {
-    return convertBrokenSupabaseOfficialGazetteUrl(url);
+    return "";
   }
 
   return url;
@@ -394,6 +400,10 @@ function stripAssistantReferenceSections(answer: string) {
     "fontes oficiais externas consultadas",
     "referências oficiais",
     "referencias oficiais",
+    "referências normativas gerais",
+    "referencias normativas gerais",
+    "fontes consultadas",
+    "documentos institucionais recuperados sem link verificável",
     "base institucional",
   ];
 
@@ -416,6 +426,9 @@ const PLANALTO_DECRETO_12807_2025_URL =
 
 const TCE_PR_DISPENSA_INEXIGIBILIDADE_URL =
   "https://www.tce.pr.gov.br/conteudo/dispensa-e-inexigibilidade.htm";
+
+const PARANA_LEI_4338_1961_URL =
+  "https://www.legislacao.pr.gov.br/legislacao/pesquisarAto.do?action=exibir&codAto=12935&indice=1&totalRegistros=1";
 
 function normalizeLegalTextForMatch(value: unknown) {
   return String(value ?? "")
@@ -496,8 +509,8 @@ function isNegativeNoSpecificLocalNormAnswer(question: string, answer: string) {
   const q = normalizeLegalTextForMatch(question);
   const a = normalizeLegalTextForMatch(answer);
 
-  const asksMissingSpecificNorm = /(decreto|norma|regulamenta|regulamentando|numero do decreto|número do decreto|salario|salário|remuneracao|remuneração|subsidio|subsídio)/.test(q);
-  const saysNotFound = /(nao aparece|não aparece|nao foi localizada|não foi localizada|nao foi localizado|não foi localizado|nao encontrei|não encontrei|nao ha|não há|nao e possivel informar|não é possível informar|sem esses dispositivos|qualquer resposta seria|qualquer valor seria)/.test(a);
+  const asksMissingSpecificNorm = /\b(decreto|norma|regulamenta|regulamentando|numero do decreto|número do decreto|salario|salário|remuneracao|remuneração|subsidio|subsídio)\b/.test(q);
+  const saysNotFound = /\b(nao aparece|não aparece|nao foi localizada|não foi localizada|nao foi localizado|não foi localizado|nao encontrei|não encontrei|nao ha|não há|nao e possivel informar|não é possível informar|sem esses dispositivos|qualquer resposta seria|qualquer valor seria)\b/.test(a);
 
   return asksMissingSpecificNorm && saysNotFound;
 }
@@ -521,7 +534,7 @@ ${answer}`);
 
   const sources: GovernanceResponseSource[] = [];
 
-  if (/lei\s+complementar\s*n?[º°]?\s*0?17\/2013|lc\s*0?17\/2013/.test(text)) {
+  if (/\blei\s+complementar\s*n?[º°]?\s*0?17\/2013\b|\blc\s*0?17\/2013\b/.test(text)) {
     sources.push({
       title: "Lei Complementar nº 017/2013 — Estrutura Administrativa da Prefeitura",
       url: administrativeUrl,
@@ -529,7 +542,7 @@ ${answer}`);
     });
   }
 
-  if (/lei\s+complementar\s*n?[º°]?\s*0?47\/2024|lc\s*0?47\/2024/.test(text)) {
+  if (/\blei\s+complementar\s*n?[º°]?\s*0?47\/2024\b|\blc\s*0?47\/2024\b/.test(text)) {
     sources.push({
       title: "Lei Complementar nº 047/2024 — Estrutura Administrativa da Prefeitura",
       url: administrativeUrl,
@@ -537,7 +550,7 @@ ${answer}`);
     });
   }
 
-  if (/lei\s+complementar\s*n?[º°]?\s*0?04\/2025|lc\s*0?04\/2025|plano diretor/.test(text)) {
+  if (/\blei\s+complementar\s*n?[º°]?\s*0?04\/2025\b|\blc\s*0?04\/2025\b|\bplano diretor\b/.test(text)) {
     sources.push({
       title: "Lei Complementar nº 004/2025 — Plano Diretor Municipal",
       url: planoDiretorUrl,
@@ -545,7 +558,7 @@ ${answer}`);
     });
   }
 
-  if (/lei organica|lei orgânica/.test(text)) {
+  if (/\blei organica\b|\blei orgânica\b/.test(text)) {
     sources.push({
       title: "Lei Orgânica do Município de Santana do Itararé",
       url: organicLawUrl,
@@ -565,6 +578,23 @@ function getSupplementalCanonicalLegalSourcesFromText(
   const text = `${questionText}\n${answerText}`;
 
   const sources: GovernanceResponseSource[] = [];
+
+  const isMunicipalCreationLawQuestion =
+    /\b(lei|norma)\b/.test(questionText) &&
+    /\b(cria|criou|criacao|criação)\b/.test(questionText) &&
+    /\b(municipio|município|santana do itarare|santana do itararé)\b/.test(questionText);
+
+  const mentionsMunicipalCreationLaw =
+    /\blei\s*(?:estadual\s*)?n?[º°]?\s*4\.?338(?:\/1961)?\b/.test(text) ||
+    /\b4\.?338\/1961\b/.test(text);
+
+  if (isMunicipalCreationLawQuestion || mentionsMunicipalCreationLaw) {
+    sources.push({
+      title: "Lei Estadual nº 4.338/1961 — Criação do Município de Santana do Itararé",
+      url: PARANA_LEI_4338_1961_URL,
+      type: "legislação estadual",
+    });
+  }
 
   const isLicitationQuestion =
     /\b(14\.?133|14133|licitacao|licitacoes|dispensa|inexigibilidade|pregao|contratacao direta|lei de licitacoes|nova lei de licitacoes)\b/.test(
@@ -857,8 +887,17 @@ function resolveOfficialLegalSourceUrl(source: GovernanceResponseSource) {
   const normalizedTitle = normalizeLegalTextForKey(source.title);
 
   if (
-    normalizedTitle.includes("tribunal de contas do estado do parana") ||
-    normalizedTitle.includes("tce pr")
+    normalizedTitle.includes("4 338 1961") ||
+    normalizedTitle.includes("criacao do municipio de santana do itarare")
+  ) {
+    return PARANA_LEI_4338_1961_URL;
+  }
+
+  const normalizedTitleLegacy = normalizeLegalTextForKey(source.title);
+
+  if (
+    normalizedTitleLegacy.includes("tribunal de contas do estado do parana") ||
+    normalizedTitleLegacy.includes("tce pr")
   ) {
     return TCE_PR_DISPENSA_INEXIGIBILIDADE_URL;
   }
@@ -1035,6 +1074,27 @@ function formatLegalArticlesForDisplay(articles: string[]) {
     });
 }
 
+
+function isExplicitLegalOrNormativeQuestion(question: string) {
+  const text = normalizeLegalTextForMatch(question);
+
+  return /\b(lei|decreto|portaria|resolucao|instrucao normativa|constituicao|artigo|art\.|base legal|fundamento legal|norma|normativo|principios constitucionais)\b/.test(text);
+}
+
+function extractDocumentIdentity(value: unknown) {
+  const text = normalizeLegalTextForMatch(value);
+  const match = text.match(/\b(lei complementar|lei|decreto|portaria|resolucao|instrucao normativa|edicao)\s*(?:n[º°.]?\s*)?(\d{1,6})(?:\s*[/.-]\s*(\d{4}))?/);
+
+  if (!match) {
+    return "";
+  }
+
+  const type = match[1].replace(/\s+/g, " ");
+  const number = String(Number.parseInt(match[2], 10));
+  const year = match[3] ?? "";
+  return `${type}:${number}:${year}`;
+}
+
 function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
   if (legalBasis.length === 0) {
     return "";
@@ -1047,18 +1107,20 @@ function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
       const url = sourceIsLei14133({ ...source, title })
         ? PLANALTO_LEI_14133_URL
         : resolveOfficialLegalSourceUrl({ ...source, title });
-      const link = formatMarkdownLink(`✓ ${title}`, url);
+      const label = url
+        ? formatMarkdownLink(`✓ ${title}`, url)
+        : `✓ ${title}`;
       const articles = formatLegalArticlesForDisplay(uniqueStrings(source.articles ?? []));
 
-      if (!link) {
+      if (!label) {
         return "";
       }
 
       if (articles.length === 0) {
-        return link;
+        return label;
       }
 
-      return `${link} — Artigos utilizados: ${articles.join("; ")}`;
+      return `${label} — Artigos utilizados: ${articles.join("; ")}`;
     })
     .filter(Boolean);
 
@@ -1067,7 +1129,7 @@ function buildCompactLegalBasisSection(legalBasis: GovernanceResponseSource[]) {
   }
 
   return [
-    "**Base Legal:**  ",
+    "**Referências normativas gerais:**  ",
     blocks.join("  \n"),
   ].join("\n");
 }
@@ -1164,6 +1226,40 @@ function linkLegalReferencesInAnswer(answer: string, legalBasis: GovernanceRespo
   return nextAnswer;
 }
 
+
+function isLegalSourceLike(source: GovernanceResponseSource) {
+  const text = normalizeLegalTextForMatch(`${source.title ?? ""} ${source.type ?? ""}`);
+
+  return /\b(lei|decreto|constituicao|portaria|resolucao|instrucao normativa|medida provisoria|codigo)\b/.test(
+    text,
+  );
+}
+
+function linkInstitutionalSourcesInAnswer(
+  answer: string,
+  sources: GovernanceResponseSource[],
+) {
+  let nextAnswer = answer;
+
+  for (const source of uniqueByTitleAndUrl(sources)) {
+    const title = cleanText(source.title);
+    const url = normalizeUrl(source.url);
+
+    if (!title || !url || isLegalSourceLike(source)) {
+      continue;
+    }
+
+    const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    nextAnswer = linkTextOutsideExistingMarkdown(
+      nextAnswer,
+      new RegExp(escapedTitle, "gi"),
+      url,
+    );
+  }
+
+  return nextAnswer;
+}
+
 export function buildGovernanceFinalAnswer(params: BuildGovernanceFinalAnswerParams) {
   const sources = params.sources ?? {};
   const references = params.references ?? [];
@@ -1175,27 +1271,42 @@ export function buildGovernanceFinalAnswer(params: BuildGovernanceFinalAnswerPar
   const officialSources = uniqueByTitleAndUrl(sources.officialSources ?? []);
   const externalSources = uniqueByTitleAndUrl(sources.externalSources ?? []);
 
+  const institutionalSourcesFromReferences = references
+    .filter((reference) => cleanText(reference.kind).toLowerCase() === "institutional")
+    .map((reference) => ({
+      title: reference.title ?? "",
+      url: reference.url ?? null,
+      type: "documento institucional",
+      supportText: reference.supportText ?? null,
+    }));
+
+  const mergedInstitutionalSources = uniqueByTitleAndUrl([
+    ...institutionalSources,
+    ...institutionalSourcesFromReferences,
+  ]);
+
   const legalSourcesFromReferences = references
     .filter((reference) => cleanText(reference.kind).toLowerCase() === "legal")
     .map((reference) => ({
       title: reference.title ?? "",
       url: reference.url ?? null,
       type: "fundamento legal",
+      supportText: reference.supportText ?? null,
     }))
     .filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer))
     .filter((source) => isLegalReferenceRelevantToText(source, question, rawAnswer));
 
   const canonicalLegalSources = [
-    ...getCanonicalLegalSourcesFromText(question, rawAnswer).map((item) => ({
+    ...getCanonicalLegalSourcesFromText(question, "").map((item) => ({
       title: item.title,
       url: item.url,
       type: item.type,
     })),
-    ...getSupplementalCanonicalLegalSourcesFromText(question, rawAnswer),
+    ...getSupplementalCanonicalLegalSourcesFromText(question, ""),
   ].filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer));
 
   const allKnowledgeSources = [
-    ...institutionalSources,
+    ...mergedInstitutionalSources,
     ...officialGazetteSources,
     ...officialSources,
     ...externalSources,
@@ -1217,20 +1328,59 @@ export function buildGovernanceFinalAnswer(params: BuildGovernanceFinalAnswerPar
     .filter((source) => looksLikeLegalBasis(source, rawAnswer))
     .filter((source) => !shouldIgnoreLegalReference(source, question, rawAnswer));
 
-  const legalBasis = uniqueLegalSources(enrichLegalSourcesWithArticles({
-    legalSources: uniqueLegalSources([
-      ...canonicalLegalSources,
-      ...legalSourcesFromReferences,
-      ...municipalLegalSourcesFromAnswer,
-      ...municipalLegalSourcesFromKnowledge,
-      ...legalSourcesFromKnowledge,
-    ]),
-    question,
-    answer: rawAnswer,
-  }));
+  const shouldBuildLegalBasis = isExplicitLegalOrNormativeQuestion(question);
+  const legalBasis = shouldBuildLegalBasis
+    ? uniqueLegalSources(enrichLegalSourcesWithArticles({
+        legalSources: uniqueLegalSources([
+          ...canonicalLegalSources,
+          ...legalSourcesFromReferences,
+          ...municipalLegalSourcesFromAnswer,
+          ...municipalLegalSourcesFromKnowledge,
+          ...legalSourcesFromKnowledge,
+        ]),
+        question,
+        answer: rawAnswer,
+      }))
+    : [];
 
-  const answer = linkLegalReferencesInAnswer(rawAnswer, legalBasis);
-  const legalSection = buildCompactLegalBasisSection(legalBasis);
+  const evidenceDocumentIdentities = new Set(
+    [
+      ...references.filter((reference) => cleanText(reference.kind).toLowerCase() !== "legal"),
+      ...mergedInstitutionalSources,
+      ...officialGazetteSources,
+    ]
+      .map((source) => extractDocumentIdentity(source.title))
+      .filter(Boolean),
+  );
 
-  return [answer, legalSection].filter(Boolean).join("\n\n").trim();
+  /*
+    v13.18 — uma norma municipal usada como evidência documental aparece uma
+    única vez em "Fontes consultadas". Ela não é repetida como referência
+    normativa geral quando representa o mesmo ato/documento.
+  */
+  const legalBasisForSection = legalBasis.filter((source) => {
+    const identity = extractDocumentIdentity(source.title);
+    return !identity || !evidenceDocumentIdentities.has(identity);
+  });
+
+  const answerWithLegalLinks = linkLegalReferencesInAnswer(rawAnswer, legalBasis);
+  const answer = linkInstitutionalSourcesInAnswer(
+    answerWithLegalLinks,
+    mergedInstitutionalSources,
+  );
+  const legalSection = buildCompactLegalBasisSection(legalBasisForSection);
+  /*
+    v13.14 — o cliente é a única origem visual de "Fontes consultadas",
+    usando as referências persistidas na metadata da mensagem. Manter uma
+    segunda seção no Markdown duplicava o rodapé. O backend conserva apenas
+    a seção normativa, que também pode exibir uma norma municipal sem URL
+    verificada como texto simples, sem ocultá-la.
+  */
+  return [
+    answer,
+    legalSection,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
 }

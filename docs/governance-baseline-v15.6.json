@@ -1,0 +1,31 @@
+{
+  "version": "15.6",
+  "name": "Governança — baseline de regressão",
+  "createdAt": "2026-07-28",
+  "runtimePipeline": "governance-core",
+  "scope": [
+    "classificação e planejamento de consultas",
+    "roteamento entre conhecimento geral, documentos institucionais, Diário Oficial e diretórios oficiais",
+    "pacotes jurídicos consolidados para princípios constitucionais, IRRF municipal e contratação direta",
+    "canonicalização e deduplicação de Base legal e fontes oficiais",
+    "separação entre Base legal, Fontes consultadas e Canais oficiais para consulta",
+    "persistência do snapshot governance_result",
+    "tipografia estável do rodapé do Publia Essencial"
+  ],
+  "protectedBehaviors": [
+    "Plano de Cargos, Magistério, Lei Orgânica e Código Tributário entram na rota institucional",
+    "Decreto ou ato identificado entra na rota do Diário Oficial",
+    "perguntas financeiras por fornecedor não inventam valores e podem recomendar portais",
+    "perguntas de diretório usam Canais oficiais para consulta",
+    "Lei nº 14.133/2021 e Decreto nº 12.807/2025 não duplicam em perguntas sobre dispensa e fracionamento",
+    "fontes do TCU e Gov.br não aparecem apenas como domínio",
+    "o cliente não reconstrói a evidência fechada pelo backend",
+    "rodapé do Essencial permanece legível em respostas longas"
+  ],
+  "limitations": [
+    "A suíte determinística não chama OpenAI, Supabase nem portais externos; ela valida contratos, roteamento, canonicalização e arquitetura local.",
+    "A qualidade factual de respostas dependentes de dados atuais ou do conteúdo real do banco continua exigindo teste funcional no ambiente instalado.",
+    "Streaming, idempotência, RLS, rate limit e recarga de conversa são preservados e devem continuar sendo validados no fluxo integrado."
+  ],
+  "releaseRule": "Nenhuma mudança futura no Governança deve ser aprovada se validate:governance-baseline falhar."
+}

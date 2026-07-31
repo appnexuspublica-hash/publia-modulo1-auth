@@ -3,6 +3,12 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
 import { getCurrentGovernanceOrganization } from "@/lib/governance/get-current-organization";
+import { MAX_GOVERNANCE_USER_MESSAGE_LENGTH } from "@/lib/governance/chat/request";
+import { saveGovernanceUserMessage } from "@/lib/governance/chat/persistence";
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
 function createWritableSupabaseRouteClient() {
   const cookieStore = cookies();
@@ -60,9 +66,9 @@ export async function POST(request: Request) {
     const content =
       typeof body?.content === "string" ? body.content.trim() : "";
 
-    if (!conversationId) {
+    if (!conversationId || !isUuid(conversationId)) {
       return NextResponse.json(
-        { error: "Conversa institucional não informada." },
+        { error: "Conversa institucional inválida." },
         { status: 400 },
       );
     }
@@ -73,6 +79,29 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+
+    if (content.length > MAX_GOVERNANCE_USER_MESSAGE_LENGTH) {
+      return NextResponse.json(
+        {
+          error: `Mensagem excede o limite de ${MAX_GOVERNANCE_USER_MESSAGE_LENGTH} caracteres.`,
+        },
+        { status: 413 },
+      );
+    }
+
+    const clientRequestIdRaw =
+      typeof body?.clientRequestId === "string"
+        ? body.clientRequestId.trim()
+        : request.headers.get("x-client-request-id")?.trim() ?? "";
+
+    if (clientRequestIdRaw && !isUuid(clientRequestIdRaw)) {
+      return NextResponse.json(
+        { error: "clientRequestId inválido." },
+        { status: 400 },
+      );
+    }
+
+    const clientRequestId = clientRequestIdRaw || crypto.randomUUID();
 
     const { data: conversation, error: conversationError } = await supabase
       .from("governance_conversations")
@@ -103,37 +132,43 @@ export async function POST(request: Request) {
       );
     }
 
-    const { data: message, error: messageError } = await supabase
-      .from("governance_messages")
-      .insert({
-        organization_id: context.organization.id,
-        conversation_id: conversation.id,
-        user_id: user.id,
-        role: "user",
-        content,
-        metadata: {
-          source: "governance_conversations_ui",
-        },
-      })
-      .select(
-        `
-          id,
-          organization_id,
-          conversation_id,
-          user_id,
-          role,
-          content,
-          metadata,
-          created_at
-        `,
-      )
-      .single();
+    const {
+      message,
+      error: messageError,
+      duplicate,
+    } = await saveGovernanceUserMessage({
+      supabase,
+      organizationId: context.organization.id,
+      conversationId: conversation.id,
+      userId: user.id,
+      content,
+      responseMode: "objective",
+      selectedPdfAttachmentNames: [],
+      selectedPdfFileIds: [],
+      clientRequestId,
+      source: "governance_conversations_ui",
+    });
 
-    if (messageError) {
+    if (duplicate) {
+      return NextResponse.json(
+        {
+          error: "Esta mensagem já foi recebida.",
+          code: "GOVERNANCE_MESSAGE_DUPLICATE_REQUEST",
+          clientRequestId,
+          message,
+        },
+        { status: 409 },
+      );
+    }
+
+    if (messageError || !message) {
       console.error("[governance] Erro ao salvar mensagem:", messageError);
 
       return NextResponse.json(
-        { error: "Não foi possível salvar a mensagem institucional." },
+        {
+          error: "Não foi possível salvar a mensagem institucional.",
+          clientRequestId,
+        },
         { status: 500 },
       );
     }
@@ -154,9 +189,14 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       message,
+      clientRequestId,
     });
+    response.headers.set("x-client-request-id", clientRequestId);
+    response.headers.set("cache-control", "no-store");
+
+    return response;
   } catch (error) {
     console.error("[governance] Erro inesperado ao enviar mensagem:", error);
 

@@ -54,6 +54,15 @@ function normalizeOrganization(
 export async function getCurrentGovernanceOrganization(
   userId: string,
 ): Promise<GovernanceContext | null> {
+  const cookieStore = cookies();
+  const selectedOrganizationId = cookieStore.get(
+    "governance_organization_id",
+  )?.value;
+
+  if (!selectedOrganizationId) {
+    return null;
+  }
+
   const supabase = createReadonlySupabaseServerClient();
 
   const { data, error } = await supabase
@@ -97,9 +106,8 @@ export async function getCurrentGovernanceOrganization(
       `,
     )
     .eq("user_id", userId)
+    .eq("organization_id", selectedOrganizationId)
     .eq("status", "active")
-    .order("created_at", { ascending: true })
-    .limit(1)
     .maybeSingle<SupabaseOrganizationMemberRow>();
 
   if (error) {

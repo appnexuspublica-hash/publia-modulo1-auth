@@ -1,0 +1,37 @@
+{
+  "version": "13.4",
+  "purpose": "Remove paused comparative evaluation automation without changing production runtime.",
+  "modified_files": [
+    ".gitignore",
+    "package.json",
+    "package-lock.json"
+  ],
+  "removed_paths": [
+    "scripts/governance-comparison.config.example.json",
+    "scripts/governance-comparison.config.json",
+    "scripts/run-governance-comparison-interactive.ts",
+    "scripts/run-governance-comparison.ts",
+    "scripts/run-governance-comparison.v13.2-pre-interactive-auth.bak",
+    "scripts/lib/chromium-evaluation-session.ts",
+    "scripts/lib/chromium-evaluation-session.v13.2.1-pre-cdp-cookie-capture.bak",
+    "scripts/lib/chromium-evaluation-session.v13.2.2-pre-cleanup-retry.bak",
+    "package-lock.v13.2-pre-interactive-auth.bak",
+    ".gitignore.v13.1-pre-comparison-command.bak",
+    "package.v13.2-pre-interactive-auth.bak",
+    "package.v13.1-pre-comparison-command.bak",
+    "src/lib/governance/evaluation/compare.ts",
+    "src/lib/governance/evaluation/corpus.ts",
+    "src/lib/governance/evaluation/evaluator.ts",
+    "src/lib/governance/evaluation/http-adapters.ts",
+    "src/lib/governance/evaluation/index.ts",
+    "src/lib/governance/evaluation/index.v13.0-pre-runner.bak",
+    "src/lib/governance/evaluation/report.ts",
+    "src/lib/governance/evaluation/runner-validation.ts",
+    "src/lib/governance/evaluation/runner.ts",
+    "src/lib/governance/evaluation/sse.ts",
+    "src/lib/governance/evaluation/types.ts",
+    "src/lib/governance/evaluation/validation.ts",
+    "tsconfig.tsbuildinfo"
+  ],
+  "consolidated_backup": "backups/automation-comparativa.v13.4-pre-cleanup.zip.bak"
+}

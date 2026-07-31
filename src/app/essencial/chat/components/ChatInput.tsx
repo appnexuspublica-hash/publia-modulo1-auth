@@ -31,6 +31,10 @@ type ChatInputProps = {
   showResponseModes?: boolean;
   availableResponseModes?: ResponseMode[];
   isStrategic?: boolean;
+  onAttachPdf?: () => void;
+  attachPdfDisabled?: boolean;
+  isUploadingPdf?: boolean;
+  pdfLimitLabel?: string | null;
 
   inputValue?: string;
   onInputValueChange?: (value: string) => void;
@@ -71,6 +75,10 @@ export function ChatInput({
   showResponseModes = false,
   availableResponseModes = [],
   isStrategic = false,
+  onAttachPdf,
+  attachPdfDisabled = false,
+  isUploadingPdf = false,
+  pdfLimitLabel = null,
   inputValue,
   onInputValueChange,
   externalTextareaRef,
@@ -216,6 +224,43 @@ export function ChatInput({
                 : undefined,
           }}
         >
+          {onAttachPdf && (
+            <button
+              type="button"
+              onClick={onAttachPdf}
+              disabled={attachPdfDisabled}
+              className={`mr-3 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                isStrategic
+                  ? "publia-strategic-attach-btn"
+                  : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+              }`}
+              style={
+                isStrategic
+                  ? {
+                      borderColor: theme.colors.borderStrong,
+                      backgroundColor: theme.colors.bgSecondary,
+                      color: theme.colors.text,
+                    }
+                  : undefined
+              }
+              aria-label={isUploadingPdf ? "Anexando PDF" : "Anexar PDF"}
+              title={isUploadingPdf ? "Anexando PDF..." : "Anexar PDF"}
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m20.5 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9" />
+              </svg>
+            </button>
+          )}
+
           {showResponseModes && (
             <div ref={menuRef} className="relative mr-3 shrink-0">
               <button
@@ -342,7 +387,7 @@ export function ChatInput({
                 isBlockedState
                   ? "cursor-not-allowed bg-slate-300 text-slate-500"
                   : !isStrategic
-                    ? "border border-slate-400 bg-[#dddddd] text-slate-800 hover:bg-[#d4d4d4] disabled:opacity-60"
+                    ? "border border-[#8e8e8e] bg-[#8e8e8e] text-white hover:bg-[#7f7f7f] disabled:opacity-60"
                     : "publia-strategic-send-btn disabled:opacity-60"
               }`}
               style={
@@ -362,6 +407,19 @@ export function ChatInput({
           )}
         </div>
       </form>
+
+      {pdfLimitLabel && (
+        <div className="mx-auto mt-1 w-full max-w-3xl px-2">
+          <span
+            className="text-[11px]"
+            style={{
+              color: isStrategic ? theme.colors.textMuted : "#475569",
+            }}
+          >
+            {pdfLimitLabel}
+          </span>
+        </div>
+      )}
 
       {showResponseModes && (
         <div className="mx-auto w-full max-w-3xl px-3">
@@ -434,6 +492,10 @@ export function ChatInput({
                 ? "rgba(255, 255, 255, 0.8)"
                 : "#475569"
           };
+        }
+
+        .publia-strategic-attach-btn:hover {
+          background-color: ${theme.colors.buttonGhostHover} !important;
         }
 
         .publia-strategic-plus-btn:hover {

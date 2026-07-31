@@ -95,8 +95,8 @@ body {
    =========================== */
 
 .publia-footnote {
-  font-size: 8px !important;
-  line-height: 1.25 !important;
+  font-size: 13px !important;
+  line-height: 1.55 !important;
   opacity: 0.92;
 }
 
@@ -106,7 +106,7 @@ body {
   line-height: 1.5 !important;
 }
 
-/* força TODAS as tags internas a herdarem 9px */
+/* força todas as tags internas a herdarem o tamanho legível do rodapé */
 .publia-footnote * {
   font-size: inherit !important;
   line-height: inherit !important;
@@ -151,4 +151,50 @@ body {
 .publia-footnote__heading {
   font-weight: 600;
   margin: 0.15rem 0 !important;
+}
+
+
+/* Publ.IA Essencial: impede redução visual do rodapé em respostas longas. */
+.publia-footnote--essential {
+  display: block !important;
+  font-size: 14px !important;
+  line-height: 1.65 !important;
+  -webkit-text-size-adjust: 100% !important;
+  text-size-adjust: 100% !important;
+  transform: none !important;
+  zoom: 1 !important;
+  opacity: 1 !important;
+}
+
+.publia-footnote--essential,
+.publia-footnote--essential * {
+  font-size: 14px !important;
+  line-height: 1.65 !important;
+  -webkit-text-size-adjust: 100% !important;
+  text-size-adjust: 100% !important;
+}
+
+.publia-footnote--essential .publia-footnote__heading {
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  font-weight: 700 !important;
+  margin-top: 0.55rem !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.publia-footnote--essential a {
+  font-size: 14px !important;
+  line-height: 1.65 !important;
+  overflow-wrap: anywhere;
+}
+
+.publia-footnote--essential ul,
+.publia-footnote--essential ol {
+  margin-top: 0.35rem !important;
+  margin-bottom: 0.45rem !important;
+}
+
+.publia-footnote--essential li {
+  margin-top: 0.15rem !important;
+  margin-bottom: 0.15rem !important;
 }

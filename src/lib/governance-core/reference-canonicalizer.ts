@@ -1,0 +1,451 @@
+import { normalizeRecoveryText } from "@/lib/governance/recovery/normalize";
+import type { GovernanceChatReference, GovernanceChatSource } from "@/lib/governance/chat/references";
+
+const TRACKING_PARAMS = new Set([
+  "hsa_acc", "hsa_ad", "hsa_cam", "hsa_grp", "hsa_kw", "hsa_mt", "hsa_net",
+  "hsa_src", "hsa_tgt", "hsa_ver", "utm_source", "utm_medium", "utm_campaign",
+  "utm_term", "utm_content", "origin", "listar", "page",
+]);
+
+function cleanUrl(value: string | null | undefined) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (TRACKING_PARAMS.has(key.toLowerCase())) parsed.searchParams.delete(key);
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function domainOnlyTitle(title: string) {
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(title.trim());
+}
+
+
+type CanonicalOfficialSource = {
+  key: string;
+  title: string;
+  url: string | null;
+};
+
+function officialSourceTopic(question: string) {
+  const q = normalizeRecoveryText(question);
+  if (/licitac|dispensa|fracionamento|dividir|contratacao direta|compras publicas/.test(q)) {
+    return "procurement";
+  }
+  if (/integridade|corrupcao|fraude|conflito de interesses|compliance/.test(q)) {
+    return "integrity";
+  }
+  if (/protecao de dados|dados pessoais|privacidade|lgpd/.test(q)) {
+    return "data_protection";
+  }
+  return "general";
+}
+
+function canonicalOfficialSourceIdentity(
+  question: string,
+  reference: GovernanceChatReference,
+): CanonicalOfficialSource | null {
+  const rawTitle = String(reference.title ?? "").trim();
+  const url = cleanUrl(reference.url);
+  const text = normalizeRecoveryText(
+    [rawTitle, reference.supportText ?? "", url ?? ""].join(" "),
+  );
+  const topic = officialSourceTopic(question);
+
+  let hostname = "";
+  try {
+    hostname = url ? new URL(url).hostname.toLowerCase().replace(/^www\./, "") : "";
+  } catch {
+    hostname = "";
+  }
+
+  if (
+    /pesquisa\.apps\.tcu\.gov\.br|licitacoesecontratos\.tcu\.gov\.br|portal\.tcu\.gov\.br|revista\.tcu\.gov\.br/.test(
+      hostname,
+    ) ||
+    /\btribunal de contas da uniao\b|\btcu\b/.test(text)
+  ) {
+    const title =
+      topic === "procurement"
+        ? "Jurisprudência e orientações do TCU em licitações e contratos — Portal TCU"
+        : topic === "integrity"
+          ? "Guias e orientações do TCU sobre integridade pública — Portal TCU"
+          : "Jurisprudência e orientações técnicas — Portal TCU";
+
+    return {
+      key: `official:tcu:${topic}`,
+      title,
+      url: url ?? "https://portal.tcu.gov.br/",
+    };
+  }
+
+  if (/compras\.gov\.br/.test(hostname) || /\bcompras\.gov\.br\b/.test(text)) {
+    return {
+      key: `official:compras-gov:${topic}`,
+      title:
+        topic === "procurement"
+          ? "Orientações gerais sobre dispensa por valor e fracionamento — Portal Compras.gov.br"
+          : "Orientações oficiais sobre compras públicas — Portal Compras.gov.br",
+      url: url ?? "https://www.gov.br/compras/pt-br",
+    };
+  }
+
+  if (/pncp\.gov\.br/.test(hostname) || /portal nacional de contratacoes publicas|\bpncp\b/.test(text)) {
+    return {
+      key: "official:pncp",
+      title: "Portal Nacional de Contratações Públicas — PNCP",
+      url: url ?? "https://pncp.gov.br/",
+    };
+  }
+
+  if (/in\.gov\.br/.test(hostname) || /diario oficial da uniao/.test(text)) {
+    if (/12\.?807|d12807/.test(text)) {
+      return {
+        key: "official:dou:decreto-12807-2025",
+        title: "Decreto nº 12.807/2025 — Diário Oficial da União",
+        url,
+      };
+    }
+    return {
+      key: "official:dou",
+      title: "Diário Oficial da União — Imprensa Nacional",
+      url: url ?? "https://www.in.gov.br/",
+    };
+  }
+
+  if (/planalto\.gov\.br/.test(hostname)) {
+    return {
+      key: "official:planalto-legislacao",
+      title: "Portal da Legislação — Planalto",
+      url: url ?? "https://www.planalto.gov.br/legislacao/",
+    };
+  }
+
+  if (/gov\.br/.test(hostname) || domainOnlyTitle(rawTitle)) {
+    if (/controladoria geral da uniao|\bcgu\b|gov\.br\/cgu/.test(text)) {
+      return {
+        key: `official:cgu:${topic}`,
+        title:
+          topic === "integrity"
+            ? "Guias e orientações sobre integridade pública — CGU/Gov.br"
+            : "Orientações técnicas da Controladoria-Geral da União — CGU/Gov.br",
+        url,
+      };
+    }
+
+    if (/autoridade nacional de protecao de dados|\banpd\b|gov\.br\/anpd/.test(text)) {
+      return {
+        key: "official:anpd:data-protection",
+        title: "Orientações sobre proteção de dados pessoais — ANPD/Gov.br",
+        url,
+      };
+    }
+
+    return {
+      key: `official:gov-br:${topic}`,
+      title:
+        topic === "integrity"
+          ? "Orientações oficiais sobre integridade pública — Gov.br"
+          : topic === "data_protection"
+            ? "Orientações oficiais sobre proteção de dados — Gov.br"
+            : "Orientação oficial do Governo Federal — Gov.br",
+      url,
+    };
+  }
+
+  if (!rawTitle || domainOnlyTitle(rawTitle)) return null;
+
+  return {
+    key: `official:${normalizeRecoveryText(rawTitle)}`,
+    title: rawTitle,
+    url,
+  };
+}
+
+
+function looksLikeNormativeOfficialSource(title: string, url: string | null) {
+  const text = normalizeRecoveryText(`${title} ${url ?? ""}`);
+  return /\b(constituicao|emenda constitucional|lei complementar|lei federal|lei estadual|lei municipal|lei n|decreto|decreto lei|medida provisoria|portaria|instrucao normativa|resolucao|codigo tributario nacional|ctn|tema \d+|repercussao geral|sumula|acordao|jurisprudencia)\b/.test(text) ||
+    /\/(lei|decreto|decreto-lei|lcp|constituicao|jurisprudencia|acordao|tema)[\/_-]/.test(text);
+}
+
+function canonicalNumberedNorm(reference: GovernanceChatReference) {
+  const text = normalizeRecoveryText([reference.title, reference.supportText ?? "", reference.url ?? ""].join(" "));
+  const title = String(reference.title ?? "").trim();
+  const url = cleanUrl(reference.url);
+
+  const patterns: Array<{ re: RegExp; prefix: string; label: string }> = [
+    { re: /lei complementar\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "lc", label: "Lei Complementar" },
+    { re: /decreto lei\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "decreto-lei", label: "Decreto-Lei" },
+    { re: /decreto\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "decreto", label: "Decreto" },
+    { re: /lei\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "lei", label: "Lei" },
+    { re: /instrucao normativa\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "in", label: "Instrução Normativa" },
+    { re: /resolucao\s*(?:n|no|numero)?\s*(\d{1,6})[\/. -]+(\d{4})/, prefix: "resolucao", label: "Resolução" },
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern.re);
+    if (!match) continue;
+    const number = String(Number(match[1]));
+    const year = match[2];
+    return {
+      key: `${pattern.prefix}:${number}:${year}`,
+      title: title && !domainOnlyTitle(title) ? title : `${pattern.label} nº ${number}/${year}`,
+      url,
+    };
+  }
+
+  if (/codigo tributario nacional|\bctn\b|l5172/.test(text)) {
+    return {
+      key: "lei:5172:1966",
+      title: "Lei nº 5.172/1966 — Código Tributário Nacional",
+      url: url ?? "https://www.planalto.gov.br/ccivil_03/leis/l5172compilado.htm",
+    };
+  }
+
+  if (/lei de execucao fiscal|l6830/.test(text)) {
+    return {
+      key: "lei:6830:1980",
+      title: "Lei nº 6.830/1980 — Lei de Execução Fiscal",
+      url: url ?? "https://www.planalto.gov.br/ccivil_03/leis/l6830.htm",
+    };
+  }
+
+  if (/lei de improbidade|l8429/.test(text)) {
+    return {
+      key: "lei:8429:1992",
+      title: "Lei nº 8.429/1992 — Lei de Improbidade Administrativa",
+      url: url ?? "https://www.planalto.gov.br/ccivil_03/leis/l8429.htm",
+    };
+  }
+
+  return null;
+}
+
+function canonicalLegalIdentity(reference: GovernanceChatReference) {
+  const text = normalizeRecoveryText([
+    reference.title,
+    reference.supportText ?? "",
+    reference.url ?? "",
+  ].join(" "));
+
+  if (/tema\s*1\.?130|tema\s*1130|numero tema=1130/.test(text)) {
+    return {
+      key: "stf:tema-1130",
+      title: "STF — Tema 1.130 da Repercussão Geral",
+      url: "https://portal.stf.jus.br/jurisprudenciaRepercussao/verAndamentoProcesso.asp?incidente=5923394&numeroProcesso=1293453&classeProcesso=RE&numeroTema=1130",
+    };
+  }
+
+  if (/art\.?\s*158|artigo\s*158/.test(text) && /constituicao/.test(text)) {
+    return {
+      key: "cf:1988:art-158-i",
+      title: "Constituição Federal de 1988 — art. 158, I",
+      url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+    };
+  }
+
+  if (/art\.?\s*37|artigo\s*37|principios constitucionais|legalidade impessoalidade moralidade publicidade eficiencia/.test(text) && /constituicao|planalto/.test(text)) {
+    return {
+      key: "cf:1988:art-37",
+      title: "Constituição Federal de 1988 — art. 37, caput",
+      url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+    };
+  }
+
+  if (/decreto\s*(?:n|no|numero)?\s*12\.?807|d12807/.test(text)) {
+    return {
+      key: "decreto:12807:2025",
+      title: "Decreto nº 12.807/2025 — atualização dos valores da Lei nº 14.133/2021",
+      url: cleanUrl(reference.url) ?? null,
+    };
+  }
+
+  if (/lei\s*(?:n|no|numero)?\s*14\.?133|l14133/.test(text)) {
+    return {
+      key: "lei:14133:2021",
+      title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+    };
+  }
+
+  if (/lei\s*(?:n|no|numero)?\s*12\.?527|l12527|lei de acesso a informacao/.test(text)) {
+    return {
+      key: "lei:12527:2011",
+      title: "Lei nº 12.527/2011 — Lei de Acesso à Informação",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm",
+    };
+  }
+
+  if (/lei complementar\s*(?:n|no|numero)?\s*101|lcp101|responsabilidade fiscal/.test(text)) {
+    return {
+      key: "lc:101:2000",
+      title: "Lei Complementar nº 101/2000 — Lei de Responsabilidade Fiscal",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
+    };
+  }
+
+  if (/lei\s*(?:n|no|numero)?\s*13\.?709|l13709|lgpd/.test(text)) {
+    return {
+      key: "lei:13709:2018",
+      title: "Lei nº 13.709/2018 — Lei Geral de Proteção de Dados Pessoais",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
+    };
+  }
+
+  if (/lei\s*(?:n|no|numero)?\s*9\.?784|l9784/.test(text)) {
+    return {
+      key: "lei:9784:1999",
+      title: "Lei nº 9.784/1999 — Processo Administrativo Federal",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/l9784.htm",
+    };
+  }
+
+  const numbered = canonicalNumberedNorm(reference);
+  if (numbered) return numbered;
+
+  const title = String(reference.title ?? "").trim();
+  const url = cleanUrl(reference.url);
+  if (!title || domainOnlyTitle(title)) return null;
+  return {
+    key: `legal:${normalizeRecoveryText(title)}`,
+    title,
+    url,
+  };
+}
+
+function legalAllowedByQuestion(question: string, key: string) {
+  const q = normalizeRecoveryText(question);
+  if (/principios constitucionais|art\.?\s*37|legalidade|impessoalidade|moralidade|publicidade|eficiencia/.test(q)) {
+    return key === "cf:1988:art-37";
+  }
+  if (/irrf|imposto de renda retido|pode ficar com o ir/.test(q)) {
+    return key === "cf:1988:art-158-i" || key === "stf:tema-1130";
+  }
+  if (/licitac|sem licitar|dispensas?|fracionamento|dividir (?:uma )?compra|limite de dispensa|quanto pode ser contratado|quanto a prefeitura pode comprar/.test(q)) {
+    return key === "lei:14133:2021" || key === "decreto:12807:2025";
+  }
+  if (/lei de acesso|\blai\b/.test(q)) return key === "lei:12527:2011";
+  if (/responsabilidade fiscal|\blrf\b/.test(q)) return key === "lc:101:2000";
+  if (/\blgpd\b|dados pessoais/.test(q)) return key === "lei:13709:2018";
+  return true;
+}
+
+
+function requiredLegalReferencesForQuestion(question: string): GovernanceChatReference[] {
+  const q = normalizeRecoveryText(question);
+
+  if (/licitac|sem licitar|dispensas?|fracionamento|dividir (?:uma )?compra|varias dispensas|limite de dispensa|quanto pode ser contratado|quanto a prefeitura pode comprar/.test(q)) {
+    return [
+      {
+        title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+        url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+        kind: "legal",
+        origin: "knowledge",
+        supportText: "Fundamento da contratação direta, da dispensa por valor, do planejamento e da vedação ao fracionamento indevido.",
+      },
+      {
+        title: "Decreto nº 12.807/2025 — atualização dos valores da Lei nº 14.133/2021",
+        url: "https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/decreto/d12807.htm",
+        kind: "legal",
+        origin: "knowledge",
+        supportText: "Atualiza, com vigência em 2026, os valores monetários aplicáveis aos limites de dispensa por valor.",
+      },
+    ];
+  }
+
+  return [];
+}
+
+export function canonicalizeGovernanceV2References(params: {
+  question: string;
+  baseReferences: GovernanceChatReference[];
+  officialWebSources: GovernanceChatSource[];
+  includeOfficialWebSources: boolean;
+}) {
+  const raw: GovernanceChatReference[] = [
+    ...params.baseReferences,
+    ...requiredLegalReferencesForQuestion(params.question),
+  ];
+  if (params.includeOfficialWebSources) {
+    for (const source of params.officialWebSources) {
+      const title = String(source.title ?? "").trim();
+      const url = cleanUrl(source.url);
+      raw.push({
+        title,
+        url,
+        kind: looksLikeNormativeOfficialSource(title, url) ? "legal" : "official",
+        origin: "web",
+        supportText: source.supportText ?? null,
+      });
+    }
+  }
+
+  const normalizedRaw = raw.map((reference) => {
+    if (
+      reference.kind !== "legal" &&
+      reference.origin === "web" &&
+      looksLikeNormativeOfficialSource(
+        String(reference.title ?? ""),
+        cleanUrl(reference.url),
+      )
+    ) {
+      return { ...reference, kind: "legal" as const };
+    }
+    return reference;
+  });
+
+  const nonLegal = normalizedRaw.filter((reference) => reference.kind !== "legal");
+  const legalMap = new Map<string, GovernanceChatReference>();
+
+  for (const reference of normalizedRaw.filter((item) => item.kind === "legal")) {
+    const canonical = canonicalLegalIdentity(reference);
+    if (!canonical || !legalAllowedByQuestion(params.question, canonical.key)) continue;
+    const existing = legalMap.get(canonical.key);
+    const candidate: GovernanceChatReference = {
+      title: canonical.title,
+      url: canonical.url,
+      kind: "legal",
+      origin: reference.origin,
+      supportText: reference.supportText ?? null,
+    };
+    if (!existing || (!existing.url && candidate.url)) legalMap.set(canonical.key, candidate);
+  }
+
+  const legalLimit = /compar|confronte/.test(normalizeRecoveryText(params.question)) ? 4 : 3;
+  const legal = Array.from(legalMap.values()).slice(0, legalLimit);
+
+  const otherMap = new Map<string, GovernanceChatReference>();
+  for (const reference of nonLegal) {
+    const isWebOfficial = reference.origin === "web" && reference.kind === "official";
+    const canonicalOfficial = isWebOfficial
+      ? canonicalOfficialSourceIdentity(params.question, reference)
+      : null;
+
+    const title = canonicalOfficial?.title ?? String(reference.title ?? "").trim();
+    if (!title || domainOnlyTitle(title)) continue;
+
+    const url = canonicalOfficial?.url ?? cleanUrl(reference.url);
+    const key = canonicalOfficial?.key ??
+      `${reference.kind}:${normalizeRecoveryText(title).replace(/\s+parte\s+\d+$/g, "")}:${url ?? ""}`;
+
+    const candidate: GovernanceChatReference = {
+      ...reference,
+      title,
+      url,
+    };
+    const existing = otherMap.get(key);
+
+    if (!existing || (!existing.url && candidate.url)) {
+      otherMap.set(key, candidate);
+    }
+  }
+
+  return [...legal, ...otherMap.values()];
+}

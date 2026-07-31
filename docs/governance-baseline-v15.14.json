@@ -1,0 +1,18 @@
+{
+  "version": "15.14",
+  "pipeline": "governance-v15.14-validated-result-snapshot",
+  "scope": [
+    "plano único por requisição",
+    "finalização unificada entre streaming e não streaming",
+    "snapshot canônico para mensagens persistidas e transitórias",
+    "envelope de resposta sem cópias paralelas de fontes e referências",
+    "validação estrutural do snapshot antes da reidratação",
+    "fallback legado preservado para snapshots parciais ou corrompidos",
+    "separação entre Base legal, evidências e canais de consulta"
+  ],
+  "knownLimitations": [
+    "o typecheck completo depende das dependências instaladas no projeto local",
+    "respostas transitórias não são recuperáveis após recarga porque não foram persistidas",
+    "a suíte estrutural não substitui testes funcionais com Supabase e OpenAI ativos"
+  ]
+}

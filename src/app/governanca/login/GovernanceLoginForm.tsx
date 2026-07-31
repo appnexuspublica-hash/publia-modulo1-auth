@@ -14,6 +14,7 @@ type LoginResponse = {
   ok?: boolean;
   error?: string;
   email?: string;
+  organizationId?: string;
   redirectTo?: string;
 };
 
@@ -83,6 +84,41 @@ export default function GovernanceLoginForm() {
       if (sessionError || !session) {
         console.error("[GovernanceLoginForm] getSession error:", sessionError);
         setError("Login validado, mas a sessão não foi salva no navegador.");
+        return;
+      }
+
+      if (!data.organizationId) {
+        setError("Login validado, mas o órgão não foi identificado.");
+        await supabase.auth.signOut({ scope: "local" });
+        return;
+      }
+
+      const selectOrganizationResponse = await fetch(
+        "/api/governance/auth/select-organization",
+        {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            organizationId: data.organizationId,
+          }),
+        },
+      );
+
+      const selectOrganizationData = (await selectOrganizationResponse.json()) as {
+        ok?: boolean;
+        error?: string;
+      };
+
+      if (!selectOrganizationResponse.ok || !selectOrganizationData?.ok) {
+        setError(
+          selectOrganizationData?.error ??
+            "Não foi possível selecionar o órgão.",
+        );
+        await supabase.auth.signOut({ scope: "local" });
         return;
       }
 

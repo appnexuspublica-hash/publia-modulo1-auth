@@ -1,0 +1,9 @@
+24ce3c82a0480825fefc6793230f5c10fa508b2bba430fe5f9f18c2189dee88c  ./LEIA-ME-V12.0.txt
+00566acd9d97f9a1b691a4526da5c55ce9b2f5f05cd5998679de05e507008964  ./scripts/validate-governance-context-integration.ts
+35ea3f1cf9d6857fe3cc2c3d82fdd20c4ccef6eb25acc2f5e08afaf5e7beb5d2  ./src/app/api/governance/chat/route.ts
+bd8abf54ac7df018f0325099eb5c48258e066fa1f8e33a01d03517339f49efdc  ./src/app/api/governance/chat/route.v12.0-pre-contexto-integrado.bak
+3c7c1cd487d151471160c94fed6beb766d9b37b38880410466e889eca816cbc0  ./src/lib/governance/chat/decision-policy.ts
+28bbbd5fab63a80c0ab2607ab9ff70ac874a3320d91d436b76063d717717282b  ./src/lib/governance/chat/decision-policy.v12.0-pre-contexto-integrado.bak
+177a6b0d59e4cccc55dd37ebb7a9b7769ed8dc82ed4dce154c2dcd8f8ffec0cd  ./src/lib/governance/chat/evidence-bundle.ts
+47a199a8d0cdd46310ecd9d11a151875fd40f627c540f89dbfc13544d774286e  ./src/lib/governance/recovery/types.ts
+3bc559c9c279b775e23517796554db164cef30bcd4bcc5797807e4f4a59f27b2  ./src/lib/governance/recovery/types.v12.0-pre-contexto-integrado.bak

@@ -1,0 +1,10 @@
+export { orchestrateGovernanceV2 as orchestrateGovernanceCore } from "./orchestrator";
+export { finalizeGovernanceV2Response as finalizeGovernanceCoreResponse } from "./finalization";
+export { buildGovernanceV2QueryPlan as buildGovernanceQueryPlan } from "./query-plan";
+export type {
+  GovernanceV2Result as GovernanceCoreResult,
+  GovernanceV2Evidence as GovernanceEvidence,
+  GovernanceV2QueryPlan as GovernanceQueryPlan,
+} from "./types";
+
+export { buildGovernanceLegalTopicInstruction } from "./legal-topics";

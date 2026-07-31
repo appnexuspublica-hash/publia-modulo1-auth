@@ -2613,35 +2613,18 @@ export default function EssentialChatPageClient({
           </div>
         )}
 
-        <div className="mb-2 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handlePdfButtonClick}
-            disabled={isBlocked || accessLoading || isUploadingPdf}
-            className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
-              isBlocked || accessLoading || isUploadingPdf
-                ? options.buttonDisabledClassName
-                : options.buttonClassName
-            }`}
-            style={
-              isBlocked || accessLoading || isUploadingPdf
-                ? options.buttonDisabledStyle
-                : options.buttonStyle
-            }
-          >
-            ANEXAR PDF
-          </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf"
+          className="hidden"
+          onChange={handlePdfChange}
+        />
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/pdf"
-            className="hidden"
-            onChange={handlePdfChange}
-          />
-
-          <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
-            <div className="flex w-max items-center gap-2 pr-1">
+        {attachedPdfs.length > 0 && (
+          <div className="mb-2 flex items-center gap-2">
+            <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
+              <div className="flex w-max items-center gap-2 pr-1">
               {attachedPdfs.map((pdf) => {
                 const isActivePdf = pdf.id === attachedPdf?.id;
                 const isSelectedPdf = selectedPdfIds.includes(pdf.id);
@@ -2717,10 +2700,10 @@ export default function EssentialChatPageClient({
                   </div>
                 );
               })}
+              </div>
             </div>
-          </div>
 
-          {attachedPdfs.length > 0 && (
+            {attachedPdfs.length > 0 && (
             <div ref={quickActionsRef} className="relative shrink-0">
               <button
                 type="button"
@@ -2796,9 +2779,10 @@ export default function EssentialChatPageClient({
                   )}
                 </div>
               )}
-            </div>
-          )}
-        </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {isUploadingPdf && (
           <div
@@ -2976,21 +2960,6 @@ export default function EssentialChatPageClient({
                   maxLabel: 9,
                 })}
 
-            {!attachedPdfs.length &&
-              typeof access?.capabilities?.maxPdfsPerConversation === "number" && (
-                <div className="mb-2 flex justify-end">
-                  <span
-                    className="text-[11px]"
-                    style={{
-                      color: isStrategic ? theme.colors.textMuted : "#475569",
-                    }}
-                  >
-                    Limite por conversa: {access.capabilities.maxPdfsPerConversation} PDF
-                    {access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"}
-                  </span>
-                </div>
-              )}
-
             {isPdfBlockingSend && (
               <div
                 className={`mb-2 rounded-xl border px-3 py-2 text-[12px] ${
@@ -3012,6 +2981,17 @@ export default function EssentialChatPageClient({
               showResponseModes={false}
               availableResponseModes={[]}
               isStrategic={false}
+              onAttachPdf={handlePdfButtonClick}
+              attachPdfDisabled={isBlocked || accessLoading || isUploadingPdf}
+              isUploadingPdf={isUploadingPdf}
+              pdfLimitLabel={
+                !attachedPdfs.length &&
+                typeof access?.capabilities?.maxPdfsPerConversation === "number"
+                  ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
+                      access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
+                    }`
+                  : null
+              }
               inputValue={draftMessage}
               onInputValueChange={setDraftMessage}
               externalTextareaRef={chatInputTextareaRef}

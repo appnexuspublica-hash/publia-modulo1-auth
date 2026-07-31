@@ -49,7 +49,11 @@ async function getGovernanceUserLabel(params: {
   return "CPF não informado";
 }
 
-export default async function GovernanceInstitutionalBasePage() {
+export default async function GovernanceInstitutionalBasePage({
+  searchParams,
+}: {
+  searchParams?: { documentId?: string };
+}) {
   const supabase = createReadonlySupabaseServerClient();
 
   const {
@@ -187,7 +191,10 @@ export default async function GovernanceInstitutionalBasePage() {
           </p>
         </section>
       ) : (
-        <InstitutionalDocumentsClient initialDocuments={documents} />
+        <InstitutionalDocumentsClient
+          initialDocuments={documents}
+          selectedDocumentId={String(searchParams?.documentId ?? "").trim() || null}
+        />
       )}
     </GovernancePageFrame>
   );

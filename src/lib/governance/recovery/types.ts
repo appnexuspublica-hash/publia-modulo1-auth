@@ -5,6 +5,24 @@ export type GovernanceRecoveryProvider =
   | "attachment"
   | "web";
 
+export type GovernanceRecoveryProviderStatus =
+  | "success"
+  | "empty"
+  | "timeout"
+  | "unauthorized"
+  | "unavailable"
+  | "invalid_response"
+  | "error";
+
+export type GovernanceRecoveryProviderDiagnostic = {
+  provider: GovernanceRecoveryProvider;
+  status: GovernanceRecoveryProviderStatus;
+  returnedCandidates: number;
+  durationMs: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
 export type GovernanceRecoveryEvidence = {
   id: string;
   provider: GovernanceRecoveryProvider;
@@ -29,12 +47,19 @@ export type GovernanceRecoveryIntent = {
 
 export type GovernanceRecoveryDiagnostics = {
   queriedProviders: GovernanceRecoveryProvider[];
+  providerResults: GovernanceRecoveryProviderDiagnostic[];
+  successfulProviders: GovernanceRecoveryProvider[];
+  emptyProviders: GovernanceRecoveryProvider[];
+  failedProviders: GovernanceRecoveryProvider[];
+  degraded: boolean;
   returnedByProvider: Partial<Record<GovernanceRecoveryProvider, number>>;
+  selectedByProvider: Partial<Record<GovernanceRecoveryProvider, number>>;
   totalCandidates: number;
   selectedEvidence: number;
 };
 
 export type GovernanceRecoveryResponseMode =
+  | "general"
   | "direct_document"
   | "document_summary"
   | "comparison"
@@ -46,6 +71,8 @@ export type GovernanceRecoveryResponsePolicy = {
   municipalEvidenceSufficient: boolean;
   comparisonReady: boolean;
   externalSourcesAllowed: boolean;
+  degraded: boolean;
+  unavailableProviders: GovernanceRecoveryProvider[];
   reason: string;
 };
 

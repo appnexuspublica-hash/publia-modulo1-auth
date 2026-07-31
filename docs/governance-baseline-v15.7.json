@@ -1,0 +1,24 @@
+{
+  "version": "15.7",
+  "name": "snapshot-rehydration-baseline",
+  "basedOn": "15.6",
+  "scope": [
+    "query planning",
+    "reference canonicalization",
+    "single active governance-core route",
+    "governance_result persistence",
+    "snapshot-first client rehydration",
+    "essential footnote typography"
+  ],
+  "invariants": {
+    "backendSnapshot": "governance_result",
+    "clientSourceOfTruth": "governance_result",
+    "legacyFallback": ["metadata.references", "metadata.sources"],
+    "legacyFallbackOnlyWhenSnapshotMissing": true
+  },
+  "knownLimitations": [
+    "functional integration still depends on Supabase and OpenAI in the installed environment",
+    "legacy metadata remains readable for historical conversations",
+    "the ZIP does not include node_modules, so full typecheck must run in the installed project"
+  ]
+}

@@ -413,7 +413,7 @@ async function updateInstitutionalChunkStatus(options: {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const auth = await getAuthenticatedReadContext();
 
@@ -422,6 +422,80 @@ export async function GET() {
     }
 
     const { supabase, organizationId } = auth.context;
+    const { searchParams } = new URL(request.url);
+    const action = searchParams.get("action");
+    const documentId = searchParams.get("documentId")?.trim();
+
+    if (action === "open") {
+      if (!documentId) {
+        return NextResponse.json(
+          { error: "Documento institucional não informado." },
+          { status: 400 },
+        );
+      }
+
+      const { data: document, error: documentError } = await supabase
+        .from("institutional_documents")
+        .select("id, title, source_url, storage_bucket, storage_path, review_status")
+        .eq("organization_id", organizationId)
+        .eq("id", documentId)
+        .maybeSingle();
+
+      if (documentError) {
+        console.error(
+          "[governance] Erro ao localizar documento institucional:",
+          documentError,
+        );
+
+        return NextResponse.json(
+          { error: "Não foi possível localizar o documento institucional." },
+          { status: 500 },
+        );
+      }
+
+      if (!document || document.review_status !== "approved") {
+        return NextResponse.json(
+          { error: "Documento institucional não encontrado ou indisponível." },
+          { status: 404 },
+        );
+      }
+
+      const storageBucket = String(document.storage_bucket ?? "").trim();
+      const storagePath = String(document.storage_path ?? "").trim();
+
+      if (storageBucket && storagePath) {
+        const { data: signedData, error: signedError } = await supabase.storage
+          .from(storageBucket)
+          .createSignedUrl(storagePath, 300);
+
+        if (signedError || !signedData?.signedUrl) {
+          console.error(
+            "[governance] Erro ao gerar URL assinada do documento institucional:",
+            signedError,
+          );
+
+          return NextResponse.json(
+            { error: "Não foi possível abrir o arquivo institucional." },
+            { status: 500 },
+          );
+        }
+
+        return NextResponse.redirect(signedData.signedUrl, 307);
+      }
+
+      const sourceUrl = String(document.source_url ?? "").trim();
+      if (/^https?:\/\//i.test(sourceUrl)) {
+        return NextResponse.redirect(sourceUrl, 307);
+      }
+
+      return NextResponse.redirect(
+        new URL(
+          `/governanca/base-institucional?documentId=${encodeURIComponent(documentId)}`,
+          request.url,
+        ),
+        307,
+      );
+    }
 
     const { data, error } = await supabase
       .from("institutional_documents")

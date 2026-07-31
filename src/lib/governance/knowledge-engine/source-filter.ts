@@ -5,6 +5,7 @@ type GovernanceSource = {
   title?: string | null;
   url?: string | null;
   type?: string | null;
+  supportText?: string | null;
 };
 
 type GovernanceSourceGroups<TSource extends GovernanceSource = GovernanceSource> = {
@@ -27,7 +28,9 @@ function includesAny(text: string, terms: string[]) {
 }
 
 function sourceText(source: GovernanceSource) {
-  return normalizeForMatch(`${source.title ?? ""} ${source.type ?? ""}`);
+  return normalizeForMatch(
+    `${source.title ?? ""} ${source.type ?? ""} ${source.supportText ?? ""}`,
+  );
 }
 
 function uniqueSources<TSource extends GovernanceSource>(sources: TSource[]) {
@@ -90,6 +93,84 @@ function isLicitationRelated(source: GovernanceSource) {
     "edital de licitacao",
     "lei 14 133",
     "14 133",
+  ]);
+}
+
+
+function isSoftwareProcurementQuery(question: string) {
+  const q = normalizeForMatch(question);
+
+  return includesAny(q, [
+    "software",
+    "sistema",
+    "sistemas",
+    "tecnologia da informacao",
+    "tecnologia da informação",
+    "servicos de ti",
+    "serviços de ti",
+    "solucao de tic",
+    "solução de tic",
+    "saas",
+    "licenca de uso",
+    "licença de uso",
+    "desenvolvimento de sistema",
+    "servicos digitais",
+    "serviços digitais",
+  ]);
+}
+
+function isSoftwareProcurementSource(source: GovernanceSource) {
+  const text = sourceText(source);
+  const title = normalizeForMatch(source.title);
+
+  const strongSoftwareTerms = [
+    "software",
+    "sistema de informacao",
+    "sistemas de informacao",
+    "tecnologia da informacao",
+    "servicos de ti",
+    "solucao de tic",
+    "saas",
+    "licenca de uso",
+    "licenciamento de software",
+    "desenvolvimento de sistema",
+    "hospedagem em nuvem",
+    "infraestrutura de ti",
+  ];
+
+  const matchedTerms = strongSoftwareTerms.filter((term) =>
+    text.includes(normalizeForMatch(term)),
+  );
+  const titleHasStrongSubject = strongSoftwareTerms.some((term) =>
+    title.includes(normalizeForMatch(term)),
+  );
+
+  /*
+    v13.9 — palavras administrativas genéricas como "sistema",
+    "contratação" ou "decreto" não bastam. Atos municipais genéricos
+    precisam trazer o objeto de TI no título ou ao menos dois sinais
+    temáticos fortes no trecho de suporte.
+  */
+  const isGenericMunicipalAct = /\b(decreto|portaria|resolucao|lei)\b/.test(title);
+  const hasSoftwareSubject =
+    titleHasStrongSubject ||
+    matchedTerms.length >= (isGenericMunicipalAct ? 2 : 1);
+
+  if (!hasSoftwareSubject) {
+    return false;
+  }
+
+  return !includesAny(text, [
+    "sondagem spt",
+    "ensaio cbr",
+    "viga benkelman",
+    "uniformes escolares",
+    "mochilas",
+    "compressores odontologicos",
+    "compressores odontológicos",
+    "radiografia digital",
+    "filmes radiologicos",
+    "filmes radiológicos",
   ]);
 }
 
@@ -1246,7 +1327,32 @@ function filterMunicipalSources<TSource extends GovernanceSource>(
   }
 
   if (isCareerProgressionRelatedSource({ title: question, type: null, url: null })) {
-    return unique.filter(isCareerProgressionRelatedSource).slice(0, 4);
+    const teacherSpecificQuestion = includesAny(q, [
+      "magisterio",
+      "magistério",
+      "professor",
+      "professores",
+      "docente",
+      "docentes",
+      "educacao",
+      "educação",
+    ]);
+
+    return unique
+      .filter(isCareerProgressionRelatedSource)
+      .filter((source) => {
+        if (teacherSpecificQuestion) return true;
+
+        return !includesAny(sourceText(source), [
+          "magisterio",
+          "magistério",
+          "professor",
+          "professores",
+          "docente",
+          "docentes",
+        ]);
+      })
+      .slice(0, 4);
   }
 
   if (isPersonnelRightsQuery(question)) {
@@ -1272,7 +1378,21 @@ export function filterGovernanceSourcesForResponse<TSource extends GovernanceSou
   question: string;
   queryNature: GovernanceQueryNature;
 }): GovernanceSourceGroups<TSource> {
-  const sources = params.sources;
+  const softwareProcurement = isSoftwareProcurementQuery(params.question);
+  const sourceSet = params.sources;
+
+  const sources: GovernanceSourceGroups<TSource> = softwareProcurement
+    ? {
+        institutional: uniqueSources(sourceSet.institutional ?? []).filter(
+          isSoftwareProcurementSource,
+        ),
+        officialGazette: uniqueSources(sourceSet.officialGazette ?? []).filter(
+          isSoftwareProcurementSource,
+        ),
+        officialSources: uniqueSources(sourceSet.officialSources ?? []),
+      }
+    : sourceSet;
+
   const officialGazetteSources = uniqueSources(sources.officialGazette ?? []);
   const transparencyTopicOfficialSources = filterOfficialSourcesForTransparencyTopic(
     sources.officialSources ?? [],

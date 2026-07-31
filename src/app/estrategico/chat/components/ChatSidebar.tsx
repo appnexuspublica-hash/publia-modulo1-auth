@@ -281,7 +281,7 @@ export function ChatSidebar({
   const strategicHeaderText = "#0D2B4D";
   const strategicHeaderMuted = "#5A5A5A";
   const strategicSearchBg = "#FFFFFF";
-  const strategicSearchBorder = "rgba(13,43,77,0.20)";
+  const strategicSearchBorder = "rgba(13,43,77,0.34)";
   const strategicSearchHover = "#E5E5E5";
 
   const essentialSidebarBg = "#dddddd";

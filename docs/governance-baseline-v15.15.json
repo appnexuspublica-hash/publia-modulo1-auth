@@ -1,0 +1,18 @@
+{
+  "version": "15.15",
+  "pipeline": "governance-v15.15-early-persistence-readiness",
+  "scope": [
+    "plano único por requisição",
+    "finalização unificada entre streaming e não streaming",
+    "snapshot canônico para mensagens persistidas e transitórias",
+    "envelope de resposta sem cópias paralelas de fontes e referências",
+    "validação estrutural do snapshot antes da reidratação",
+    "validação antecipada da persistência confiável antes da mensagem do usuário",
+    "separação entre Base legal, evidências e canais de consulta"
+  ],
+  "knownLimitations": [
+    "o typecheck completo depende das dependências instaladas no projeto local",
+    "respostas transitórias não são recuperáveis após recarga porque não foram persistidas",
+    "a suíte estrutural não substitui testes funcionais com Supabase e OpenAI ativos"
+  ]
+}

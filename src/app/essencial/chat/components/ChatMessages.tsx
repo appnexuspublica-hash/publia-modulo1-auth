@@ -193,7 +193,7 @@ export function ChatMessages({
 
                         {/* FOOTER (Base legal + Referências) — 9px blindado */}
                         {footer.trim().length > 0 && (
-                          <div className="publia-footnote mt-4 text-slate-100/90" data-footnote>
+                          <div className="publia-footnote publia-footnote--essential mt-4 text-slate-100/90" data-footnote data-essential-footnote>
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
                               components={{

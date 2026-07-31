@@ -1,0 +1,23 @@
+{
+  "version": "15.20",
+  "pipeline": "governance-v15.20-final-audit-closure",
+  "scope": "Encerramento técnico da fase de estabilização do Governança",
+  "status": "baseline_congelado",
+  "validated_invariants": [
+    "rota principal usa um único governance-core",
+    "plano de consulta é único por requisição",
+    "referências são persistidas em governance_result",
+    "streaming, JSON e resposta transitória usam o mesmo envelope",
+    "idempotência protege mensagens de usuário e assistente",
+    "cliente reidrata o snapshot canônico após recarga",
+    "módulos legados substituídos não são importados pela rota principal",
+    "backups permanecem fora do runtime"
+  ],
+  "known_residuals": [
+    "módulos legados permanecem no repositório para rotas administrativas e histórico; não participam do chat principal",
+    "validadores e READMEs de versões anteriores permanecem como trilha de auditoria",
+    "typecheck completo depende das dependências instaladas no ambiente local",
+    "testes com Supabase, OpenAI e consulta web continuam sendo integração externa"
+  ],
+  "next_phase": "refinamento funcional somente mediante regressão reproduzível"
+}

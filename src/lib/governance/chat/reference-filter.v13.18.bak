@@ -1,0 +1,401 @@
+import type { GovernanceChatReference } from "@/lib/governance/chat/references";
+
+function normalizeReferenceTextForMatch(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function referenceIncludesAny(text: string, terms: string[]) {
+  return terms.some((term) => text.includes(normalizeReferenceTextForMatch(term)));
+}
+
+function getReferenceImportantTerms(reference: GovernanceChatReference) {
+  const normalizedTitle = normalizeReferenceTextForMatch(reference.title);
+
+  return normalizedTitle
+    .split(" ")
+    .filter((term) => term.length >= 5)
+    .filter(
+      (term) =>
+        ![
+          "municipio",
+          "municipal",
+          "santana",
+          "itarare",
+          "prefeitura",
+          "gestao",
+          "documento",
+          "oficial",
+        ].includes(term),
+    );
+}
+
+function governanceReferenceAppearsInAnswer(
+  reference: GovernanceChatReference,
+  answer: string,
+) {
+  const normalizedAnswer = normalizeReferenceTextForMatch(answer);
+  const normalizedTitle = normalizeReferenceTextForMatch(reference.title);
+  const normalizedUrl = normalizeReferenceTextForMatch(reference.url);
+
+  if (!normalizedTitle) {
+    return false;
+  }
+
+  if (normalizedAnswer.includes(normalizedTitle)) {
+    return true;
+  }
+
+  if (normalizedUrl && normalizedAnswer.includes(normalizedUrl)) {
+    return true;
+  }
+
+  const exactNumberedMatch = numberedReferenceAppearsExactly(reference, answer);
+
+  if (exactNumberedMatch !== null) {
+    return exactNumberedMatch;
+  }
+
+  const terms = getReferenceImportantTerms(reference);
+
+  if (terms.length === 0) {
+    return false;
+  }
+
+  const requiredMatches = terms.length <= 2 ? terms.length : 2;
+  const matches = terms.filter((term) => normalizedAnswer.includes(term)).length;
+
+  return matches >= requiredMatches;
+}
+
+function isLicitationEvidenceQuestion(question: string, answer: string) {
+  const questionText = normalizeReferenceTextForMatch(question);
+  const answerText = normalizeReferenceTextForMatch(answer);
+  const isLicitationTopic = referenceIncludesAny(
+    `${questionText} ${answerText}`,
+    [
+      "licitacao",
+      "licitacoes",
+      "dispensa",
+      "inexigibilidade",
+      "pregao",
+      "contratacao direta",
+      "contrato",
+      "extrato de contrato",
+      "lei 14 133",
+    ],
+  );
+
+  if (!isLicitationTopic) {
+    return false;
+  }
+
+  /*
+    v13.15 — uma pergunta meramente explicativa sobre licitações não é,
+    por si só, um pedido de evidências municipais. O modo documental só é
+    ativado quando o usuário pede consulta, localização, listagem, publicação
+    ou identificação de atos concretos.
+  */
+  return referenceIncludesAny(questionText, [
+    "onde consultar",
+    "onde encontrar",
+    "onde foi publicado",
+    "onde foi publicada",
+    "qual diario",
+    "diario oficial",
+    "fonte",
+    "fontes",
+    "publicacao",
+    "publicacoes",
+    "publicado",
+    "publicada",
+    "liste",
+    "listar",
+    "relacione",
+    "quais pregoes",
+    "quais licitacoes",
+    "quais contratos",
+    "recentes",
+    "mais recente",
+    "numero do processo",
+    "numero do contrato",
+    "numero do pregao",
+  ]);
+}
+
+function isOfficialSourcesEvidenceQuestion(question: string, answer: string) {
+  const text = normalizeReferenceTextForMatch(`${question} ${answer}`);
+
+  return referenceIncludesAny(text, [
+    "fontes oficiais",
+    "fonte oficial",
+    "canais oficiais",
+    "canal oficial",
+    "site oficial",
+    "diario oficial",
+    "portal de transparencia",
+    "portal da transparencia",
+  ]);
+}
+
+function isOfficialGazetteReference(reference: GovernanceChatReference) {
+  const title = normalizeReferenceTextForMatch(reference.title);
+
+  return reference.kind === "official" && referenceIncludesAny(title, [
+    "diario oficial",
+    "diário oficial",
+    "edicao",
+    "edição",
+  ]);
+}
+
+function isLicitationConsultationOfficialReference(reference: GovernanceChatReference) {
+  const title = normalizeReferenceTextForMatch(reference.title);
+
+  return reference.kind === "official" && referenceIncludesAny(title, [
+    "portal",
+    "transparencia",
+    "transparência",
+    "betha",
+    "betha contabil",
+    "betha contábil",
+    "site oficial",
+    "licitacao",
+    "licitações",
+    "licitacoes",
+    "contrato",
+    "contratos",
+  ]);
+}
+
+function isGenericOfficialReference(reference: GovernanceChatReference) {
+  const title = normalizeReferenceTextForMatch(reference.title);
+
+  return [
+    "diario oficial",
+    "diario oficial do municipio",
+    "planalto gov br",
+    "gov br",
+    "portal transparencia",
+    "portal da transparencia",
+    "portal transparencia betha contabil",
+    "site oficial",
+  ].includes(title);
+}
+
+function extractActIdentifiers(value: unknown) {
+  const text = String(value ?? "");
+  const identifiers = new Set<string>();
+
+  for (const match of text.matchAll(
+    /\b(?:lei(?:\s+complementar)?|decreto|portaria|resolu[cç][aã]o|preg[aã]o(?:\s+eletr[oô]nico)?|extrato(?:\s+de\s+contrato)?|contrato|edi[cç][aã]o)\s*(?:n[º°.]?\s*)?(\d{1,6})(?:\s*\/\s*(\d{4}))?/gi,
+  )) {
+    const number = String(match[1] ?? "").replace(/^0+/, "") || "0";
+    const year = String(match[2] ?? "");
+    identifiers.add(year ? `${number}/${year}` : number);
+  }
+
+  return identifiers;
+}
+
+function numberedReferenceAppearsExactly(
+  reference: GovernanceChatReference,
+  answer: string,
+) {
+  const identifiers = extractActIdentifiers(reference.title);
+
+  if (identifiers.size === 0) {
+    return null;
+  }
+
+  const answerIdentifiers = extractActIdentifiers(answer);
+
+  return Array.from(identifiers).some((identifier) =>
+    answerIdentifiers.has(identifier),
+  );
+}
+
+
+
+function isSoftwareProcurementQuestion(question: string) {
+  const text = normalizeReferenceTextForMatch(question);
+
+  return referenceIncludesAny(text, [
+    "software",
+    "sistema",
+    "tecnologia da informacao",
+    "servicos de ti",
+    "solucao de tic",
+    "saas",
+    "licenciamento",
+    "desenvolvimento",
+  ]);
+}
+
+function isSoftwareProcurementReference(reference: GovernanceChatReference) {
+  const text = normalizeReferenceTextForMatch(
+    `${reference.title} ${reference.supportText ?? ""}`,
+  );
+
+  const related = referenceIncludesAny(text, [
+    "software",
+    "sistema de informacao",
+    "sistemas de informacao",
+    "tecnologia da informacao",
+    "servicos de ti",
+    "saas",
+    "licenciamento",
+    "licenca de uso",
+    "desenvolvimento",
+    "hospedagem",
+    "nuvem",
+    "infraestrutura de ti",
+    "solucao de tic",
+  ]);
+
+  const unrelated = referenceIncludesAny(text, [
+    "sondagem spt",
+    "ensaio cbr",
+    "viga benkelman",
+    "uniformes escolares",
+    "mochilas",
+    "compressores odontologicos",
+    "radiografia digital",
+    "filmes radiologicos",
+  ]);
+
+  return related && !unrelated;
+}
+
+function shouldKeepGovernanceReferenceForClient(params: {
+  reference: GovernanceChatReference;
+  question: string;
+  answer: string;
+}) {
+  const { reference, question, answer } = params;
+
+  if (reference.kind === "legal") {
+    return false;
+  }
+
+  if (!String(reference.url ?? "").trim()) {
+    return false;
+  }
+
+  if (
+    isSoftwareProcurementQuestion(question) &&
+    !isSoftwareProcurementReference(reference)
+  ) {
+    return false;
+  }
+
+  const explicitSourceQuestion =
+    isOfficialSourcesEvidenceQuestion(question, "") ||
+    isLicitationEvidenceQuestion(question, "");
+
+  if (isGenericOfficialReference(reference) && !explicitSourceQuestion) {
+    return false;
+  }
+
+  if (governanceReferenceAppearsInAnswer(reference, answer)) {
+    return true;
+  }
+
+  const title = normalizeReferenceTextForMatch(reference.title);
+
+  if (isOfficialSourcesEvidenceQuestion(question, answer)) {
+    return referenceIncludesAny(title, [
+      "ata de posse",
+      "codigo tributario",
+      "código tributário",
+      "lei organica",
+      "lei orgânica",
+      "diario oficial",
+      "diário oficial",
+      "portal",
+      "transparencia",
+      "transparência",
+      "site oficial",
+    ]);
+  }
+
+  if (isLicitationEvidenceQuestion(question, answer)) {
+    return isOfficialGazetteReference(reference) || isLicitationConsultationOfficialReference(reference);
+  }
+
+  return false;
+}
+
+export function filterGovernanceChatReferencesForClient(
+  references: GovernanceChatReference[],
+  options?: {
+    question?: string;
+    answer?: string;
+  },
+) {
+  const question = String(options?.question ?? "");
+  const answer = String(options?.answer ?? "");
+  const unique = new Map<string, GovernanceChatReference>();
+
+  for (const reference of references) {
+    if (
+      !shouldKeepGovernanceReferenceForClient({
+        reference,
+        question,
+        answer,
+      })
+    ) {
+      continue;
+    }
+
+    const title = String(reference.title ?? "").trim();
+    const url = String(reference.url ?? "").trim() || null;
+
+    if (!title) {
+      continue;
+    }
+
+    const key = `${reference.kind}::${normalizeReferenceTextForMatch(title)}::${url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, {
+        ...reference,
+        title,
+        url,
+        supportText: String(reference.supportText ?? "").trim() || null,
+      });
+    }
+  }
+
+  const filtered = Array.from(unique.values());
+  const officialGazetteReferences = filtered.filter(isOfficialGazetteReference);
+  const licitationOfficialReferences = filtered.filter(
+    (reference) =>
+      !isOfficialGazetteReference(reference) &&
+      isLicitationConsultationOfficialReference(reference),
+  );
+  const otherReferences = filtered.filter(
+    (reference) =>
+      !isOfficialGazetteReference(reference) &&
+      !isLicitationConsultationOfficialReference(reference),
+  );
+
+  if (isLicitationEvidenceQuestion(question, answer)) {
+    return [
+      ...officialGazetteReferences.slice(0, 2),
+      ...licitationOfficialReferences.slice(0, 2),
+      ...otherReferences.slice(0, 1),
+    ].slice(0, 5);
+  }
+
+  /*
+    v13.15 — em respostas explicativas, "Fontes consultadas" é um rodapé
+    enxuto de evidências específicas, não um inventário de todos os portais
+    recuperados durante a busca.
+  */
+  return filtered.slice(0, 3);
+}

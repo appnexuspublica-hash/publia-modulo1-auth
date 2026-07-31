@@ -1,0 +1,327 @@
+import type OpenAI from "openai";
+
+import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
+import { createWritableSupabaseRouteClient } from "@/lib/governance/chat/infrastructure";
+
+const MAX_GOVERNANCE_PDF_CONTEXT_CHARS = 9000;
+const MAX_SELECTED_PDFS_IN_GOVERNANCE_CHAT = 5;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type GovernancePdfContextResult = {
+  selectedPdfFileIds: string[];
+  pdfContextText: string;
+  pdfContextAvailable: boolean;
+  pdfContextWarnings: string[];
+};
+
+type GovernancePdfFileRow = {
+  id: string;
+  file_name: string | null;
+  extracted_text: string | null;
+  extracted_text_status: string | null;
+  vector_index_status: string | null;
+  vector_chunks_count: number | null;
+};
+
+type GovernanceMatchPdfChunkRow = {
+  chunk_index: number;
+  content: string;
+};
+
+type BuildGovernancePdfContextParams = {
+  client: ReturnType<typeof createWritableSupabaseRouteClient>;
+  openai: OpenAI | null;
+  embeddingModel: string;
+  ragTopK: number;
+  userId: string;
+  selectedPdfFileIds: string[];
+  question: string;
+};
+
+export function clampText(text: string, maxChars: number) {
+  const clean = String(text ?? "").trim();
+
+  if (clean.length <= maxChars) {
+    return clean;
+  }
+
+  return `${clean.slice(0, Math.max(0, maxChars - 20)).trim()}\n\n[texto cortado]`;
+}
+
+export function normalizePdfText(text: string) {
+  return String(text ?? "")
+    .replace(/\u0000/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function buildGovernancePdfLabel(pdfRow: GovernancePdfFileRow) {
+  const fileName = String(pdfRow.file_name ?? "").trim();
+  return fileName || `PDF ${pdfRow.id}`;
+}
+
+async function getGovernancePdfQueryEmbedding(params: {
+  openai: OpenAI | null;
+  embeddingModel: string;
+  question: string;
+}) {
+  if (!params.openai) {
+    return null;
+  }
+
+  try {
+    const response = await params.openai.embeddings.create({
+      model: params.embeddingModel,
+      input: params.question,
+      encoding_format: "float",
+    });
+
+    const embedding = response.data?.[0]?.embedding;
+
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      return null;
+    }
+
+    return embedding;
+  } catch (error) {
+    console.error("[governance/chat] Erro ao gerar embedding da pergunta:", error);
+    return null;
+  }
+}
+
+async function buildGovernancePdfContextFromVector(params: {
+  client: ReturnType<typeof createWritableSupabaseRouteClient>;
+  openai: OpenAI | null;
+  embeddingModel: string;
+  ragTopK: number;
+  pdfRow: GovernancePdfFileRow;
+  userId: string;
+  question: string;
+  maxChars: number;
+}) {
+  const vectorReady =
+    String(params.pdfRow.vector_index_status ?? "").toLowerCase() === "ready" &&
+    Number(params.pdfRow.vector_chunks_count ?? 0) > 0;
+
+  if (!vectorReady) {
+    return "";
+  }
+
+  const queryEmbedding = await getGovernancePdfQueryEmbedding({
+    openai: params.openai,
+    embeddingModel: params.embeddingModel,
+    question: params.question,
+  });
+
+  if (!queryEmbedding) {
+    return "";
+  }
+
+  const { data: matches, error: matchError } = await params.client.rpc(
+    "match_pdf_chunks",
+    {
+      query_embedding: queryEmbedding,
+      match_pdf_file_id: params.pdfRow.id,
+      match_user_id: params.userId,
+      match_count: params.ragTopK,
+    },
+  );
+
+  if (matchError) {
+    console.error("[governance/chat] Erro ao buscar chunks vetoriais do PDF:", {
+      pdfFileId: params.pdfRow.id,
+      error: matchError.message,
+    });
+
+    return "";
+  }
+
+  if (!Array.isArray(matches) || matches.length === 0) {
+    return "";
+  }
+
+  const label = buildGovernancePdfLabel(params.pdfRow);
+
+  const raw = (matches as GovernanceMatchPdfChunkRow[])
+    .map((match, index) =>
+      [
+        `[${label}] Trecho ${index + 1} (chunk #${Number(match.chunk_index ?? 0)}):`,
+        String(match.content ?? "").trim(),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .filter((block) => block.trim().length > 0)
+    .join("\n\n---\n\n");
+
+  return clampText(raw, params.maxChars);
+}
+
+function buildGovernancePdfContextFromExtractedText(params: {
+  pdfRow: GovernancePdfFileRow;
+  question: string;
+  maxChars: number;
+}) {
+  if (String(params.pdfRow.extracted_text_status ?? "").toLowerCase() !== "ready") {
+    return "";
+  }
+
+  const text = normalizePdfText(params.pdfRow.extracted_text ?? "");
+
+  if (!text) {
+    return "";
+  }
+
+  const chunks = chunkText(text, {
+    chunkSize: 1200,
+    overlap: 200,
+    maxChunks: 320,
+  });
+
+  const picked = pickRelevantChunks(chunks, params.question, {
+    maxChunks: 4,
+    maxChars: params.maxChars,
+    minScore: 1,
+  });
+
+  const chunksToUse = picked.length > 0 ? picked : chunks.slice(0, 4);
+
+  if (!chunksToUse.length) {
+    return "";
+  }
+
+  const label = buildGovernancePdfLabel(params.pdfRow);
+
+  const raw = chunksToUse
+    .map((chunk, index) =>
+      [
+        `[${label}] Trecho ${index + 1} (chunk #${chunk.index}):`,
+        chunk.text,
+      ].join("\n"),
+    )
+    .join("\n\n---\n\n");
+
+  return clampText(raw, params.maxChars);
+}
+
+export async function buildGovernancePdfContext(
+  params: BuildGovernancePdfContextParams,
+): Promise<GovernancePdfContextResult> {
+  const uniquePdfFileIds = Array.from(new Set(params.selectedPdfFileIds))
+    .map((id) => id.trim())
+    .filter((id) => UUID_RE.test(id))
+    .slice(0, MAX_SELECTED_PDFS_IN_GOVERNANCE_CHAT);
+
+  if (uniquePdfFileIds.length === 0) {
+    return {
+      selectedPdfFileIds: [],
+      pdfContextText: "",
+      pdfContextAvailable: false,
+      pdfContextWarnings: [],
+    };
+  }
+
+  const warnings: string[] = [];
+  const contextBlocks: string[] = [];
+
+  const { data: pdfRows, error: pdfRowsError } = await params.client
+    .from("pdf_files")
+    .select(
+      `
+        id,
+        file_name,
+        extracted_text,
+        extracted_text_status,
+        vector_index_status,
+        vector_chunks_count
+      `,
+    )
+    .eq("user_id", params.userId)
+    .in("id", uniquePdfFileIds);
+
+  if (pdfRowsError) {
+    console.error("[governance/chat] Erro ao buscar PDFs selecionados:", pdfRowsError);
+
+    return {
+      selectedPdfFileIds: uniquePdfFileIds,
+      pdfContextText: "",
+      pdfContextAvailable: false,
+      pdfContextWarnings: ["Não foi possível validar os PDFs selecionados."],
+    };
+  }
+
+  const rowsById = new Map(
+    ((pdfRows ?? []) as GovernancePdfFileRow[]).map((row) => [String(row.id), row]),
+  );
+
+  const maxCharsPerPdf = Math.max(
+    900,
+    Math.floor(MAX_GOVERNANCE_PDF_CONTEXT_CHARS / Math.max(1, uniquePdfFileIds.length)),
+  );
+
+  for (const pdfFileId of uniquePdfFileIds) {
+    const pdf = rowsById.get(pdfFileId);
+    const fileName = String(pdf?.file_name ?? "PDF selecionado");
+
+    if (!pdf) {
+      warnings.push(`PDF não encontrado ou sem permissão: ${pdfFileId}.`);
+      continue;
+    }
+
+    const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
+    const vectorStatus = String(pdf.vector_index_status ?? "").toLowerCase();
+
+    const vectorContext = await buildGovernancePdfContextFromVector({
+      client: params.client,
+      openai: params.openai,
+      embeddingModel: params.embeddingModel,
+      ragTopK: params.ragTopK,
+      pdfRow: pdf,
+      userId: params.userId,
+      question: params.question,
+      maxChars: maxCharsPerPdf,
+    });
+
+    const extractedTextContext = vectorContext
+      ? ""
+      : buildGovernancePdfContextFromExtractedText({
+          pdfRow: pdf,
+          question: params.question,
+          maxChars: maxCharsPerPdf,
+        });
+
+    const contextText = vectorContext || extractedTextContext;
+
+    if (!contextText) {
+      warnings.push(
+        `Não encontrei trechos disponíveis no PDF "${fileName}". Status de texto: ${extractedStatus || "não informado"}. Status vetorial: ${vectorStatus || "não informado"}.`,
+      );
+      continue;
+    }
+
+    contextBlocks.push(
+      [
+        `PDF: ${fileName}`,
+        `ID: ${pdfFileId}`,
+        "",
+        contextText,
+      ].join("\n"),
+    );
+  }
+
+  const pdfContextText = contextBlocks
+    .join("\n\n---\n\n")
+    .slice(0, MAX_GOVERNANCE_PDF_CONTEXT_CHARS);
+
+  return {
+    selectedPdfFileIds: uniquePdfFileIds,
+    pdfContextText,
+    pdfContextAvailable: pdfContextText.trim().length > 0,
+    pdfContextWarnings: warnings,
+  };
+}

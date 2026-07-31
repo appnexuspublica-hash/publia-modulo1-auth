@@ -1,0 +1,12 @@
+Publ.IA Governança — v12.0 Contexto Integrado
+
+Escopo desta entrega:
+- integra recuperação unificada, base municipal e Diário Oficial no prompt final;
+- deduplica e limita o pacote de contexto;
+- alinha as fontes exibidas às evidências efetivamente utilizadas;
+- impede perguntas gerais de receberem automaticamente política de análise jurídica;
+- restringe os provedores de recuperação conforme a natureza da pergunta;
+- adiciona validação automatizada da política e do pacote de evidências.
+
+Nenhum arquivo de interface, migration, configuração ou módulo Essencial foi alterado.
+Os arquivos .bak preservam exatamente as versões recebidas no ZIP analisado.

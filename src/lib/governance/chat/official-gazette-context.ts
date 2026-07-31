@@ -1,0 +1,183 @@
+// src/lib/governance/chat/official-gazette-context.ts
+import { shouldUseOfficialGazetteContext } from "@/lib/governance/chat/context-policy";
+import { loadExactOfficialGazetteActRows } from "@/lib/governance/chat/official-gazette-exact-act";
+import { buildOfficialGazetteContextText } from "@/lib/governance/chat/official-gazette-context-text";
+import type { OfficialGazetteContextChunkRow } from "@/lib/governance/chat/official-gazette-metadata";
+import {
+  extractOfficialGazetteExactActReference,
+  extractOfficialGazetteSearchTerms,
+} from "@/lib/governance/chat/official-gazette-query";
+import {
+  buildOfficialGazetteReferenceLinks,
+  type OfficialGazetteReferenceLink,
+} from "@/lib/governance/chat/official-gazette-references";
+import { scoreOfficialGazetteChunk } from "@/lib/governance/chat/official-gazette-scoring";
+import { selectCompleteOfficialGazetteRowsForQuestion } from "@/lib/governance/chat/official-gazette-selection";
+
+const MAX_OFFICIAL_GAZETTE_CHUNKS = 250;
+const MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS = 80;
+
+export type OfficialGazetteContextSelectionReason =
+  | "disabled"
+  | "exact_match"
+  | "exact_not_found"
+  | "complete_list"
+  | "scored_match"
+  | "no_relevant_match"
+  | "provider_error";
+
+export type OfficialGazetteContextResult = {
+  contextText: string;
+  chunksUsed: number;
+  totalChunksRead: number;
+  enabled: boolean;
+  referenceLinks: OfficialGazetteReferenceLink[];
+  selectionReason: OfficialGazetteContextSelectionReason;
+  irrelevantFallbackPrevented: boolean;
+};
+
+export async function buildOfficialGazetteContext(params: {
+  client: any;
+  organizationId: string;
+  question: string;
+}): Promise<OfficialGazetteContextResult> {
+  const { client, organizationId, question } = params;
+
+  if (!shouldUseOfficialGazetteContext(question)) {
+    return {
+      contextText: "",
+      chunksUsed: 0,
+      totalChunksRead: 0,
+      enabled: false,
+      referenceLinks: [],
+      selectionReason: "disabled",
+      irrelevantFallbackPrevented: false,
+    };
+  }
+
+  const searchTerms = extractOfficialGazetteSearchTerms(question);
+
+  try {
+    const exactRows = await loadExactOfficialGazetteActRows({
+      client,
+      organizationId,
+      question,
+    });
+
+    const { data, error } = await client
+      .from("governance_official_gazette_chunks")
+      .select(
+        `
+          document_id,
+          organization_id,
+          page_number,
+          section_type,
+          title,
+          content,
+          governance_official_gazette_documents(
+            edition_number,
+            publication_date,
+            public_url,
+            pdf_url,
+            source_page_url
+          )
+        `,
+      )
+      .eq("organization_id", organizationId)
+      .order("document_id", { ascending: false })
+      .order("page_number", { ascending: true, nullsFirst: false })
+      .order("title", { ascending: true, nullsFirst: false })
+      .limit(MAX_OFFICIAL_GAZETTE_CHUNKS);
+
+    if (error) {
+      console.warn("[governance/chat] Não foi possível carregar atos do Diário Oficial:", error);
+
+      return {
+        contextText: "",
+        chunksUsed: 0,
+        totalChunksRead: 0,
+        enabled: true,
+        referenceLinks: [],
+        selectionReason: "provider_error",
+        irrelevantFallbackPrevented: false,
+      };
+    }
+
+    const rows = ((data ?? []) as OfficialGazetteContextChunkRow[]).filter((row) =>
+      String(row.content ?? "").trim().length > 0,
+    );
+
+    const completeRows = selectCompleteOfficialGazetteRowsForQuestion(rows, question);
+
+    const scoredRows = completeRows || exactRows.length > 0
+      ? []
+      : rows
+          .map((row) => ({
+            row,
+            score: scoreOfficialGazetteChunk(row, question, searchTerms),
+          }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MAX_OFFICIAL_GAZETTE_SELECTED_CHUNKS)
+          .map((item) => item.row);
+
+    const exactReference = extractOfficialGazetteExactActReference(question);
+    const selectedRows =
+      exactRows.length > 0
+        ? exactRows
+        : exactReference
+          ? []
+          : completeRows ?? scoredRows;
+    const irrelevantFallbackPrevented =
+      !exactReference &&
+      !completeRows &&
+      scoredRows.length === 0 &&
+      rows.length > 0;
+    const selectionReason: OfficialGazetteContextSelectionReason =
+      exactRows.length > 0
+        ? "exact_match"
+        : exactReference
+          ? "exact_not_found"
+          : completeRows
+            ? "complete_list"
+            : scoredRows.length > 0
+              ? "scored_match"
+              : "no_relevant_match";
+    const completeListMode = Boolean(completeRows);
+    const contextText =
+      exactReference && selectedRows.length === 0
+        ? [
+            "RESULTADO EXCLUSIVO DA BUSCA NO DIÁRIO OFICIAL MUNICIPAL:",
+            `Ato procurado: ${exactReference.actType} ${exactReference.number}/${exactReference.year}.`,
+            "Nenhum chunk do Diário Oficial cadastrado para esta organização contém correspondência exata desse ato.",
+            "Não use busca web, base institucional ou atos parecidos para substituir esse resultado.",
+          ].join("\n")
+        : buildOfficialGazetteContextText({
+            chunks: selectedRows,
+            question,
+            completeListMode,
+          });
+
+    return {
+      contextText,
+      chunksUsed: selectedRows.length,
+      totalChunksRead: rows.length,
+      enabled: true,
+      referenceLinks: buildOfficialGazetteReferenceLinks(selectedRows),
+      selectionReason,
+      irrelevantFallbackPrevented,
+    };
+  } catch (error) {
+    console.warn("[governance/chat] Erro inesperado ao montar contexto do Diário Oficial:", error);
+
+    return {
+      contextText: "",
+      chunksUsed: 0,
+      totalChunksRead: 0,
+      enabled: true,
+      referenceLinks: [],
+      selectionReason: "provider_error",
+      irrelevantFallbackPrevented: false,
+    };
+  }
+}

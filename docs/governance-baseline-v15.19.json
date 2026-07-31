@@ -1,0 +1,14 @@
+{
+  "version": "15.19",
+  "pipeline": "governance-v15.19-assistant-idempotency",
+  "scope": "Unicidade transacional das respostas do assistente",
+  "invariants": [
+    "uma requisição possui no máximo uma resposta persistida do assistente",
+    "conflitos de inserção recuperam a resposta já persistida",
+    "duplicidades históricas são saneadas sem apagar conteúdo",
+    "a unicidade vale por organização, conversa e client_request_id",
+    "a migration possui rollback explícito",
+    "o contrato canônico governance_result permanece inalterado"
+  ],
+  "migration": "202607280001_621_governance_assistant_idempotency.sql"
+}

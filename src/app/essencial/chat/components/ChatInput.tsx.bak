@@ -397,7 +397,7 @@ export function ChatInput({
           <span>Todos os direitos reservados</span>
           <span>|</span>
           <a
-            href="https://nexuspublica.com.br/app-publ-ia/"
+            href="https://nexuspublica.com.br/publia"
             target="_blank"
             rel="noopener noreferrer"
             className="underline underline-offset-2 transition-opacity hover:opacity-80"
@@ -406,7 +406,7 @@ export function ChatInput({
           </a>
           <span>|</span>
           <a
-            href="https://nexuspublica.com.br/termo-de-uso/"
+            href="https://nexuspublica.com.br/termos-de-uso"
             target="_blank"
             rel="noopener noreferrer"
             className="underline underline-offset-2 transition-opacity hover:opacity-80"

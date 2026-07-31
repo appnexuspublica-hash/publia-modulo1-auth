@@ -1,0 +1,153 @@
+import { randomUUID } from "node:crypto";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+
+import type {
+  GovernanceMessage,
+  GovernanceResponseMode,
+} from "@/types/governance";
+
+export function getCompactErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error as Error & {
+      cause?: { code?: string; message?: string };
+    }).cause;
+
+    const causeCode =
+      cause && typeof cause.code === "string" ? cause.code : null;
+    const causeMessage =
+      cause && typeof cause.message === "string" ? cause.message : null;
+
+    return [
+      error.name || "Error",
+      causeCode,
+      causeMessage || error.message,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+  }
+
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+
+    return [
+      typeof record.code === "string" ? record.code : null,
+      typeof record.message === "string" ? record.message : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+  }
+
+  return String(error);
+}
+
+export function isRecoverableExternalError(error: unknown): boolean {
+  const message = getCompactErrorMessage(error).toLowerCase();
+
+  return [
+    "apiconnectionerror",
+    "apiconnectiontimeouterror",
+    "request timed out",
+    "eai_again",
+    "etimedout",
+    "und_err_connect_timeout",
+    "fetch failed",
+    "connection error",
+  ].some((token) => message.includes(token));
+}
+
+export async function isGovernanceConversationAvailable(params: {
+  supabase: any;
+  conversationId: string;
+  organizationId: string;
+}): Promise<boolean | null> {
+  const { data, error } = await params.supabase
+    .from("governance_conversations")
+    .select("id")
+    .eq("id", params.conversationId)
+    .eq("organization_id", params.organizationId)
+    .eq("status", "active")
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(
+      `[governance/chat] Não foi possível confirmar a conversa antes de persistir: ${getCompactErrorMessage(error)}`,
+    );
+    return null;
+  }
+
+  return Boolean(data);
+}
+
+
+export function createGovernanceConversationAvailabilityChecker(params: {
+  supabase: any;
+  conversationId: string;
+  organizationId: string;
+}) {
+  return () => isGovernanceConversationAvailable(params);
+}
+
+export function buildTransientAssistantMessage(params: {
+  organizationId: string;
+  conversationId: string;
+  content: string;
+  responseMode: GovernanceResponseMode;
+  streaming: boolean;
+}): GovernanceMessage {
+  return {
+    id: `unsaved-${randomUUID()}`,
+    organization_id: params.organizationId,
+    conversation_id: params.conversationId,
+    user_id: null,
+    role: "assistant",
+    content: params.content,
+    metadata: {
+      source: "openai",
+      product_tier: "governance",
+      response_mode: params.responseMode,
+      streaming: params.streaming,
+      persistence_skipped: "conversation_removed_during_generation",
+    },
+    created_at: new Date().toISOString(),
+  };
+}
+
+export function createWritableSupabaseRouteClient() {
+  const cookieStore = cookies();
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(name: string, value: string, options: any) {
+        cookieStore.set({ name, value, ...options });
+      },
+      remove(name: string, options: any) {
+        cookieStore.set({ name, value: "", ...options });
+      },
+    },
+  });
+}
+
+export function createServiceRoleSupabaseClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    return null;
+  }
+
+  return createSupabaseClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}

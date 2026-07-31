@@ -1,0 +1,4 @@
+export const GOVERNANCE_CORE_VERSION = "15.12";
+export const GOVERNANCE_PIPELINE_VERSION =
+  `governance-v${GOVERNANCE_CORE_VERSION}-canonical-transient-metadata`;
+export const GOVERNANCE_RESULT_SNAPSHOT_VERSION = GOVERNANCE_CORE_VERSION;

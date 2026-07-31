@@ -1,0 +1,146 @@
+import { randomUUID } from "node:crypto";
+
+export const GOVERNANCE_PIPELINE_VERSION =
+  "governance-v15.1-thematic-core";
+
+export type GovernanceRequestStageStatus =
+  | "success"
+  | "error"
+  | "skipped";
+
+export type GovernanceRequestStage = {
+  name: string;
+  status: GovernanceRequestStageStatus;
+  durationMs: number;
+  details?: Record<string, string | number | boolean | null>;
+};
+
+export type GovernanceRequestTelemetrySnapshot = {
+  requestId: string;
+  pipelineVersion: string;
+  startedAt: string;
+  totalDurationMs: number;
+  outcome: "processing" | "success" | "error" | "transient";
+  stages: GovernanceRequestStage[];
+};
+
+type StageDetails = Record<string, string | number | boolean | null>;
+
+function roundDuration(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function now(): number {
+  return performance.now();
+}
+
+export function createGovernanceRequestTelemetry() {
+  const requestId = randomUUID();
+  const startedAt = new Date().toISOString();
+  const startedAtMonotonic = now();
+  const stages: GovernanceRequestStage[] = [];
+
+  function record(
+    name: string,
+    status: GovernanceRequestStageStatus,
+    durationMs: number,
+    details?: StageDetails,
+  ) {
+    stages.push({
+      name,
+      status,
+      durationMs: roundDuration(durationMs),
+      ...(details && Object.keys(details).length > 0 ? { details } : {}),
+    });
+  }
+
+  async function measure<T>(
+    name: string,
+    operation: () => Promise<T>,
+    details?: (result: T) => StageDetails,
+  ): Promise<T> {
+    const stageStartedAt = now();
+
+    try {
+      const result = await operation();
+      record(
+        name,
+        "success",
+        now() - stageStartedAt,
+        details?.(result),
+      );
+      return result;
+    } catch (error) {
+      record(name, "error", now() - stageStartedAt, {
+        errorType:
+          error instanceof Error && error.name ? error.name : "UnknownError",
+      });
+      throw error;
+    }
+  }
+
+  function mark(
+    name: string,
+    status: GovernanceRequestStageStatus,
+    details?: StageDetails,
+  ) {
+    record(name, status, 0, details);
+  }
+
+  function recordDuration(
+    name: string,
+    status: GovernanceRequestStageStatus,
+    durationMs: number,
+    details?: StageDetails,
+  ) {
+    record(name, status, durationMs, details);
+  }
+
+  function snapshot(
+    outcome: GovernanceRequestTelemetrySnapshot["outcome"] = "processing",
+  ): GovernanceRequestTelemetrySnapshot {
+    return {
+      requestId,
+      pipelineVersion: GOVERNANCE_PIPELINE_VERSION,
+      startedAt,
+      totalDurationMs: roundDuration(now() - startedAtMonotonic),
+      outcome,
+      stages: stages.map((stage) => ({
+        ...stage,
+        ...(stage.details ? { details: { ...stage.details } } : {}),
+      })),
+    };
+  }
+
+  function log(
+    event: string,
+    outcome: GovernanceRequestTelemetrySnapshot["outcome"],
+    details?: StageDetails,
+  ) {
+    const current = snapshot(outcome);
+
+    console.info("[governance/chat][telemetry]", {
+      event,
+      requestId: current.requestId,
+      pipelineVersion: current.pipelineVersion,
+      totalDurationMs: current.totalDurationMs,
+      outcome: current.outcome,
+      stageCount: current.stages.length,
+      ...(details ?? {}),
+    });
+  }
+
+  return {
+    requestId,
+    pipelineVersion: GOVERNANCE_PIPELINE_VERSION,
+    measure,
+    mark,
+    recordDuration,
+    snapshot,
+    log,
+  };
+}
+
+export type GovernanceRequestTelemetry = ReturnType<
+  typeof createGovernanceRequestTelemetry
+>;

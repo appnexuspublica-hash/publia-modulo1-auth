@@ -1,0 +1,4 @@
+export const GOVERNANCE_CORE_VERSION = "15.17";
+export const GOVERNANCE_PIPELINE_VERSION =
+  `governance-v${GOVERNANCE_CORE_VERSION}-idempotency-before-external-work`;
+export const GOVERNANCE_RESULT_SNAPSHOT_VERSION = GOVERNANCE_CORE_VERSION;

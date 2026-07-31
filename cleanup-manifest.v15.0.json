@@ -1,0 +1,15 @@
+{
+  "version": "15.0",
+  "remove_before_extract": [
+    "src/lib/governance-v2"
+  ],
+  "active_core": "src/lib/governance-core",
+  "changed_files": [
+    "src/app/api/governance/chat/route.ts",
+    "src/app/governanca/chat/GovernanceChatClient.tsx",
+    "src/lib/governance/chat/request-observability.ts",
+    "src/lib/governance/chat/assistant-message-metadata.ts",
+    "package.json",
+    "scripts/validate-governance-v15.mjs"
+  ]
+}

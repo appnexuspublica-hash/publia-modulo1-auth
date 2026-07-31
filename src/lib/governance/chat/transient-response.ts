@@ -1,0 +1,64 @@
+import type {
+  GovernanceMessage,
+  GovernanceResponseMode,
+} from "@/types/governance";
+
+import { buildTransientAssistantMessage } from "@/lib/governance/chat/infrastructure";
+import type { GovernanceChatReference } from "@/lib/governance/chat/references";
+import type { SuggestedNextQuestion } from "@/lib/governance/chat/suggestions";
+
+export function buildGovernanceTransientResponsePayload(params: {
+  organizationId: string;
+  conversationId: string;
+  assistantText: string;
+  responseMode: GovernanceResponseMode;
+  streaming: boolean;
+  userMessage: GovernanceMessage;
+  conversationTitle: string;
+  suggestions: SuggestedNextQuestion[];
+  references: GovernanceChatReference[];
+}) {
+  return {
+    userMessage: params.userMessage,
+    assistantMessage: buildTransientAssistantMessage({
+      organizationId: params.organizationId,
+      conversationId: params.conversationId,
+      content: params.assistantText,
+      responseMode: params.responseMode,
+      streaming: params.streaming,
+      references: params.references,
+      evidenceStatus: "transient",
+    }),
+    conversationTitle: params.conversationTitle,
+    suggestions: params.suggestions,
+    persistenceSkipped: "conversation_removed_during_generation",
+  };
+}
+
+export function createGovernanceTransientResponsePayloadBuilder(params: {
+  organizationId: string;
+  conversationId: string;
+  responseMode: GovernanceResponseMode;
+  userMessage: GovernanceMessage;
+  conversationTitle: string;
+}) {
+  return function buildTransientResponsePayload(input: {
+    assistantText: string;
+    streaming: boolean;
+    suggestions: SuggestedNextQuestion[];
+    references: GovernanceChatReference[];
+  }) {
+    return buildGovernanceTransientResponsePayload({
+      organizationId: params.organizationId,
+      conversationId: params.conversationId,
+      assistantText: input.assistantText,
+      responseMode: params.responseMode,
+      streaming: input.streaming,
+      userMessage: params.userMessage,
+      conversationTitle: params.conversationTitle,
+      suggestions: input.suggestions,
+      references: input.references,
+    });
+  };
+}
+

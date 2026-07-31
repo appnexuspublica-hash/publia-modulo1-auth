@@ -1,0 +1,19 @@
+{
+  "version": "15.10",
+  "name": "unified-completion",
+  "base": "publia-modulo1-auth-atual(20).zip",
+  "scope": [
+    "single query plan shared by route and orchestrator",
+    "single response finalization policy for streaming and non-streaming",
+    "single suggestion policy for persisted and transient responses",
+    "canonical governance_result persistence and reload contract",
+    "centralized pipeline and snapshot version constants"
+  ],
+  "behavioral_change": true,
+  "behavioral_change_summary": "Official Gazette suggestions are suppressed consistently in every delivery path; all paths use the same finalization.",
+  "knownLimitations": [
+    "Full end-to-end validation still requires configured Supabase and OpenAI credentials.",
+    "The structural validator does not replace browser verification of streaming replacement events."
+  ],
+  "validation_command": "npm run validate:baseline"
+}

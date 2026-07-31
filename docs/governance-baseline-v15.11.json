@@ -1,0 +1,17 @@
+{
+  "version": "15.11",
+  "pipeline": "governance-v15.11-canonical-metadata",
+  "scope": [
+    "snapshot governance_result como fonte única de referências novas",
+    "Base legal separada de evidências",
+    "canais oficiais separados de evidências",
+    "compatibilidade de leitura para mensagens antigas",
+    "telemetria por contagens sem duplicar arrays"
+  ],
+  "knownLimitations": [
+    "mensagens antigas continuam dependendo dos campos legados já persistidos",
+    "o typecheck completo exige as dependências instaladas no projeto local"
+  ],
+  "validation_script": "scripts/validate-governance-baseline-v15.11.ts",
+  "expected_checks": 100
+}

@@ -1,0 +1,158 @@
+// src/lib/governance/chat/decision-policy.ts
+import type { GovernanceQuestionClassification } from "@/lib/governance/chat/question-classifier";
+import type { OfficialGazetteContextResult } from "@/lib/governance/chat/official-gazette-context";
+import type { GovernanceQueryAnalysis } from "@/lib/governance/knowledge-engine/analyzer";
+import type { GovernanceKnowledgeContext } from "@/lib/governance/knowledge-engine";
+import type {
+  GovernanceRecoveryProvider,
+  GovernanceRecoveryResult,
+} from "@/lib/governance/recovery/types";
+
+export type GovernanceDecisionPolicy = {
+  intent: GovernanceQuestionClassification["intent"];
+  useRecovery: boolean;
+  useWeb: boolean;
+  useMunicipalKnowledge: boolean;
+  useOfficialGazette: boolean;
+  recoveryProviders: GovernanceRecoveryProvider[];
+  reason: string;
+};
+
+export function decideGovernancePolicy(
+  classification: GovernanceQuestionClassification,
+  analysis: GovernanceQueryAnalysis
+): GovernanceDecisionPolicy {
+  if (classification.intent === "specific_document") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: false,
+      useMunicipalKnowledge: true,
+      useOfficialGazette: true,
+      recoveryProviders: ["official_gazette", "institutional", "legal"],
+      reason: "Documento específico identificado; priorizar bases internas e Diário Oficial.",
+    };
+  }
+
+  if (analysis.queryNature === "municipal_records") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: false,
+      useMunicipalKnowledge: true,
+      useOfficialGazette: true,
+      recoveryProviders: ["official_gazette", "institutional"],
+      reason: "Consulta sobre registros municipais; priorizar evidências internas da organização.",
+    };
+  }
+
+  if (analysis.queryNature === "institutional") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: false,
+      useMunicipalKnowledge: true,
+      useOfficialGazette: true,
+      recoveryProviders: ["institutional", "official_gazette"],
+      reason: "Consulta institucional; recuperar documentos da organização e atos relacionados.",
+    };
+  }
+
+  if (analysis.queryNature === "legal_general") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: true,
+      useMunicipalKnowledge: false,
+      useOfficialGazette: false,
+      recoveryProviders: ["legal"],
+      reason:
+        "Consulta jurídica geral; usar catálogo legal e validação oficial sem presumir norma municipal.",
+    };
+  }
+
+  if (analysis.topic !== "generic") {
+    return {
+      intent: classification.intent,
+      useRecovery: true,
+      useWeb: true,
+      useMunicipalKnowledge: true,
+      useOfficialGazette: true,
+      recoveryProviders: ["institutional", "official_gazette", "legal"],
+      reason:
+        "Tema de Governança reconhecido; combinar recuperação interna com validação oficial quando necessária.",
+    };
+  }
+
+  return {
+    intent: classification.intent,
+    useRecovery: false,
+    useWeb: true,
+    useMunicipalKnowledge: false,
+    useOfficialGazette: false,
+    recoveryProviders: [],
+    reason: "Pergunta geral sem dependência identificada de documento municipal específico.",
+  };
+}
+
+export function buildSkippedGovernanceRecoveryResult(question: string): GovernanceRecoveryResult {
+  return {
+    intent: {
+      topic: "general",
+      queryNature: "general",
+      normalizedQuestion: question.trim().toLowerCase(),
+      allowedProviders: [],
+      allowWeb: false,
+    },
+    evidence: [],
+    contextText: "",
+    diagnostics: {
+      queriedProviders: [],
+      providerResults: [],
+      successfulProviders: [],
+      emptyProviders: [],
+      failedProviders: [],
+      degraded: false,
+      returnedByProvider: {},
+      selectedByProvider: {},
+      totalCandidates: 0,
+      selectedEvidence: 0,
+    },
+    responsePolicy: {
+      mode: "general",
+      municipalEvidenceSufficient: false,
+      comparisonReady: false,
+      externalSourcesAllowed: true,
+      degraded: false,
+      unavailableProviders: [],
+      reason: "Recuperação documental dispensada para pergunta geral.",
+    },
+  };
+}
+
+export function buildEmptyGovernanceKnowledgeContext(): GovernanceKnowledgeContext {
+  return {
+    contextText: "",
+    items: [],
+    sources: {
+      institutional: [],
+      officialGazette: [],
+      officialSources: [],
+    },
+    diagnostics: {
+      totalItems: 0,
+      selectedItems: 0,
+      minScore: 0,
+    },
+  };
+}
+
+export function buildEmptyOfficialGazetteContext(): OfficialGazetteContextResult {
+  return {
+    contextText: "",
+    chunksUsed: 0,
+    totalChunksRead: 0,
+    enabled: false,
+    referenceLinks: [],
+  };
+}

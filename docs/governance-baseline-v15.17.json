@@ -1,0 +1,19 @@
+{
+  "version": "15.17",
+  "pipeline": "governance-v15.17-idempotency-before-external-work",
+  "scope": [
+    "plano único por requisição",
+    "finalização unificada entre streaming e não streaming",
+    "snapshot canônico para mensagens persistidas e transitórias",
+    "envelope de resposta sem cópias paralelas de fontes e referências",
+    "persistência da chave idempotente antes de qualquer trabalho externo",
+    "somente a requisição vencedora pode pesquisar, recuperar evidências e gerar resposta",
+    "rechecagem transacional após conflito de unicidade",
+    "recuperação de resposta concluída após corrida concorrente"
+  ],
+  "knownLimitations": [
+    "o typecheck completo depende das dependências instaladas no projeto local",
+    "a suíte estrutural não substitui testes funcionais com Supabase e OpenAI ativos",
+    "requisições órfãs sem resposta permanecem em estado de processamento até uma política de expiração específica"
+  ]
+}

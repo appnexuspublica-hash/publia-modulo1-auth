@@ -1,0 +1,219 @@
+import type { ConversationRelation } from "@/lib/governance/chat/history";
+import type { GovernanceQuestionIntent } from "@/lib/governance/chat/question-classifier";
+import type { GovernanceResponseMode } from "@/types/governance";
+
+const DETAILED_REQUEST_PATTERN =
+  /\b(detalh(?:e|ado|adamente)|aprofund(?:e|ado|adamente)|completo|exaustiv[oa]|passo a passo|parecer|minuta|relat[oó]rio|an[aá]lise de risco)\b/i;
+
+const ENUMERATION_REQUEST_PATTERN =
+  /\b(quais|qual(?:is)?\s+(?:são|devem)|o que (?:deve|precisa) (?:conter|constar|incluir)|liste|enumere|itens|requisitos|informações|documentos|elementos|campos|pontos)\b/i;
+
+const EXPLICIT_BRIEF_REQUEST_PATTERN =
+  /\b(resuma|resumo|responda brevemente|seja breve|de forma curta|objetivamente|em poucas palavras)\b/i;
+
+const FORMAL_RESPONSE_MODES = new Set<GovernanceResponseMode>([
+  "legal_opinion",
+  "technical_opinion",
+  "draft",
+]);
+
+const OPERATIONAL_RESPONSE_MODES = new Set<GovernanceResponseMode>([
+  "checklist",
+  "attention_points",
+  "action_plan",
+  "comparison",
+  "manager_guidance",
+  "risk_analysis",
+]);
+
+export type GovernanceResponseLengthProfile =
+  | "formal"
+  | "detailed"
+  | "exact_fact"
+  | "follow_up"
+  | "summary"
+  | "operational"
+  | "enumeration"
+  | "general"
+  | "administrative";
+
+export type GovernanceResponseLengthPolicy = {
+  profile: GovernanceResponseLengthProfile;
+  maxOutputTokens: number;
+  instruction: string;
+};
+
+function isDetailedRequest(userText: string): boolean {
+  return DETAILED_REQUEST_PATTERN.test(userText);
+}
+
+function isEnumerationRequest(userText: string): boolean {
+  return ENUMERATION_REQUEST_PATTERN.test(userText);
+}
+
+function isExplicitBriefRequest(userText: string): boolean {
+  return EXPLICIT_BRIEF_REQUEST_PATTERN.test(userText);
+}
+
+export function resolveGovernanceResponseLengthPolicy(params: {
+  responseMode: GovernanceResponseMode;
+  intent: GovernanceQuestionIntent;
+  relation: ConversationRelation;
+  userText: string;
+}): GovernanceResponseLengthPolicy {
+  const { responseMode, intent, relation, userText } = params;
+
+  if (FORMAL_RESPONSE_MODES.has(responseMode)) {
+    return {
+      profile: "formal",
+      maxOutputTokens: 6000,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — DOCUMENTO FORMAL",
+        "Preserve todas as seções obrigatórias do modo selecionado.",
+        "Seja completo, mas elimine repetições, introduções genéricas e explicações duplicadas.",
+        "Cada seção deve conter apenas o necessário para fundamentar a conclusão e orientar a decisão.",
+        "Use o contexto como base de decisão; não reproduza integralmente todo o material recuperado.",
+      ].join("\n"),
+    };
+  }
+
+  if (isDetailedRequest(userText)) {
+    return {
+      profile: "detailed",
+      maxOutputTokens: 5000,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — DETALHAMENTO SOLICITADO",
+        "O usuário pediu aprofundamento ou documento completo.",
+        "Entregue conteúdo suficiente para cumprir o pedido, sem repetir a mesma orientação em seções diferentes.",
+        "Comece com uma síntese curta e depois desenvolva o conteúdo.",
+        "Use títulos apenas quando organizarem blocos realmente distintos.",
+        "Mesmo em resposta detalhada, consolide requisitos semelhantes e evite exemplos repetidos.",
+      ].join("\n"),
+    };
+  }
+
+  if (intent === "exact_fact") {
+    return {
+      profile: "exact_fact",
+      maxOutputTokens: 900,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — FATO OBJETIVO",
+        "Apresente a resposta principal na primeira frase.",
+        "Use normalmente de 60 a 180 palavras.",
+        "Use no máximo 3 parágrafos curtos ou 3 itens.",
+        "Não explique conceitos gerais, histórico ou procedimento de pesquisa salvo se isso for indispensável.",
+        "Não repita o mesmo dado no corpo e na conclusão.",
+        "Quando a fonte oficial já resolver o fato, responda com segurança proporcional e use a ressalva apenas para eventos posteriores possíveis.",
+      ].join("\n"),
+    };
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return {
+      profile: "follow_up",
+      maxOutputTokens: 1200,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — CONTINUIDADE",
+        "Responda somente ao novo ponto perguntado.",
+        "Não reexplique o tema anterior nem repita fundamentos já apresentados.",
+        "Use de 100 a 220 palavras, salvo se houver cálculo, tabela ou distinção normativa indispensável.",
+        "Conclua assim que o novo ponto estiver respondido.",
+      ].join("\n"),
+    };
+  }
+
+  if (responseMode === "summary" || isExplicitBriefRequest(userText)) {
+    return {
+      profile: "summary",
+      maxOutputTokens: 1500,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — RESUMO",
+        "Mantenha a resposta entre 150 e 350 palavras.",
+        "Use no máximo 5 pontos essenciais e uma conclusão prática curta.",
+        "Não desenvolva histórico, exemplos ou cautelas secundárias.",
+      ].join("\n"),
+    };
+  }
+
+  if (OPERATIONAL_RESPONSE_MODES.has(responseMode)) {
+    return {
+      profile: "operational",
+      maxOutputTokens: 2800,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — FORMATO OPERACIONAL",
+        "Seja escaneável e evite parágrafos extensos.",
+        "Use somente os itens necessários para decisão ou execução.",
+        "Não repita em prosa o conteúdo já apresentado em tabela ou lista.",
+        "Use no máximo 12 itens principais, salvo necessidade expressa do modo selecionado.",
+      ].join("\n"),
+    };
+  }
+
+  if (isEnumerationRequest(userText)) {
+    return {
+      profile: "enumeration",
+      maxOutputTokens: 2600,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — LISTA CONSOLIDADA",
+        "A pergunta pede quais informações, requisitos, documentos, elementos ou itens devem constar.",
+        "Responda com uma síntese inicial de até 3 frases e, depois, uma lista consolidada.",
+        "Use no máximo 15 grupos principais.",
+        "Cada grupo deve ter no máximo 2 frases curtas.",
+        "Não transforme cada grupo em subseção.",
+        "Não dê exemplo para todos os itens; use exemplos somente em pontos críticos.",
+        "Não repita a lista em um fechamento narrativo.",
+        "Inclua apenas uma cautela municipal ou jurídica final quando ela for indispensável.",
+      ].join("\n"),
+    };
+  }
+
+  if (intent === "general") {
+    return {
+      profile: "general",
+      maxOutputTokens: 2200,
+      instruction: [
+        "POLÍTICA DE EXTENSÃO — RESPOSTA GERAL",
+        "Comece com a resposta direta em 2 a 4 frases.",
+        "Desenvolva apenas os pontos necessários para compreensão.",
+        "Use de 250 a 450 palavras.",
+        "Use no máximo 4 blocos ou subtítulos curtos.",
+        "Não acrescente histórico normativo, riscos, providências ou recomendações que não sejam necessários para responder.",
+        "Use o contexto para decidir e fundamentar, mas não tente reproduzir tudo o que foi recuperado.",
+      ].join("\n"),
+    };
+  }
+
+  return {
+    profile: "administrative",
+    maxOutputTokens: 3200,
+    instruction: [
+      "POLÍTICA DE EXTENSÃO — RESPOSTA ADMINISTRATIVA",
+      "Comece com uma síntese objetiva em até 4 linhas.",
+      "Depois apresente somente os fundamentos e providências indispensáveis.",
+      "Use de 400 a 650 palavras.",
+      "Use no máximo 4 seções antes de Base legal e Fontes.",
+      "Não repita a mesma conclusão na introdução, nos tópicos e no fechamento.",
+      "Não transforme cada evidência recuperada em uma seção; consolide evidências convergentes.",
+      "Preserve ressalvas, fontes e distinções entre regra municipal, referência federal e ponto pendente de validação.",
+      "Use o contexto como base de decisão, mas inclua somente o necessário para responder ao pedido.",
+    ].join("\n"),
+  };
+}
+
+export function buildGovernanceResponseLengthInstruction(params: {
+  responseMode: GovernanceResponseMode;
+  intent: GovernanceQuestionIntent;
+  relation: ConversationRelation;
+  userText: string;
+}): string {
+  return resolveGovernanceResponseLengthPolicy(params).instruction;
+}
+
+export function resolveGovernanceMaxOutputTokens(params: {
+  responseMode: GovernanceResponseMode;
+  intent: GovernanceQuestionIntent;
+  relation: ConversationRelation;
+  userText: string;
+}): number {
+  return resolveGovernanceResponseLengthPolicy(params).maxOutputTokens;
+}

@@ -1,0 +1,54 @@
+type UnifiedResponsePolicy = {
+  mode: string;
+};
+
+export function buildUnifiedResponsePolicyInstruction(
+  policy: UnifiedResponsePolicy,
+): string {
+  if (policy.mode === "direct_document") {
+    return [
+      "POLÍTICA FINAL DE RESPOSTA — DOCUMENTO MUNICIPAL EXATO",
+      "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
+      "Responda diretamente ao que foi perguntado, usando apenas a evidência municipal recuperada.",
+      "Máximo de 140 palavras e no máximo 3 parágrafos curtos.",
+      "Não use títulos numerados, Fundamentação, Entendimento atual, Aplicação ao Município ou Cuidados.",
+      "Não acrescente práticas administrativas, interpretações gerais ou recomendações que não constem do documento.",
+      "Informe edição e data somente quando esses metadados estiverem no contexto.",
+    ].join("\n");
+  }
+
+  if (policy.mode === "document_summary") {
+    return [
+      "POLÍTICA FINAL DE RESPOSTA — DOCUMENTO INSTITUCIONAL",
+      "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
+      "Responda somente com base nos trechos do documento municipal recuperado.",
+      "Máximo de 280 palavras. Use texto direto e, apenas se necessário, uma lista curta.",
+      "Não use a estrutura fixa de cinco seções.",
+      "Não cite códigos tributários, leis ou portais de outros municípios.",
+      "Não complete lacunas com conhecimento geral. Diga claramente quando o trecho recuperado não for suficiente.",
+    ].join("\n");
+  }
+
+  if (policy.mode === "comparison") {
+    return [
+      "POLÍTICA FINAL DE RESPOSTA — COMPARAÇÃO DOCUMENTAL",
+      "Compare apenas as duas evidências municipais presentes no contexto.",
+      "Identifique a regra institucional, o ato do Diário e a relação concreta entre eles.",
+      "Máximo de 350 palavras. Não transforme a comparação em parecer genérico.",
+      "Não use fontes externas nem documentos de outros municípios.",
+    ].join("\n");
+  }
+
+  if (policy.mode === "insufficient_evidence") {
+    return [
+      "POLÍTICA FINAL DE RESPOSTA — EVIDÊNCIA INSUFICIENTE",
+      "Esta política substitui qualquer formato consultivo ou modo Padrão definido anteriormente.",
+      "Não produza comparação hipotética, fundamentação geral, parecer ou roteiro de análise.",
+      "Explique em no máximo 90 palavras que não foi localizado um segundo documento municipal tematicamente compatível.",
+      "Informe objetivamente qual evidência foi encontrada e qual evidência faltou.",
+      "Não use títulos numerados e não ofereça conteúdo especulativo.",
+    ].join("\n");
+  }
+
+  return "";
+}

@@ -1,0 +1,262 @@
+import type { GovernanceChatReference } from "@/lib/governance/chat/references";
+
+function normalizeOfficialLegalResolverText(value: string) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+type OfficialLegalResolverEntry = {
+  title: string;
+  url: string;
+  triggers: string[];
+};
+
+const OFFICIAL_LEGAL_RESOLVER_ENTRIES: OfficialLegalResolverEntry[] = [
+  {
+    title: "Lei Estadual nº 4.338/1961 — Criação do Município de Santana do Itararé",
+    url: "https://www.legislacao.pr.gov.br/legislacao/pesquisarAto.do?action=exibir&codAto=12935&indice=1&totalRegistros=1",
+    triggers: [
+      "lei 4.338/1961",
+      "lei 4338/1961",
+      "lei estadual 4.338",
+      "lei estadual 4338",
+      "cria o municipio",
+      "criou o municipio",
+      "criacao do municipio",
+      "criação do município",
+      "santana do itarare",
+      "santana do itararé",
+    ],
+  },
+  {
+    title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+    triggers: [
+      "14.133",
+      "14133",
+      "lei de licitacoes",
+      "nova lei de licitacoes",
+      "licitacao",
+      "licitacoes",
+      "contratacao direta",
+      "dispensa",
+      "inexigibilidade",
+      "pregao",
+      "art. 75",
+      "artigo 75",
+      "art. 74",
+      "artigo 74",
+    ],
+  },
+  {
+    title: "Decreto Federal nº 12.807/2025 — Atualização dos valores da Lei nº 14.133/2021",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/decreto/d12807.htm",
+    triggers: [
+      "12.807/2025",
+      "12807/2025",
+      "decreto federal 12.807",
+      "decreto 12.807",
+      "130.984,20",
+      "65.492,11",
+      "valores atualizados",
+      "atualizacao dos valores",
+      "atualização dos valores",
+      "limites de dispensa",
+    ],
+  },
+  {
+    title: "Instrução Normativa Seges/ME nº 65/2021 — Pesquisa de preços",
+    url: "https://www.gov.br/compras/pt-br/acesso-a-informacao/legislacao/instrucoes-normativas/instrucao-normativa-seges-me-no-65-de-7-de-julho-de-2021",
+    triggers: [
+      "in 65/2021",
+      "in seges 65/2021",
+      "instrucao normativa seges/me 65/2021",
+      "instrução normativa seges/me 65/2021",
+      "pesquisa de precos",
+      "pesquisa de preços",
+      "cesta de precos",
+      "cesta de preços",
+    ],
+  },
+  {
+    title: "Constituição Federal de 1988",
+    url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+    triggers: [
+      "constituicao",
+      "constituicao federal",
+      "cf/88",
+      "art. 37",
+      "artigo 37",
+      "administracao publica",
+      "principios da administracao",
+      "concurso publico",
+    ],
+  },
+  {
+    title: "Lei Complementar nº 101/2000 — Lei de Responsabilidade Fiscal",
+    url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
+    triggers: [
+      "lrf",
+      "lei de responsabilidade fiscal",
+      "responsabilidade fiscal",
+      "despesa com pessoal",
+      "limite de pessoal",
+      "endividamento",
+      "renuncia de receita",
+      "rreo",
+      "rgf",
+    ],
+  },
+  {
+    title: "Lei nº 12.527/2011 — Lei de Acesso à Informação",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm",
+    triggers: [
+      "lai",
+      "lei de acesso a informacao",
+      "acesso a informacao",
+      "transparencia",
+      "informacao publica",
+      "pedido de informacao",
+    ],
+  },
+  {
+    title: "Lei nº 13.709/2018 — Lei Geral de Proteção de Dados Pessoais",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
+    triggers: [
+      "lgpd",
+      "lei geral de protecao de dados",
+      "protecao de dados",
+      "dados pessoais",
+      "tratamento de dados",
+    ],
+  },
+  {
+    title: "Lei nº 13.460/2017 — Participação, Proteção e Defesa dos Usuários de Serviços Públicos",
+    url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2017/lei/l13460.htm",
+    triggers: [
+      "ouvidoria",
+      "carta de servicos",
+      "servicos publicos",
+      "usuario de servico publico",
+      "manifestacao de usuario",
+    ],
+  },
+];
+
+export function buildOfficialLegalReferencesForGovernance(params: {
+  question: string;
+  answer: string;
+  forceWebFirst: boolean;
+}): GovernanceChatReference[] {
+  const questionText = normalizeOfficialLegalResolverText(params.question);
+  const answerText = normalizeOfficialLegalResolverText(params.answer);
+  const combinedText = `${questionText}\n${answerText}`;
+
+  const questionHasAny = (terms: string[]) =>
+    terms.some((term) => questionText.includes(normalizeOfficialLegalResolverText(term)));
+  const answerHasAny = (terms: string[]) =>
+    terms.some((term) => answerText.includes(normalizeOfficialLegalResolverText(term)));
+  const combinedHasAny = (terms: string[]) =>
+    terms.some((term) => combinedText.includes(normalizeOfficialLegalResolverText(term)));
+
+  const shouldResolve =
+    params.forceWebFirst ||
+    /\b(lei|decreto|art\.|artigo|inciso|paragrafo|licitacao|contratacao|dispensa|inexigibilidade|lrf|lai|lgpd|constituicao)\b/i.test(
+      combinedText,
+    );
+
+  if (!shouldResolve) {
+    return [];
+  }
+
+  return OFFICIAL_LEGAL_RESOLVER_ENTRIES.filter((entry) => {
+    const title = normalizeOfficialLegalResolverText(entry.title);
+
+    /*
+      v9.4 — evita Base Legal contaminada por menções incidentais.
+      Ex.: "Departamento Municipal de Licitação e Contratos" em resposta sobre
+      estrutura administrativa não pode puxar automaticamente a Lei 14.133/2021.
+    */
+    if (title.includes("4 338") || title.includes("criacao do municipio")) {
+      const asksCreationLaw =
+        questionHasAny([
+          "qual e a lei que cria",
+          "qual lei cria",
+          "lei que criou",
+          "lei de criacao",
+          "lei de criação",
+          "criacao do municipio",
+          "criação do município",
+        ]) &&
+        questionHasAny(["municipio", "santana do itarare"]);
+
+      return (
+        asksCreationLaw ||
+        answerHasAny([
+          "lei estadual n 4.338/1961",
+          "lei estadual 4.338/1961",
+          "lei 4.338/1961",
+        ])
+      );
+    }
+
+    if (title.includes("14 133") || title.includes("licitacoes")) {
+      return (
+        questionHasAny([
+          "14.133",
+          "14133",
+          "licitacao",
+          "licitacoes",
+          "dispensa",
+          "inexigibilidade",
+          "pregao",
+          "contratacao direta",
+          "lei de licitacoes",
+          "nova lei de licitacoes",
+        ]) ||
+        answerHasAny([
+          "lei n 14.133",
+          "lei 14.133",
+          "14.133/2021",
+          "lei de licitacoes",
+          "nova lei de licitacoes",
+          "contratacao direta",
+          "dispensa de licitacao",
+          "inexigibilidade",
+        ])
+      );
+    }
+
+    if (title.includes("12 807")) {
+      return (
+        questionHasAny(["12.807", "12807", "valores de dispensa", "limites de dispensa"]) ||
+        answerHasAny(["decreto federal n 12.807", "decreto 12.807", "12.807/2025", "130.984,20", "65.492,11"])
+      );
+    }
+
+    if (title.includes("constituicao federal")) {
+      return combinedHasAny([
+        "constituicao federal",
+        "cf/88",
+        "carta magna",
+        "art. 37",
+        "artigo 37",
+        "art. 169",
+        "artigo 169",
+      ]);
+    }
+
+    return entry.triggers.some((trigger) =>
+      combinedText.includes(normalizeOfficialLegalResolverText(trigger)),
+    );
+  })
+    .slice(0, 6)
+    .map((entry) => ({
+      title: entry.title,
+      url: entry.url,
+      kind: "legal" as const,
+    }));
+}
+

@@ -2706,43 +2706,14 @@ export default function StrategicChatPageClient({
     });
   }
 
-  const renderStrategicAttachmentButton = () => (
-    <>
-      <button
-        type="button"
-        onClick={handlePdfButtonClick}
-        disabled={isBlocked || accessLoading || isUploadingPdf}
-        className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
-          isBlocked || accessLoading || isUploadingPdf
-            ? "cursor-not-allowed border border-[#dedede] bg-white text-[#5A5A5A] opacity-50"
-            : "border border-[#dedede] bg-white text-[#0D2B4D] transition hover:border-[#14933D] hover:text-[#14933D]"
-        }`}
-        aria-label="Anexar PDF"
-        title="Anexar PDF"
-      >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          className="h-[18px] w-[18px]"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-        <span className="sr-only">Anexar PDF</span>
-      </button>
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="application/pdf"
-        className="hidden"
-        onChange={handlePdfChange}
-      />
-    </>
+  const renderStrategicAttachmentInput = () => (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept="application/pdf"
+      className="hidden"
+      onChange={handlePdfChange}
+    />
   );
 
   const toastStyles = useMemo(() => {
@@ -2789,6 +2760,7 @@ export default function StrategicChatPageClient({
     uploadTextStyle?: CSSProperties;
     maxLabel?: number;
     attachmentButtonIcon?: boolean;
+    hideAttachmentButton?: boolean;
   }) => {
     const hint = getPdfHint(attachedPdf);
     const showHint =
@@ -2831,6 +2803,7 @@ export default function StrategicChatPageClient({
         )}
 
         <div className="mb-2 flex items-center gap-2">
+          {!options.hideAttachmentButton && (
           <button
             type="button"
             onClick={handlePdfButtonClick}
@@ -2870,6 +2843,7 @@ export default function StrategicChatPageClient({
               "ANEXAR PDF"
             )}
           </button>
+          )}
 
           <input
             ref={fileInputRef}
@@ -3154,6 +3128,7 @@ export default function StrategicChatPageClient({
                   buttonDisabledClassName:
                     "cursor-not-allowed border border-[#dedede] bg-white text-[#5A5A5A] opacity-50",
                   attachmentButtonIcon: true,
+                  hideAttachmentButton: true,
                   quickActionsClassName: strategicButtonClassName,
                   quickActionsDisabledClassName: strategicDisabledButtonClassName,
                   itemActiveClassName: strategicChipClassName,
@@ -3221,38 +3196,33 @@ export default function StrategicChatPageClient({
             )}
 
             {isStrategic && !attachedPdfs.length ? (
-              <div className="flex items-start gap-3">
-                <div className="pt-[9px]">
-                  {renderStrategicAttachmentButton()}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <ChatInput
-                    onSend={handleSend}
-                    isSending={isSending}
-                    onStop={handleStop}
-                    disabled={isBlocked || accessLoading || isPdfBlockingSend}
-                    responseMode={responseMode}
-                    onResponseModeChange={setResponseMode}
-                    showResponseModes={showResponseModes}
-                    availableResponseModes={strategicResponseModes}
-                    isStrategic={isStrategic}
-                    inputValue={draftMessage}
-                    onInputValueChange={setDraftMessage}
-                    externalTextareaRef={chatInputTextareaRef}
-                    helperText={
-                      typeof access?.capabilities?.maxPdfsPerConversation ===
-                      "number"
-                        ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
-                            access.capabilities.maxPdfsPerConversation === 1
-                              ? ""
-                              : "s"
-                          }`
-                        : undefined
-                    }
-                  />
-                </div>
-              </div>
+              <>
+                {renderStrategicAttachmentInput()}
+                <ChatInput
+                  onSend={handleSend}
+                  isSending={isSending}
+                  onStop={handleStop}
+                  disabled={isBlocked || accessLoading || isPdfBlockingSend}
+                  responseMode={responseMode}
+                  onResponseModeChange={setResponseMode}
+                  showResponseModes={showResponseModes}
+                  availableResponseModes={strategicResponseModes}
+                  isStrategic={isStrategic}
+                  inputValue={draftMessage}
+                  onInputValueChange={setDraftMessage}
+                  externalTextareaRef={chatInputTextareaRef}
+                  onAttachPdf={handlePdfButtonClick}
+                  attachmentDisabled={isBlocked || accessLoading || isUploadingPdf}
+                  helperText={
+                    typeof access?.capabilities?.maxPdfsPerConversation ===
+                    "number"
+                      ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
+                          access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
+                        }`
+                      : undefined
+                  }
+                />
+              </>
             ) : (
               <ChatInput
                 onSend={handleSend}
@@ -3267,6 +3237,12 @@ export default function StrategicChatPageClient({
                 inputValue={draftMessage}
                 onInputValueChange={setDraftMessage}
                 externalTextareaRef={chatInputTextareaRef}
+                onAttachPdf={isStrategic ? handlePdfButtonClick : undefined}
+                attachmentDisabled={
+                  isStrategic
+                    ? isBlocked || accessLoading || isUploadingPdf
+                    : false
+                }
                 helperText={
                   !isStrategic &&
                   !attachedPdfs.length &&

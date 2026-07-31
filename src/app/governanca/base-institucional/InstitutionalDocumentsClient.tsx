@@ -1,7 +1,7 @@
 // src/app/governanca/base-institucional/InstitutionalDocumentsClient.tsx
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Archive,
   CheckCircle2,
@@ -21,6 +21,7 @@ import type { GovernanceInstitutionalDocument } from "@/types/governance";
 
 type InstitutionalDocumentsClientProps = {
   initialDocuments: GovernanceInstitutionalDocument[];
+  selectedDocumentId?: string | null;
 };
 
 type Feedback = {
@@ -192,6 +193,7 @@ function normalizeDocumentForEdit(
 
 export default function InstitutionalDocumentsClient({
   initialDocuments,
+  selectedDocumentId = null,
 }: InstitutionalDocumentsClientProps) {
   const [documents, setDocuments] = useState(initialDocuments);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -212,6 +214,20 @@ export default function InstitutionalDocumentsClient({
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [documents],
   );
+
+  useEffect(() => {
+    if (!selectedDocumentId) return;
+
+    const element = document.getElementById(
+      `institutional-document-${selectedDocumentId}`,
+    );
+
+    if (!element) return;
+
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    element.focus({ preventScroll: true });
+  }, [selectedDocumentId]);
+
 
   function updateDocumentInState(document: GovernanceInstitutionalDocument) {
     setDocuments((current) =>
@@ -651,12 +667,16 @@ export default function InstitutionalDocumentsClient({
 
               return (
                 <article
+                  id={`institutional-document-${document.id}`}
                   key={document.id}
+                  tabIndex={-1}
                   className={[
-                    "rounded-3xl border p-5",
-                    isArchived
-                      ? "border-slate-200 bg-slate-100 opacity-80"
-                      : "border-[#dedede] bg-[#f8f8f8]",
+                    "rounded-3xl border p-5 outline-none transition",
+                    selectedDocumentId === document.id
+                      ? "border-[#0f3a4a] bg-[#eef5f7] ring-2 ring-[#0f3a4a]/20"
+                      : isArchived
+                        ? "border-slate-200 bg-slate-100 opacity-80"
+                        : "border-[#dedede] bg-[#f8f8f8]",
                   ].join(" ")}
                 >
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">

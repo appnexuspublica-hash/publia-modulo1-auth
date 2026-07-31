@@ -223,7 +223,7 @@ function buildResearchChecklist(
 
   if (
     topic === "bidding" &&
-    /\b(dispensa|sem licitar|sem licitacao|100 mil|50 mil|artigo 75|art\.? 75)\b/.test(
+    /\b(dispensa|sem licitar|sem licitacao|fracionamento|dividir a compra|limite de dispensa|100 mil|50 mil|artigo 75|art\.? 75)\b/.test(
       text,
     )
   ) {

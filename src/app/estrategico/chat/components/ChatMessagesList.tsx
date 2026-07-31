@@ -940,6 +940,7 @@ export function ChatMessagesList({
                       variant === "chat" && isStrategic
                         ? {
                             backgroundColor: chatTheme.colors.bubbleUser,
+                            border: "1px solid rgba(13,43,77,0.34)",
                             color: chatTheme.colors.text,
                           }
                         : undefined

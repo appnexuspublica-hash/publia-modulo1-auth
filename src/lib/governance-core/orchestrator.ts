@@ -1,0 +1,333 @@
+import { normalizeRecoveryText } from "@/lib/governance/recovery/normalize";
+import type {
+  GovernanceChatReference,
+  GovernanceChatSource,
+  GovernanceChatSources,
+} from "@/lib/governance/chat/references";
+import type {
+  GovernanceRecoveryEvidence,
+  GovernanceRecoveryProvider,
+  GovernanceRecoveryResult,
+} from "@/lib/governance/recovery/types";
+import { buildGovernanceV2QueryPlan } from "./query-plan";
+import { recoverInstitutionalV2 } from "./providers/institutional";
+import { recoverOfficialGazetteV2 } from "./providers/official-gazette";
+import { recoverOfficialSourcesV2 } from "./providers/official-sources";
+import { recoverLegalV2 } from "./providers/legal";
+import type {
+  GovernanceV2Evidence,
+  GovernanceV2Provider,
+  GovernanceV2Result,
+} from "./types";
+
+function buildContext(evidence: GovernanceV2Evidence[], maxChars: number) {
+  let used = 0;
+  const parts: string[] = [];
+
+  for (const [index, item] of evidence.entries()) {
+    const block = [
+      `[E${index + 1}]`,
+      `Tipo: ${item.provider}`,
+      `Título: ${item.title}`,
+      item.metadata.publication_date ? `Data: ${item.metadata.publication_date}` : "",
+      item.metadata.edition_number ? `Edição: ${item.metadata.edition_number}` : "",
+      item.metadata.page_number ? `Página: ${item.metadata.page_number}` : "",
+      item.url ? `URL: ${item.url}` : "",
+      `Conteúdo: ${item.excerpt}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    if (used + block.length > maxChars) break;
+    parts.push(block);
+    used += block.length;
+  }
+
+  if (!parts.length) {
+    return [
+      "PIPELINE DE EVIDÊNCIAS V2",
+      "Nenhuma evidência factual pertinente foi localizada.",
+      "Não use documentos descartados, não invente fatos e não afirme inexistência absoluta.",
+      "Quando houver locais oficiais de consulta no contexto, apresente-os apenas como caminhos de verificação.",
+    ].join("\n");
+  }
+
+  return [
+    "PIPELINE DE EVIDÊNCIAS V2",
+    "Use somente as evidências abaixo.",
+    "Não crie fontes novas e não trate locais de consulta como prova factual.",
+    ...parts,
+  ].join("\n\n---\n\n");
+}
+
+function sourceIdentity(title: string, url: string | null) {
+  const normalizedTitle = normalizeRecoveryText(title)
+    .replace(/\s+parte\s+\d+$/g, "")
+    .replace(/portal da transparencia|portal transparencia/g, "portal transparencia")
+    .replace(/diario oficial do municipio|diario oficial/g, "diario oficial municipio");
+
+  let normalizedUrl = String(url ?? "").trim();
+  try {
+    const parsed = new URL(normalizedUrl);
+    parsed.search = "";
+    parsed.hash = "";
+    normalizedUrl = `${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/$/, "")}`;
+  } catch {
+    // Mantém URL original quando não for uma URL absoluta.
+  }
+
+  return `${normalizedTitle}::${normalizedUrl}`;
+}
+
+function toSources(evidence: GovernanceV2Evidence[]): {
+  sources: GovernanceChatSources;
+  references: GovernanceChatReference[];
+} {
+  const sources: GovernanceChatSources = {
+    institutional: [],
+    officialGazette: [],
+    officialSources: [],
+  };
+  const references: GovernanceChatReference[] = [];
+  const seen = new Set<string>();
+
+  function add(
+    source: GovernanceChatSource,
+    bucket: keyof Pick<GovernanceChatSources, "institutional" | "officialGazette" | "officialSources">,
+    kind: GovernanceChatReference["kind"],
+  ) {
+    const key = `${kind}:${sourceIdentity(source.title, source.url)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    sources[bucket].push(source);
+    references.push({
+      title: source.title,
+      url: source.url,
+      kind,
+      supportText: source.supportText ?? null,
+    });
+  }
+
+  for (const item of evidence) {
+    const source: GovernanceChatSource = {
+      id: item.evidenceId,
+      title: item.title,
+      url: item.url,
+      type: item.provider,
+      supportText: item.excerpt,
+    };
+
+    if (item.provider === "institutional") {
+      add(source, "institutional", "institutional");
+      continue;
+    }
+
+    if (item.provider === "official_sources") {
+      add(source, "officialSources", "consultation");
+      continue;
+    }
+
+    if (item.provider === "legal") {
+      const key = `legal:${sourceIdentity(item.title, item.url)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        references.push({
+          title: item.title,
+          url: item.url,
+          kind: "legal",
+          supportText: item.excerpt,
+        });
+      }
+      continue;
+    }
+
+    if (item.provider === "official_gazette") {
+      add(source, "officialGazette", "official");
+      const documentTitle = String(item.metadata.document_title ?? "").trim();
+      const documentUrl = String(item.metadata.document_url ?? item.url ?? "").trim() || null;
+      if (documentTitle) {
+        add(
+          {
+            id: `${item.evidenceId}:document`,
+            title: documentTitle,
+            url: documentUrl,
+            type: "official_gazette_document",
+            supportText: "Documento oficial que contém o ato citado.",
+          },
+          "officialGazette",
+          "official",
+        );
+      }
+    }
+  }
+
+  return { sources, references };
+}
+
+function selectEvidence(
+  allEvidence: GovernanceV2Evidence[],
+  plan: ReturnType<typeof buildGovernanceV2QueryPlan>,
+) {
+  const factual = allEvidence
+    .filter((item) => item.factual && item.provider !== "legal")
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || b.score - a.score);
+  const legal = allEvidence
+    .filter((item) => item.provider === "legal")
+    .sort((a, b) => b.score - a.score);
+  const directory = allEvidence
+    .filter((item) => item.provider === "official_sources")
+    .sort((a, b) => b.score - a.score);
+
+  if (plan.intent === "general_legal") return legal.slice(0, 4);
+  if (plan.intent === "official_directory") return directory.slice(0, 4);
+
+  const requiredFactualSatisfied = plan.requiredProviders
+    .filter((provider) => provider !== "legal" && provider !== "official_sources")
+    .every((provider) => factual.some((item) => item.provider === provider));
+
+  const selectedFactual = factual.slice(0, plan.intent === "comparison" ? 6 : 4);
+  const selectedLegal = legal.slice(0, 3);
+
+  if (!requiredFactualSatisfied) {
+    return [...selectedFactual, ...selectedLegal, ...directory.slice(0, plan.intent === "financial_fact" ? 2 : 4)];
+  }
+
+  return [...selectedFactual, ...selectedLegal];
+}
+
+export async function orchestrateGovernanceV2(params: {
+  client: any;
+  organizationId: string;
+  question: string;
+  maxContextChars?: number;
+  queryPlan?: ReturnType<typeof buildGovernanceV2QueryPlan>;
+}): Promise<GovernanceV2Result> {
+  const plan = params.queryPlan ?? buildGovernanceV2QueryPlan(params.question);
+  const providers = Array.from(
+    new Set([...plan.requiredProviders, ...plan.optionalProviders]),
+  );
+  const evidence: GovernanceV2Evidence[] = [];
+  const statuses: Record<string, string> = {};
+
+  for (const provider of providers) {
+    try {
+      let rows: GovernanceV2Evidence[] = [];
+      if (provider === "institutional") {
+        rows = await recoverInstitutionalV2({ ...params, plan });
+      }
+      if (provider === "official_gazette") {
+        rows = await recoverOfficialGazetteV2({ ...params, plan });
+      }
+      if (provider === "official_sources") {
+        rows = await recoverOfficialSourcesV2({
+          client: params.client,
+          organizationId: params.organizationId,
+          plan,
+        });
+      }
+      if (provider === "legal") rows = await recoverLegalV2(params.question, plan);
+
+      evidence.push(...rows);
+      statuses[provider] = rows.length ? "success" : "empty";
+    } catch (error) {
+      statuses[provider] = "error";
+      console.error(`[governance-core] provider ${provider}:`, error);
+    }
+  }
+
+  const selected = selectEvidence(evidence, plan);
+  const requiredSatisfied = plan.requiredProviders.every((provider) =>
+    selected.some((item) => item.provider === provider),
+  );
+  const responseMode =
+    selected.length === 0 || !requiredSatisfied
+      ? "insufficient_evidence"
+      : plan.intent === "comparison"
+        ? "comparison"
+        : plan.intent === "general_legal"
+          ? "legal_analysis"
+          : "direct_document";
+
+  const sourceResult = toSources(selected);
+  const recoveryEvidence: GovernanceRecoveryEvidence[] = selected.map((item) => ({
+    id: item.evidenceId,
+    provider: (item.provider === "official_sources" ? "web" : item.provider) as GovernanceRecoveryProvider,
+    title: item.title,
+    content: item.excerpt,
+    normalizedContent: normalizeRecoveryText(item.excerpt),
+    score: item.score,
+    confidence: Math.max(0, Math.min(1, item.score / 100)),
+    sourceUrl: item.url,
+    documentId: item.documentId,
+    chunkId: item.chunkId,
+    metadata: {
+      ...item.metadata,
+      evidence_id: item.evidenceId,
+      exact: item.exact,
+      factual: item.factual,
+      pipeline: "v2",
+    },
+  }));
+
+  const providerResults = providers.map((provider) => ({
+    provider: (provider === "official_sources" ? "web" : provider) as GovernanceRecoveryProvider,
+    status: (statuses[provider] || "empty") as any,
+    returnedCandidates: evidence.filter((item) => item.provider === provider).length,
+    durationMs: 0,
+    errorCode: null,
+    errorMessage: null,
+  }));
+
+  const contextText = buildContext(selected, params.maxContextChars ?? 24000);
+  const recoveryResult: GovernanceRecoveryResult = {
+    intent: {
+      topic: plan.intent,
+      queryNature: plan.intent,
+      normalizedQuestion: plan.normalizedQuestion,
+      allowedProviders: providers.map((provider) =>
+        (provider === "official_sources" ? "web" : provider) as GovernanceRecoveryProvider,
+      ),
+      allowWeb: false,
+    },
+    evidence: recoveryEvidence,
+    contextText,
+    diagnostics: {
+      queriedProviders: providerResults.map((result) => result.provider),
+      providerResults,
+      successfulProviders: providerResults.filter((result) => result.status === "success").map((result) => result.provider),
+      emptyProviders: providerResults.filter((result) => result.status === "empty").map((result) => result.provider),
+      failedProviders: providerResults.filter((result) => result.status === "error").map((result) => result.provider),
+      degraded: providerResults.some((result) => result.status === "error"),
+      returnedByProvider: Object.fromEntries(providers.map((provider) => [provider, evidence.filter((item) => item.provider === provider).length])),
+      selectedByProvider: Object.fromEntries(providers.map((provider) => [provider, selected.filter((item) => item.provider === provider).length])),
+      totalCandidates: evidence.length,
+      selectedEvidence: selected.length,
+    },
+    responsePolicy: {
+      mode: responseMode as any,
+      municipalEvidenceSufficient: requiredSatisfied && selected.some((item) => item.provider === "institutional" || item.provider === "official_gazette"),
+      comparisonReady: plan.intent !== "comparison" || requiredSatisfied,
+      externalSourcesAllowed: false,
+      degraded: providerResults.some((result) => result.status === "error"),
+      unavailableProviders: providerResults.filter((result) => result.status === "error").map((result) => result.provider),
+      reason: requiredSatisfied
+        ? "governance_v2_evidence_selected"
+        : "governance_v2_required_evidence_missing",
+    },
+  };
+
+  return {
+    queryPlan: plan,
+    evidence: selected,
+    contextText,
+    responseSources: sourceResult.sources,
+    responseReferences: sourceResult.references,
+    recoveryResult,
+    diagnostics: {
+      pipeline: "v2",
+      providers: statuses,
+      requiredSatisfied,
+      selected: selected.length,
+    },
+  };
+}

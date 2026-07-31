@@ -623,6 +623,12 @@ export default function EssentialChatPageClient({
   const [attachedPdfs, setAttachedPdfs] = useState<AttachedPdf[]>([]);
   const [activePdfId, setActivePdfId] = useState<string | null>(null);
   const [selectedPdfIds, setSelectedPdfIds] = useState<string[]>([]);
+  const pdfSelectionInitializedForConversationRef = useRef<string | null>(null);
+
+  const effectiveSelectedPdfIds = useMemo(() => {
+    const attachedIds = new Set(attachedPdfs.map((pdf) => pdf.id));
+    return selectedPdfIds.filter((id) => attachedIds.has(id));
+  }, [attachedPdfs, selectedPdfIds]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showPdfQuickActions, setShowPdfQuickActions] = useState(false);
@@ -782,14 +788,14 @@ export default function EssentialChatPageClient({
   const pdfsBlockingChat = useMemo(() => {
     if (!attachedPdfs.length) return [];
 
-    const selectedSet = new Set(selectedPdfIds);
+    const selectedSet = new Set(effectiveSelectedPdfIds);
     const candidates =
       selectedSet.size > 0
         ? attachedPdfs.filter((pdf) => selectedSet.has(pdf.id))
         : attachedPdfs;
 
     return candidates.filter((pdf) => isPdfBlockingChat(pdf));
-  }, [attachedPdfs, selectedPdfIds]);
+  }, [attachedPdfs, effectiveSelectedPdfIds]);
 
   const isPdfBlockingSend = isUploadingPdf || pdfsBlockingChat.length > 0;
 
@@ -1102,23 +1108,16 @@ export default function EssentialChatPageClient({
         const validSet = new Set(validIds);
         const filtered = prev.filter((id) => validSet.has(id));
 
-        if (filtered.length === 0) {
+        const isInitialLoadForConversation =
+          pdfSelectionInitializedForConversationRef.current !== conversationId;
+
+        if (isInitialLoadForConversation) {
+          pdfSelectionInitializedForConversationRef.current = conversationId;
           return validIds;
         }
 
-        const prevHadAllValidBeforeNewOnes =
-          filtered.length === Math.min(prev.length, validIds.length);
-
-        if (prevHadAllValidBeforeNewOnes) {
-          const merged = [...filtered];
-          for (const id of validIds) {
-            if (!merged.includes(id)) {
-              merged.push(id);
-            }
-          }
-          return merged;
-        }
-
+        // Preserva a seleção explícita do usuário. PDFs recém-enviados são
+        // adicionados à seleção antes da recarga da conversa.
         return filtered;
       });
 
@@ -1294,6 +1293,7 @@ export default function EssentialChatPageClient({
 
   useEffect(() => {
     if (!activeConversationId) {
+      pdfSelectionInitializedForConversationRef.current = null;
       setMessages([]);
       setAttachedPdfs([]);
       setActivePdfId(null);
@@ -1310,6 +1310,7 @@ export default function EssentialChatPageClient({
       return;
     }
 
+    pdfSelectionInitializedForConversationRef.current = null;
     setMessages([]);
     setLoadingMessages(true);
     setActionToast(null);
@@ -1600,7 +1601,7 @@ export default function EssentialChatPageClient({
 
     return {
       pdfMode: "selected" as const,
-      selectedPdfIds,
+      selectedPdfIds: effectiveSelectedPdfIds,
     };
   }
 
@@ -2001,8 +2002,8 @@ export default function EssentialChatPageClient({
   }
 
   async function handleQuickPdfAction(kind: QuickActionKind) {
-    if (!activeConversationId || !activePdfId) {
-      showToast("Selecione um PDF ativo antes de usar uma ação rápida.", {
+    if (!activeConversationId || effectiveSelectedPdfIds.length === 0) {
+      showToast("Selecione pelo menos um PDF antes de usar uma ação rápida.", {
         type: "warning",
         persistent: true,
       });
@@ -2017,14 +2018,58 @@ export default function EssentialChatPageClient({
       return;
     }
 
-    const prompts: Record<QuickActionKind, string> = {
-      resumo:
-        "Faça um resumo executivo objetivo do PDF ativo, destacando os pontos principais em tópicos.",
-      pontos:
-        "Liste os principais pontos de atenção, riscos ou cuidados do PDF ativo em tópicos.",
-      irregularidade:
-        "Analise o PDF ativo e aponte possíveis inconsistências, irregularidades ou pontos que exigem validação.",
-    };
+    const selectedSet = new Set(effectiveSelectedPdfIds);
+    const selectedPdfs = attachedPdfs.filter((pdf) => selectedSet.has(pdf.id));
+    const selectedNames = selectedPdfs.map((pdf) => pdf.fileName).filter(Boolean);
+    const isMultiple = selectedPdfs.length > 1;
+    const documentsLabel = selectedNames.length
+      ? selectedNames.map((name) => `- ${name}`).join("\n")
+      : "- PDF selecionado";
+
+    const prompts: Record<QuickActionKind, string> = isMultiple
+      ? {
+          resumo: [
+            "Faça um resumo executivo conjunto dos PDFs selecionados.",
+            "Apresente os pontos principais de cada documento e, ao final, destaque convergências, divergências e relações entre eles.",
+            "",
+            "PDFs selecionados:",
+            documentsLabel,
+          ].join("\n"),
+          pontos: [
+            "Analise conjuntamente os PDFs selecionados e liste os principais pontos de atenção, obrigações, prazos, riscos e cuidados.",
+            "Separe o que pertence a cada documento e destaque também os pontos comuns ou conflitantes.",
+            "",
+            "PDFs selecionados:",
+            documentsLabel,
+          ].join("\n"),
+          irregularidade: [
+            "Analise conjuntamente os PDFs selecionados e aponte possíveis inconsistências, irregularidades, contradições ou pontos que exigem validação.",
+            "Indique em qual documento cada ponto foi identificado e destaque conflitos entre os documentos.",
+            "",
+            "PDFs selecionados:",
+            documentsLabel,
+          ].join("\n"),
+        }
+      : {
+          resumo: [
+            "Faça um resumo executivo objetivo do PDF selecionado, destacando os pontos principais em tópicos.",
+            "",
+            "PDF selecionado:",
+            documentsLabel,
+          ].join("\n"),
+          pontos: [
+            "Liste os principais pontos de atenção, obrigações, prazos, riscos ou cuidados do PDF selecionado em tópicos.",
+            "",
+            "PDF selecionado:",
+            documentsLabel,
+          ].join("\n"),
+          irregularidade: [
+            "Analise o PDF selecionado e aponte possíveis inconsistências, irregularidades ou pontos que exigem validação.",
+            "",
+            "PDF selecionado:",
+            documentsLabel,
+          ].join("\n"),
+        };
 
     await handleSend(prompts[kind]);
     setShowPdfQuickActions(false);
@@ -2304,6 +2349,7 @@ export default function EssentialChatPageClient({
       });
 
       setActivePdfId(data.id);
+      pdfSelectionInitializedForConversationRef.current = conversationId;
       setSelectedPdfIds((prev) =>
         prev.includes(data.id) ? prev : [...prev, data.id]
       );
@@ -2466,11 +2512,19 @@ export default function EssentialChatPageClient({
   }
 
   function toggleSelectedPdf(pdfId: string) {
+    pdfSelectionInitializedForConversationRef.current =
+      activeConversationIdRef.current;
+
     setSelectedPdfIds((prev) => {
-      if (prev.includes(pdfId)) {
-        return prev.filter((id) => id !== pdfId);
+      const next = prev.includes(pdfId)
+        ? prev.filter((id) => id !== pdfId)
+        : [...prev, pdfId];
+
+      if (next.length === 0) {
+        setShowPdfQuickActions(false);
       }
-      return [...prev, pdfId];
+
+      return next;
     });
   }
 
@@ -2670,25 +2724,28 @@ export default function EssentialChatPageClient({
             <div ref={quickActionsRef} className="relative shrink-0">
               <button
                 type="button"
-                disabled={!attachedPdf || isBlocked || accessLoading}
+                disabled={
+                  effectiveSelectedPdfIds.length === 0 || isBlocked || accessLoading
+                }
                 onClick={() =>
-                  attachedPdf && setShowPdfQuickActions((prev) => !prev)
+                  effectiveSelectedPdfIds.length > 0 &&
+                  setShowPdfQuickActions((prev) => !prev)
                 }
                 className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-[10px] font-semibold ${
-                  attachedPdf && !isBlocked && !accessLoading
+                  effectiveSelectedPdfIds.length > 0 && !isBlocked && !accessLoading
                     ? options.quickActionsClassName
                     : options.quickActionsDisabledClassName
                 }`}
                 style={
-                  attachedPdf && !isBlocked && !accessLoading
+                  effectiveSelectedPdfIds.length > 0 && !isBlocked && !accessLoading
                     ? options.quickActionsStyle
                     : options.quickActionsDisabledStyle
                 }
               >
-                AÇÕES RÁPIDAS...
+                RESUMIR PDF(S)
               </button>
 
-              {showPdfQuickActions && attachedPdf && (
+              {showPdfQuickActions && effectiveSelectedPdfIds.length > 0 && (
                 <div
                   className={options.quickMenuClassName}
                   style={options.quickMenuStyle}
@@ -2702,7 +2759,7 @@ export default function EssentialChatPageClient({
                     className={options.quickMenuItemClassName}
                     style={options.quickMenuItemStyle}
                   >
-                    Resumir PDF
+                    Resumir PDF(s)
                   </button>
                   <button
                     type="button"

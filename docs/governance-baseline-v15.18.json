@@ -1,0 +1,17 @@
+{
+  "version": "15.18",
+  "pipeline": "governance-v15.18-recoverable-processing-lease",
+  "scope": "Recuperação segura de requisições idempotentes abandonadas",
+  "invariants": [
+    "uma chave em processamento possui lease temporal",
+    "requisições sem resposta não permanecem bloqueadas indefinidamente",
+    "somente uma tentativa recupera atomicamente um lease expirado",
+    "a recuperação ocorre antes de pesquisa oficial, evidências e OpenAI",
+    "a mesma chave não pode ser recuperada com conteúdo diferente",
+    "respostas já concluídas continuam sendo devolvidas sem regeneração"
+  ],
+  "default_lease_seconds": 300,
+  "configuration": "GOVERNANCE_IDEMPOTENCY_LEASE_SECONDS",
+  "minimum_lease_seconds": 30,
+  "maximum_lease_seconds": 1800
+}

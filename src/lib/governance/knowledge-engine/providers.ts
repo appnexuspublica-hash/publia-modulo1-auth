@@ -374,11 +374,35 @@ export async function loadOfficialGazetteKnowledgeItems(params: {
     });
 }
 
+
+
+function shouldLoadOfficialSourcesDirectory(question: string) {
+  const normalized = cleanText(question)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  return [
+    /\bonde\s+(?:posso\s+)?consultar\b/,
+    /\bonde\s+(?:posso\s+)?encontrar\b/,
+    /\bqual\s+(?:e\s+o\s+)?(?:site|portal|fonte)\s+oficial\b/,
+    /\bsite\s+oficial\b/,
+    /\bportal\s+oficial\b/,
+    /\bfontes?\s+oficiais?\b/,
+    /\bportal\s+da\s+transparencia\b/,
+    /\blink\s+(?:do|da|para)\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 export async function loadOfficialSourcesKnowledgeItems(params: {
   client: any;
   organizationId: string;
   question: string;
 }): Promise<GovernanceKnowledgeItem[]> {
+  if (!shouldLoadOfficialSourcesDirectory(params.question)) {
+    return [];
+  }
+
   const { data, error } = await params.client
     .from("official_sources")
     .select("id,organization_id,name,source_type,url,notes,status,priority,reviewed_at")
@@ -422,6 +446,8 @@ export async function loadOfficialSourcesKnowledgeItems(params: {
           priority: row.priority ?? null,
           reviewed_at: row.reviewed_at ?? null,
           recency_date: row.reviewed_at ?? null,
+          evidence_role: "directory_reference",
+          factual_evidence: false,
         }),
       };
     });

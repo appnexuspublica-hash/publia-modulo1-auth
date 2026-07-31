@@ -1,0 +1,93 @@
+import type { ConversationRelation } from "@/lib/governance/chat/history";
+import type { GovernanceQuestionIntent } from "@/lib/governance/chat/question-classifier";
+import type { GovernanceResponseMode } from "@/types/governance";
+
+const DETAILED_REQUEST_PATTERN =
+  /\b(detalh(?:e|ado|adamente)|aprofund(?:e|ado|adamente)|completo|exaustiv[oa]|passo a passo|parecer|minuta|relat[oó]rio|an[aá]lise de risco)\b/i;
+
+export function buildGovernanceResponseLengthInstruction(params: {
+  responseMode: GovernanceResponseMode;
+  intent: GovernanceQuestionIntent;
+  relation: ConversationRelation;
+  userText: string;
+}): string {
+  const { responseMode, intent, relation, userText } = params;
+
+  if (
+    responseMode === "legal_opinion" ||
+    responseMode === "technical_opinion" ||
+    responseMode === "draft"
+  ) {
+    return [
+      "POLÍTICA DE EXTENSÃO — DOCUMENTO FORMAL",
+      "Preserve todas as seções obrigatórias do modo selecionado.",
+      "Seja completo, mas elimine repetições, introduções genéricas e explicações duplicadas.",
+      "Cada seção deve conter apenas o necessário para fundamentar a conclusão e orientar a decisão.",
+    ].join("\n");
+  }
+
+  if (DETAILED_REQUEST_PATTERN.test(userText)) {
+    return [
+      "POLÍTICA DE EXTENSÃO — DETALHAMENTO SOLICITADO",
+      "O usuário pediu aprofundamento ou documento completo.",
+      "Entregue conteúdo suficiente para cumprir o pedido, sem repetir a mesma orientação em seções diferentes.",
+      "Comece com uma síntese curta e depois desenvolva o conteúdo.",
+      "Use títulos apenas quando organizarem blocos realmente distintos.",
+    ].join("\n");
+  }
+
+  if (relation === "CONTINUA_COMPLEMENTAR") {
+    return [
+      "POLÍTICA DE EXTENSÃO — CONTINUIDADE",
+      "Responda somente ao novo ponto perguntado.",
+      "Não reexplique o tema anterior nem repita fundamentos já apresentados.",
+      "Prefira até 180 palavras, salvo se a pergunta exigir cálculo, tabela ou distinção normativa indispensável.",
+    ].join("\n");
+  }
+
+  if (responseMode === "summary") {
+    return [
+      "POLÍTICA DE EXTENSÃO — RESUMO",
+      "Mantenha a resposta entre 150 e 350 palavras.",
+      "Use no máximo 5 pontos essenciais e uma conclusão prática curta.",
+    ].join("\n");
+  }
+
+  if (
+    responseMode === "checklist" ||
+    responseMode === "attention_points" ||
+    responseMode === "action_plan" ||
+    responseMode === "comparison" ||
+    responseMode === "manager_guidance" ||
+    responseMode === "risk_analysis"
+  ) {
+    return [
+      "POLÍTICA DE EXTENSÃO — FORMATO OPERACIONAL",
+      "Seja escaneável e evite parágrafos extensos.",
+      "Use somente os itens necessários para decisão ou execução.",
+      "Não repita em prosa o conteúdo já apresentado em tabela ou lista.",
+    ].join("\n");
+  }
+
+  if (intent === "general") {
+    return [
+      "POLÍTICA DE EXTENSÃO — RESPOSTA GERAL",
+      "Comece com a resposta direta em 2 a 4 frases.",
+      "Desenvolva apenas os pontos necessários para compreensão.",
+      "Prefira entre 350 e 650 palavras.",
+      "Use no máximo 5 blocos ou subtítulos curtos.",
+      "Não acrescente riscos, providências, histórico normativo ou recomendações que não sejam necessários para responder.",
+    ].join("\n");
+  }
+
+  return [
+    "POLÍTICA DE EXTENSÃO — RESPOSTA ADMINISTRATIVA",
+    "Comece com uma síntese objetiva em até 5 linhas.",
+    "Depois apresente somente os fundamentos e providências indispensáveis.",
+    "Prefira entre 500 e 850 palavras; ultrapasse esse intervalo apenas quando a pergunta exigir documento formal, comparação extensa ou análise expressamente detalhada.",
+    "Use no máximo 6 blocos principais.",
+    "Não repita a mesma conclusão na introdução, nos tópicos e no fechamento.",
+    "Não transforme cada evidência recuperada em uma seção; consolide evidências convergentes.",
+    "Preserve ressalvas, fontes e distinções entre regra municipal, referência federal e ponto pendente de validação.",
+  ].join("\n");
+}

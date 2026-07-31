@@ -1,0 +1,1220 @@
+// src/app/api/governance/chat/route.ts
+/**
+ * CHAT GOVERNANÇA
+ *
+ * Usado somente pelo produto:
+ * - Publ.IA Governança
+ *
+ * IMPORTANTE:
+ * Esta rota EXIGE organização ativa.
+ *
+ * Banco usado:
+ * - governance_conversations
+ * - governance_messages
+ *
+ * Chave de isolamento:
+ * - organization_id
+ */
+import { NextResponse } from "next/server";
+import OpenAI from "openai";
+
+import {
+  authenticateGovernanceActor,
+  authorizeGovernanceConversation,
+} from "@/lib/governance/chat/authorization";
+import {
+  createGovernanceConversationAvailabilityChecker,
+  createServiceRoleSupabaseClient,
+  createWritableSupabaseRouteClient,
+  getCompactErrorMessage,
+  isRecoverableExternalError,
+} from "@/lib/governance/chat/infrastructure";
+import { createGovernanceTransientResponsePayloadBuilder } from "@/lib/governance/chat/transient-response";
+import { buildGovernancePersistedResponsePayload } from "@/lib/governance/chat/response-payload";
+import { buildGovernancePrompt } from "@/lib/prompts/governance/prompt";
+import { buildGovernanceEvidenceContext } from "@/lib/governance/evidence-context";
+import { buildGovernanceLegalGuardrails, findGovernanceCriticalKnowledge } from "@/lib/governanceLegalGuardrails";
+import { resolveEssentialOfficialWeb } from "@/lib/official-web";
+import { buildGovernanceEvidenceWebSources } from "@/lib/governance/chat/evidence-web-sources";
+import { buildGovernanceOpenAIResponseRequest } from "@/lib/governance/chat/openai-response-request";
+import {
+  createGovernanceAssistantMessageMetadataBuilder,
+} from "@/lib/governance/chat/assistant-message-metadata";
+import {
+  buildGovernanceLegalTopicInstruction,
+  buildGovernanceQueryPlan,
+  finalizeGovernanceCoreResponse,
+  orchestrateGovernanceCore,
+} from "@/lib/governance-core";
+import {
+  MAX_GOVERNANCE_USER_MESSAGE_LENGTH,
+  normalizeGovernanceResponseMode,
+  parseGovernanceChatRequestBody,
+  type GovernanceChatRequestBody,
+} from "@/lib/governance/chat/request";
+import {
+  createGovernanceAssistantMessageSaver,
+  createGovernanceConversationToucher,
+  saveGovernanceUserMessage,
+  updateConversationTitleFromMessage,
+  updateGovernanceConversationResponseMode,
+} from "@/lib/governance/chat/persistence";
+import { loadGovernanceConversationHistory } from "@/lib/governance/chat/history";
+import {
+  buildGovernanceModeInstruction,
+  mapGovernanceModeToPromptMode,
+} from "@/lib/governance/chat/response-mode";
+import {
+  buildGovernanceConversationContext,
+  mapGovernanceMessagesToOpenAIInput,
+} from "@/lib/governance/chat/prompt-context";
+import { createGovernanceResponseSuggestionGenerator } from "@/lib/governance/chat/suggestions";
+import { buildGovernancePdfContext } from "@/lib/governance/chat/pdf-context";
+import { buildConversationRelationInstruction } from "@/lib/governance/chat/conversation-guidance";
+import { type GovernanceChatSource } from "@/lib/governance/chat/references";
+import { SSE_HEADERS, sseEvent } from "@/lib/governance/chat/streaming";
+import { createGovernanceRequestTelemetry } from "@/lib/governance/chat/request-observability";
+import { enforceGovernanceChatRateLimit } from "@/lib/governance/chat/rate-limit";
+import { checkGovernanceClientRequestId } from "@/lib/governance/chat/idempotency";
+import {
+  buildGovernanceResponseLengthInstruction,
+  resolveGovernanceMaxOutputTokens,
+} from "@/lib/governance/chat/response-length-policy";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
+const OPENAI_MODEL_GOVERNANCE =
+  process.env.OPENAI_MODEL_GOVERNANCE ||
+  process.env.OPENAI_MODEL_NO_PDF ||
+  "gpt-5.1";
+
+
+let openai: OpenAI | null = null;
+
+if (!openaiApiKey) {
+  console.error("[/api/governance/chat] OPENAI_API_KEY não está definida.");
+} else {
+  openai = new OpenAI({ apiKey: openaiApiKey });
+}
+
+export async function POST(request: Request) {
+  const telemetry = createGovernanceRequestTelemetry();
+
+  try {
+    if (!openai) {
+      return NextResponse.json(
+        { error: "OpenAI não configurada. Verifique OPENAI_API_KEY." },
+        { status: 500 },
+      );
+    }
+
+    const supabase = createWritableSupabaseRouteClient();
+
+    const actorAuthorization = await telemetry.measure(
+      "authentication",
+      () =>
+        authenticateGovernanceActor({
+          supabase,
+        }),
+      (result) => ({
+        authorized: result.ok,
+      }),
+    );
+
+    if (!actorAuthorization.ok) {
+      return NextResponse.json(
+        { error: actorAuthorization.error },
+        { status: actorAuthorization.status },
+      );
+    }
+
+    const { user, context } = actorAuthorization;
+
+    const rateLimitDecision = await telemetry.measure(
+      "rate_limit",
+      () =>
+        enforceGovernanceChatRateLimit({
+          supabase,
+          userId: user.id,
+          organizationId: context.organization.id,
+        }),
+      (result) => ({
+        status: result.status,
+        scope: result.status === "allowed" ? "all" : result.scope,
+        checkCount: result.status === "allowed" ? result.checks.length : 0,
+      }),
+    );
+
+    if (rateLimitDecision.status === "blocked") {
+      telemetry.log("request_rate_limited", "error", {
+        scope: rateLimitDecision.scope,
+        limit: rateLimitDecision.limit,
+        windowSeconds: rateLimitDecision.windowSeconds,
+      });
+
+      const response = NextResponse.json(
+        {
+          error:
+            "Limite temporário de mensagens atingido. Aguarde alguns instantes antes de tentar novamente.",
+          code: "GOVERNANCE_CHAT_RATE_LIMITED",
+          requestId: telemetry.requestId,
+        },
+        { status: 429 },
+      );
+      response.headers.set(
+        "retry-after",
+        String(rateLimitDecision.retryAfterSeconds),
+      );
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    if (rateLimitDecision.status === "unavailable") {
+      telemetry.log("rate_limit_unavailable", "error", {
+        scope: rateLimitDecision.scope,
+        reason: rateLimitDecision.reason,
+      });
+
+      const response = NextResponse.json(
+        {
+          error:
+            "O controle de uso está temporariamente indisponível. Tente novamente em alguns instantes.",
+          code: "GOVERNANCE_CHAT_RATE_LIMIT_UNAVAILABLE",
+          requestId: telemetry.requestId,
+        },
+        { status: 503 },
+      );
+      response.headers.set("retry-after", "30");
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    const body = (await request.json().catch(() => null)) as
+      | GovernanceChatRequestBody
+      | null;
+
+    const {
+      conversationId,
+      rawContent,
+      content,
+      requestedResponseMode,
+      selectedPdfAttachmentNames,
+      selectedPdfFileIds,
+      hasSelectedPdfAttachments,
+      clientRequestId,
+    } = parseGovernanceChatRequestBody(body);
+
+    if (!clientRequestId) {
+      return NextResponse.json(
+        { error: "Identificador idempotente da requisição ausente ou inválido." },
+        { status: 400 },
+      );
+    }
+
+    if (!conversationId) {
+      return NextResponse.json(
+        { error: "Conversa institucional não informada." },
+        { status: 400 },
+      );
+    }
+
+    if (!content) {
+      return NextResponse.json(
+        { error: "Mensagem vazia. Digite um conteúdo antes de enviar." },
+        { status: 400 },
+      );
+    }
+
+    if (rawContent.trim().length > MAX_GOVERNANCE_USER_MESSAGE_LENGTH) {
+      return NextResponse.json(
+        {
+          error:
+            "Mensagem muito longa. Reduza o texto ou envie o conteúdo como documento na base institucional futuramente.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const conversationAuthorization = await telemetry.measure(
+      "conversation_authorization",
+      () =>
+        authorizeGovernanceConversation({
+          supabase,
+          conversationId,
+          organizationId: context.organization.id,
+        }),
+      (result) => ({
+        authorized: result.ok,
+      }),
+    );
+
+    if (!conversationAuthorization.ok) {
+      return NextResponse.json(
+        { error: conversationAuthorization.error },
+        { status: conversationAuthorization.status },
+      );
+    }
+
+    const { conversation } = conversationAuthorization;
+
+    const idempotencyDecision = await telemetry.measure(
+      "idempotency_check",
+      () =>
+        checkGovernanceClientRequestId({
+          supabase,
+          organizationId: context.organization.id,
+          conversationId: conversation.id,
+          userId: user.id,
+          clientRequestId,
+        }),
+      (result) => ({
+        status: result.status,
+      }),
+    );
+
+    if (idempotencyDecision.status === "duplicate") {
+      const response = NextResponse.json(
+        {
+          error:
+            "Esta mensagem já foi recebida e está sendo processada ou já foi concluída.",
+          code: "GOVERNANCE_CHAT_DUPLICATE_REQUEST",
+          requestId: telemetry.requestId,
+          userMessage: idempotencyDecision.userMessage,
+        },
+        { status: 409 },
+      );
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    if (idempotencyDecision.status === "unavailable") {
+      telemetry.log("idempotency_unavailable", "error", {
+        reason: idempotencyDecision.reason,
+      });
+
+      const response = NextResponse.json(
+        {
+          error:
+            "Não foi possível validar a segurança contra mensagens duplicadas. Tente novamente.",
+          code: "GOVERNANCE_CHAT_IDEMPOTENCY_UNAVAILABLE",
+          requestId: telemetry.requestId,
+        },
+        { status: 503 },
+      );
+      response.headers.set("retry-after", "5");
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    const isConversationAvailable =
+      createGovernanceConversationAvailabilityChecker({
+        supabase,
+        conversationId: conversation.id,
+        organizationId: context.organization.id,
+      });
+
+    const effectiveResponseMode = normalizeGovernanceResponseMode(
+      requestedResponseMode,
+      conversation.response_mode,
+    );
+
+    const governancePlan = buildGovernanceQueryPlan(content);
+    const governanceKnowledgePrimary = governancePlan.intent === "general_legal";
+    const forceWebFirst = governanceKnowledgePrimary;
+    const officialWeb = forceWebFirst
+      ? resolveEssentialOfficialWeb(content)
+      : null;
+
+    telemetry.mark("query_decision", "success", {
+      pipeline: "governance-core-v15",
+      intent: governancePlan.intent,
+      requiredProviders: governancePlan.requiredProviders.join(","),
+      optionalProviders: governancePlan.optionalProviders.join(","),
+      answerShape: governancePlan.answerShape,
+    });
+
+    let governanceEvidenceContext:
+      | Awaited<ReturnType<typeof buildGovernanceEvidenceContext>>
+      | null = null;
+
+    if (forceWebFirst && officialWeb && openai) {
+      try {
+        governanceEvidenceContext = await buildGovernanceEvidenceContext({
+          openai,
+          model: OPENAI_MODEL_GOVERNANCE,
+          question: content,
+          topicLabel: officialWeb.topicLabel,
+          allowedDomains: officialWeb.allowedDomains,
+          researchChecklist: officialWeb.researchChecklist,
+        });
+      } catch (error) {
+        const detail = getCompactErrorMessage(error);
+        if (isRecoverableExternalError(error)) {
+          console.warn(`[governance/chat] Pesquisa oficial prévia indisponível: ${detail}`);
+        } else {
+          console.error(`[governance/chat] Falha na pesquisa oficial prévia: ${detail}`);
+        }
+      }
+    }
+
+    const hasGovernanceEvidenceSources =
+      (governanceEvidenceContext?.sources.length ?? 0) > 0;
+    const criticalKnowledge = findGovernanceCriticalKnowledge(content);
+    const legalGuardrails = buildGovernanceLegalGuardrails(content);
+    const hasLegalGuardrails = legalGuardrails.trim().length > 0;
+    const criticalKnowledgeInstruction = criticalKnowledge.length > 0
+      ? [
+          "BASE NORMATIVA OFICIAL DO PUBL.IA",
+          ...criticalKnowledge.map((item) => `TEMA: ${item.title}\n\n${item.rule}`),
+        ].join("\n\n")
+      : "";
+    const currentQuestionOnly =
+      hasSelectedPdfAttachments || hasLegalGuardrails || governanceKnowledgePrimary;
+
+    const responseModeUpdate =
+      await updateGovernanceConversationResponseMode({
+        supabase,
+        conversation,
+        organizationId: context.organization.id,
+        responseMode: effectiveResponseMode,
+      });
+
+    if (responseModeUpdate.error) {
+      console.warn(
+        "[governance/chat] Não foi possível atualizar o modo de resposta da conversa:",
+        responseModeUpdate.error,
+      );
+    }
+
+    const userMessageResult = await telemetry.measure(
+      "persist_user_message",
+      () =>
+        saveGovernanceUserMessage({
+          supabase,
+          organizationId: context.organization.id,
+          conversationId: conversation.id,
+          userId: user.id,
+          content,
+          responseMode: effectiveResponseMode,
+          selectedPdfAttachmentNames,
+          selectedPdfFileIds,
+          clientRequestId,
+        }),
+      (result) => ({
+        saved: Boolean(result.message),
+        hasError: Boolean(result.error),
+        duplicate: result.duplicate,
+      }),
+    );
+    const userMessage = userMessageResult.message;
+
+    if (userMessageResult.duplicate) {
+      const response = NextResponse.json(
+        {
+          error:
+            "Esta mensagem já foi recebida e está sendo processada ou já foi concluída.",
+          code: "GOVERNANCE_CHAT_DUPLICATE_REQUEST",
+          requestId: telemetry.requestId,
+          userMessage,
+        },
+        { status: 409 },
+      );
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    if (userMessageResult.error || !userMessage) {
+      console.error(
+        "[governance/chat] Erro ao salvar mensagem do usuário:",
+        userMessageResult.error,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível salvar a mensagem do usuário." },
+        { status: 500 },
+      );
+    }
+
+    const conversationTitle = await updateConversationTitleFromMessage({
+      supabase,
+      conversation,
+      organizationId: context.organization.id,
+      content,
+    });
+
+    const pdfContextResult = await telemetry.measure(
+      "pdf_context",
+      () =>
+        buildGovernancePdfContext({
+          client: supabase,
+          openai,
+          embeddingModel:
+            process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
+          ragTopK: Math.max(
+            2,
+            Math.min(10, Number(process.env.RAG_TOP_K ?? 4)),
+          ),
+          userId: user.id,
+          selectedPdfFileIds,
+          question: content,
+        }),
+      (result) => ({
+        selectedFiles: result.selectedPdfFileIds.length,
+        contextAvailable: result.pdfContextAvailable,
+        warnings: result.pdfContextWarnings.length,
+      }),
+    );
+
+    const governanceCoreResult = await telemetry.measure(
+      "governance_core_pipeline",
+      () => orchestrateGovernanceCore({
+        client: supabase,
+        organizationId: context.organization.id,
+        question: content,
+        maxContextChars: 24000,
+      }),
+      (result) => ({
+        intent: result.queryPlan.intent,
+        evidenceCount: result.evidence.length,
+        requiredSatisfied: Boolean(result.diagnostics.requiredSatisfied),
+      }),
+    );
+
+    const unifiedRecoveryResult = governanceCoreResult.recoveryResult;
+    const responseSources = governanceCoreResult.responseSources;
+    let responseReferences = governanceCoreResult.responseReferences;
+
+    telemetry.mark("evidence_bundle", "success", {
+      pipeline: "governance-core-v15",
+      contextChars: governanceCoreResult.contextText.length,
+      references: responseReferences.length,
+      evidence: governanceCoreResult.evidence.length,
+      degraded: unifiedRecoveryResult.responsePolicy.degraded,
+    });
+
+    const historyResult = await telemetry.measure(
+      "conversation_history",
+      () =>
+        loadGovernanceConversationHistory({
+          supabase,
+          organizationId: context.organization.id,
+          conversationId: conversation.id,
+          currentUserMessageId: userMessage.id,
+          currentUserQuestion: content,
+        }),
+      (result) => ({
+        loaded: result.ok,
+        messages: result.ok ? result.history.length : 0,
+      }),
+    );
+
+    if (!historyResult.ok) {
+      console.error(
+        "[governance/chat] Erro ao carregar histórico:",
+        historyResult.error,
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível carregar o histórico da conversa." },
+        { status: 500 },
+      );
+    }
+
+    const {
+      history,
+      previousUserQuestion,
+      relation: conversationRelation,
+    } = historyResult;
+    const responseIntent = governancePlan.intent === "institutional_document" || governancePlan.intent === "official_gazette"
+      ? "specific_document"
+      : governancePlan.intent === "financial_fact"
+        ? "exact_fact"
+        : "general";
+    const maxOutputTokens = resolveGovernanceMaxOutputTokens({
+      responseMode: effectiveResponseMode,
+      intent: responseIntent,
+      relation: conversationRelation,
+      userText: content,
+    });
+
+    const governancePrompt = buildGovernancePrompt({
+      responseMode: mapGovernanceModeToPromptMode(effectiveResponseMode),
+    });
+
+    const legalTopicInstruction = buildGovernanceLegalTopicInstruction(governancePlan);
+
+    const asksFullTranscription = /\b(transcreva integralmente|texto integral|na integra|íntegra)\b/i.test(content);
+    const coreRequiredSatisfied = Boolean(governanceCoreResult.diagnostics.requiredSatisfied);
+    const answerShapeInstruction = governancePlan.answerShape === "direct_numeric"
+      ? [
+          "FORMATO OBRIGATÓRIO — RESPOSTA NUMÉRICA",
+          "Comece pelo valor confirmado, com categoria e vigência.",
+          "Se não houver valor confirmado em fonte oficial, diga isso na primeira frase e não invente número.",
+        ].join("\n")
+      : governancePlan.answerShape === "yes_no"
+        ? "FORMATO OBRIGATÓRIO — Comece com Sim, Não ou Depende e apresente o fundamento essencial."
+        : governancePlan.answerShape === "directory"
+          ? "FORMATO OBRIGATÓRIO — Apresente primeiro os canais oficiais. Não diga que foram consultados quando apenas indicados."
+          : governancePlan.answerShape === "document_summary"
+            ? asksFullTranscription
+              ? "FORMATO OBRIGATÓRIO — Identifique o documento ou ato e transcreva somente o conteúdo efetivamente recuperado."
+              : "FORMATO OBRIGATÓRIO — Identifique o documento ou ato, apresente uma síntese executiva e no máximo 8 pontos essenciais. Não faça transcrição extensa."
+            : "Comece pela resposta direta e depois apresente apenas a fundamentação necessária.";
+
+    const missingInstitutionalInstruction = governancePlan.intent === "institutional_document" && !coreRequiredSatisfied
+      ? [
+          "DOCUMENTO INSTITUCIONAL NÃO RECUPERADO",
+          "Responda em até 3 parágrafos curtos.",
+          "Não descreva como planos semelhantes costumam funcionar.",
+          "Não invente critérios, prazos, percentuais ou procedimentos típicos.",
+          "Diga apenas que o documento específico não foi recuperado e indique o canal institucional adequado.",
+        ].join("\n")
+      : "";
+
+    const precedenceInstruction = governanceKnowledgePrimary
+      ? [
+          "PRECEDÊNCIA — CONHECIMENTO JURÍDICO PRIMÁRIO",
+          "Use a base legal e a pesquisa oficial consolidada como fundamento principal.",
+          "Bases municipais entram apenas como complemento quando forem diretamente pertinentes.",
+        ].join("\n")
+      : [
+          "PRECEDÊNCIA — EVIDÊNCIA MUNICIPAL PRIMÁRIA",
+          "Use documentos institucionais, Diário Oficial ou canais municipais conforme o plano da consulta.",
+          "Não complete lacunas com fontes de outros municípios ou documentos semelhantes.",
+        ].join("\n");
+
+    const instructions = [
+      governancePrompt,
+      criticalKnowledgeInstruction,
+      buildGovernanceConversationContext({
+        organizationName: context.organization.name,
+        organizationId: context.organization.id,
+        conversation,
+      }),
+      buildConversationRelationInstruction({
+        relation: conversationRelation,
+        previousUserQuestion,
+        currentUserQuestion: content,
+      }),
+      buildGovernanceModeInstruction(effectiveResponseMode),
+      buildGovernanceResponseLengthInstruction({
+        responseMode: effectiveResponseMode,
+        intent: responseIntent,
+        relation: conversationRelation,
+        userText: content,
+      }),
+      answerShapeInstruction,
+      legalTopicInstruction,
+      missingInstitutionalInstruction,
+      precedenceInstruction,
+      [
+        "CONTRATO DE EVIDÊNCIAS DO GOVERNANÇA V15",
+        "Use somente o contexto fechado fornecido abaixo.",
+        "Não crie, reconstrua ou acrescente fontes no corpo da resposta.",
+        "Não crie seções de Base legal, Fontes consultadas ou Canais oficiais; o backend renderiza essas categorias.",
+        "Canais oficiais são caminhos de verificação, não prova de que o conteúdo foi consultado.",
+        "Quando não houver evidência suficiente, declare a limitação sem listar documentos descartados.",
+      ].join("\n"),
+      governanceEvidenceContext?.instruction ?? "",
+      legalGuardrails,
+      governanceCoreResult.contextText,
+      hasSelectedPdfAttachments
+        ? [
+            "PDFS SELECIONADOS NESTA PERGUNTA",
+            selectedPdfAttachmentNames.length > 0
+              ? `Arquivos: ${selectedPdfAttachmentNames.join(", ")}.`
+              : "",
+            pdfContextResult.pdfContextAvailable
+              ? pdfContextResult.pdfContextText
+              : "Nenhum trecho textual suficiente foi recuperado dos PDFs selecionados.",
+            "Não invente conteúdo ausente dos PDFs.",
+          ].filter(Boolean).join("\n\n")
+        : "",
+    ].filter(Boolean).join("\n\n").trim();
+
+    telemetry.mark("prompt_assembly", "success", {
+      instructionChars: instructions.length,
+      historyMessages: currentQuestionOnly ? 1 : history.length,
+      currentQuestionOnly,
+    });
+
+    const generateSuggestions =
+      createGovernanceResponseSuggestionGenerator({
+        openai,
+        model: OPENAI_MODEL_GOVERNANCE,
+        userContent: content,
+        responseMode: effectiveResponseMode,
+        hasSelectedPdfAttachments,
+        selectedPdfAttachmentNames,
+      });
+
+    const buildAssistantMessageMetadata =
+      createGovernanceAssistantMessageMetadataBuilder({
+        model: OPENAI_MODEL_GOVERNANCE,
+        queryAnalysis: governancePlan,
+        responseMode: effectiveResponseMode,
+        historyMessagesUsed: currentQuestionOnly ? 1 : history.length,
+        selectedPdfAttachmentNames,
+        selectedPdfFileIds,
+        hasSelectedPdfAttachments,
+        hasLegalGuardrails,
+        forceWebFirst,
+        officialWeb,
+        governanceEvidenceContext,
+        officialGazetteChunksUsed: governanceCoreResult.evidence.filter((item) => item.provider === "official_gazette").length,
+        recoveryDiagnostics: unifiedRecoveryResult.diagnostics,
+        recoveryEvidence: unifiedRecoveryResult.evidence,
+        responsePolicy: unifiedRecoveryResult.responsePolicy,
+        conversationRelation,
+        previousUserQuestion,
+        clientRequestId,
+      });
+
+    const trustedAssistantSupabase = createServiceRoleSupabaseClient();
+
+    if (!trustedAssistantSupabase) {
+      telemetry.log("assistant_persistence_unavailable", "error", {
+        reason: "service_role_not_configured",
+      });
+
+      const response = NextResponse.json(
+        {
+          error:
+            "A persistência segura das respostas está temporariamente indisponível.",
+          code: "GOVERNANCE_CHAT_TRUSTED_PERSISTENCE_UNAVAILABLE",
+          requestId: telemetry.requestId,
+        },
+        { status: 503 },
+      );
+      response.headers.set("retry-after", "30");
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    const saveAssistantMessage =
+      createGovernanceAssistantMessageSaver({
+        supabase: trustedAssistantSupabase,
+        organizationId: context.organization.id,
+        conversationId: conversation.id,
+      });
+
+    const touchConversation =
+      createGovernanceConversationToucher({
+        supabase,
+        organizationId: context.organization.id,
+        conversationId: conversation.id,
+      });
+
+    const buildTransientResponsePayload =
+      createGovernanceTransientResponsePayloadBuilder({
+        organizationId: context.organization.id,
+        conversationId: conversation.id,
+        responseMode: effectiveResponseMode,
+        userMessage,
+        conversationTitle,
+      });
+
+    const wantsStreaming = request.headers
+      .get("accept")
+      ?.includes("text/event-stream") === true;
+
+    if (!wantsStreaming) {
+      let assistantText = "";
+      let officialWebSources: GovernanceChatSource[] =
+        buildGovernanceEvidenceWebSources(governanceEvidenceContext?.sources);
+
+      try {
+        const response: any = await telemetry.measure(
+          "openai_generation",
+          () =>
+            openai!.responses.create(
+              buildGovernanceOpenAIResponseRequest({
+                model: OPENAI_MODEL_GOVERNANCE,
+                instructions,
+                input: mapGovernanceMessagesToOpenAIInput(history, {
+                  currentMessageOnly: currentQuestionOnly,
+                }),
+                forceWebFirst: false,
+                officialWeb: null,
+                hasGovernanceEvidenceSources,
+                streaming: false,
+                maxOutputTokens,
+              }) as any,
+              { signal: request.signal },
+            ),
+          (result: any) => ({
+            outputChars: result.output_text?.trim().length ?? 0,
+            streaming: false,
+          }),
+        );
+
+        assistantText = response.output_text?.trim() ?? "";
+
+      } catch (error) {
+        const detail = getCompactErrorMessage(error);
+
+        if (isRecoverableExternalError(error)) {
+          console.warn(
+            `[governance/chat] Geração interrompida por falha temporária: ${detail}`,
+          );
+        } else {
+          console.error(
+            `[governance/chat] Falha não recuperável na geração: ${detail}`,
+          );
+        }
+
+        return NextResponse.json(
+          {
+            error: isRecoverableExternalError(error)
+              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
+              : "Erro ao gerar resposta da IA institucional.",
+          },
+          { status: 500 },
+        );
+      }
+
+      if (!assistantText) {
+        return NextResponse.json(
+          { error: "A IA não retornou uma resposta válida." },
+          { status: 500 },
+        );
+      }
+
+      // Governança V2: links não são gerados automaticamente no texto da IA.
+      // O backend expõe fontes e referências estruturadas em metadata.sources/references.
+      const finalizedResponse = finalizeGovernanceCoreResponse({
+            assistantText,
+            question: content,
+            responseSources,
+            responseReferences,
+            officialWebSources,
+            includeOfficialWebSources: governanceKnowledgePrimary,
+          });
+
+      assistantText = finalizedResponse.assistantText;
+      responseReferences = finalizedResponse.responseReferences;
+
+      const {
+        finalResponseSources,
+        officialLegalReferences,
+        responseReferencesForClient,
+      } = finalizedResponse;
+
+      const conversationAvailableBeforeSave =
+        await isConversationAvailable();
+
+      if (conversationAvailableBeforeSave === false) {
+        console.info(
+          "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
+        );
+
+        const suggestions = await generateSuggestions({
+          assistantText,
+          suppress: governancePlan.intent === "official_gazette",
+        });
+
+        return NextResponse.json(
+          buildTransientResponsePayload({
+            assistantText,
+            streaming: false,
+            suggestions,
+            sources: finalResponseSources,
+            references: responseReferencesForClient,
+          }),
+        );
+      }
+
+      const { message: assistantMessage, error: assistantMessageError } =
+        await telemetry.measure(
+          "persist_assistant_message",
+          () =>
+            saveAssistantMessage({
+              content: assistantText,
+              metadata: buildAssistantMessageMetadata({
+                responseSources: finalResponseSources,
+                references: responseReferencesForClient,
+                officialLegalReferences,
+                streaming: false,
+                observability: telemetry.snapshot("success"),
+              }),
+            }),
+          (result) => ({
+            saved: Boolean(result.message),
+            hasError: Boolean(result.error),
+            streaming: false,
+          }),
+        );
+
+      if (assistantMessageError || !assistantMessage) {
+        const conversationAvailableAfterFailure =
+          await isConversationAvailable();
+
+        if (conversationAvailableAfterFailure === false) {
+          console.info(
+            "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
+          );
+
+          const suggestions = await generateSuggestions({
+            assistantText,
+          });
+
+          return NextResponse.json(
+            buildTransientResponsePayload({
+              assistantText,
+              streaming: false,
+              suggestions,
+              sources: finalResponseSources,
+              references: responseReferencesForClient,
+            }),
+          );
+        }
+
+        console.error(
+          `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+        );
+
+        return NextResponse.json(
+          { error: "A resposta foi gerada, mas não pôde ser salva." },
+          { status: 500 },
+        );
+      }
+
+      await telemetry.measure("touch_conversation", touchConversation);
+
+      const suggestions = await telemetry.measure(
+        "generate_suggestions",
+        () =>
+          generateSuggestions({
+            assistantText,
+          }),
+        (result) => ({
+          count: result.length,
+        }),
+      );
+
+      telemetry.log("request_completed", "success", {
+        streaming: false,
+        responseChars: assistantText.length,
+      });
+
+      const response = NextResponse.json(
+        buildGovernancePersistedResponsePayload({
+          userMessage,
+          assistantMessage,
+          conversationTitle,
+          suggestions,
+          sources: finalResponseSources,
+          references: responseReferencesForClient,
+        }),
+      );
+      response.headers.set("x-request-id", telemetry.requestId);
+      response.headers.set(
+        "x-governance-pipeline-version",
+        telemetry.pipelineVersion,
+      );
+      return response;
+    }
+
+    const encoder = new TextEncoder();
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let assistantText = "";
+        let officialWebSources: GovernanceChatSource[] =
+          buildGovernanceEvidenceWebSources(governanceEvidenceContext?.sources);
+
+        function send(event: string, data: unknown) {
+          controller.enqueue(encoder.encode(sseEvent(event, data)));
+        }
+
+        send("userMessage", { userMessage });
+
+        try {
+          const openaiStreamStartedAt = performance.now();
+          const openaiStream = await openai!.responses.create(
+            buildGovernanceOpenAIResponseRequest({
+              model: OPENAI_MODEL_GOVERNANCE,
+              instructions,
+              input: mapGovernanceMessagesToOpenAIInput(history, {
+                currentMessageOnly: currentQuestionOnly,
+              }),
+              forceWebFirst: false,
+              officialWeb: null,
+              hasGovernanceEvidenceSources,
+              streaming: true,
+              maxOutputTokens,
+            }) as any,
+            { signal: request.signal },
+          );
+
+          for await (const event of openaiStream as any) {
+            if (event?.type === "response.output_text.delta") {
+              const delta = String(event.delta ?? "");
+              if (delta) {
+                assistantText += delta;
+                send("delta", { delta });
+              }
+            }
+          }
+
+          telemetry.recordDuration(
+            "openai_generation",
+            "success",
+            performance.now() - openaiStreamStartedAt,
+            {
+              outputChars: assistantText.length,
+              streaming: true,
+            },
+          );
+        } catch (error) {
+          const detail = getCompactErrorMessage(error);
+
+          if (isRecoverableExternalError(error)) {
+            console.warn(
+              `[governance/chat] Streaming interrompido por falha temporária: ${detail}`,
+            );
+          } else {
+            console.error(
+              `[governance/chat] Falha não recuperável no streaming: ${detail}`,
+            );
+          }
+
+          send("error", {
+            error: isRecoverableExternalError(error)
+              ? "A conexão com o serviço de IA foi interrompida. Tente novamente."
+              : "Erro ao gerar resposta da IA institucional.",
+          });
+          controller.close();
+          return;
+        }
+
+        assistantText = assistantText.trim();
+
+        if (!assistantText) {
+          send("error", {
+            error: "A IA não retornou uma resposta válida.",
+          });
+          controller.close();
+          return;
+        }
+
+        // Governança V2: links não são gerados automaticamente no texto da IA.
+        // O backend expõe fontes e referências estruturadas em metadata.sources/references.
+        const finalizedResponse = finalizeGovernanceCoreResponse({
+            assistantText,
+            question: content,
+            responseSources,
+            responseReferences,
+            officialWebSources,
+            includeOfficialWebSources: governanceKnowledgePrimary,
+          });
+
+        const finalAssistantText = finalizedResponse.assistantText;
+        responseReferences = finalizedResponse.responseReferences;
+
+        const {
+          finalResponseSources,
+          officialLegalReferences,
+          responseReferencesForClient,
+        } = finalizedResponse;
+
+        if (finalAssistantText !== assistantText) {
+          if (finalAssistantText.startsWith(assistantText)) {
+            const finalDelta = finalAssistantText.slice(assistantText.length);
+
+            if (finalDelta) {
+              send("delta", { delta: finalDelta });
+            }
+          } else {
+            // O pós-processamento pode corrigir trechos já transmitidos. Nesse caso,
+            // concatenar a diferença corromperia a resposta exibida no cliente.
+            send("replace", { content: finalAssistantText });
+          }
+
+          assistantText = finalAssistantText;
+        }
+
+        const conversationAvailableBeforeSave =
+          await isConversationAvailable();
+
+        if (conversationAvailableBeforeSave === false) {
+          console.info(
+            "[governance/chat] Conversa removida durante a geração; resposta entregue sem persistência.",
+          );
+
+          const suggestions = await generateSuggestions({
+            assistantText,
+          });
+
+          if (suggestions.length > 0) {
+            send("suggestions", { suggestions });
+          }
+
+          send(
+            "done",
+            buildTransientResponsePayload({
+              assistantText,
+              streaming: true,
+              suggestions,
+              sources: finalResponseSources,
+              references: responseReferencesForClient,
+            }),
+          );
+
+          controller.close();
+          return;
+        }
+
+        const { message: assistantMessage, error: assistantMessageError } =
+          await telemetry.measure(
+            "persist_assistant_message",
+            () =>
+              saveAssistantMessage({
+                content: assistantText,
+                metadata: buildAssistantMessageMetadata({
+                  responseSources: finalResponseSources,
+                  references: responseReferencesForClient,
+                  officialLegalReferences,
+                  streaming: true,
+                  observability: telemetry.snapshot("success"),
+                }),
+              }),
+            (result) => ({
+              saved: Boolean(result.message),
+              hasError: Boolean(result.error),
+              streaming: true,
+            }),
+          );
+
+        if (assistantMessageError || !assistantMessage) {
+          const conversationAvailableAfterFailure =
+            await isConversationAvailable();
+
+          if (conversationAvailableAfterFailure === false) {
+            console.info(
+              "[governance/chat] Conversa removida durante a persistência; resposta entregue sem salvar.",
+            );
+
+            const suggestions = await generateSuggestions({
+              assistantText,
+            });
+
+            if (suggestions.length > 0) {
+              send("suggestions", { suggestions });
+            }
+
+            send(
+              "done",
+              buildTransientResponsePayload({
+                assistantText,
+                streaming: true,
+                suggestions,
+                sources: finalResponseSources,
+                references: responseReferencesForClient,
+              }),
+            );
+
+            controller.close();
+            return;
+          }
+
+          console.error(
+            `[governance/chat] Erro ao salvar resposta da IA: ${getCompactErrorMessage(assistantMessageError)}`,
+          );
+
+          send("error", {
+            error: "A resposta foi gerada, mas não pôde ser salva.",
+          });
+          controller.close();
+          return;
+        }
+
+        await telemetry.measure("touch_conversation", touchConversation);
+
+        const suggestions = await telemetry.measure(
+          "generate_suggestions",
+          () =>
+            generateSuggestions({
+              assistantText,
+              suppress: governancePlan.intent === "official_gazette",
+            }),
+          (result) => ({
+            count: result.length,
+          }),
+        );
+
+        if (suggestions.length > 0) {
+          send("suggestions", { suggestions });
+        }
+
+        telemetry.log("request_completed", "success", {
+          streaming: true,
+          responseChars: assistantText.length,
+        });
+
+        send(
+          "done",
+          buildGovernancePersistedResponsePayload({
+            userMessage,
+            assistantMessage,
+            conversationTitle,
+            suggestions,
+            sources: finalResponseSources,
+            references: responseReferencesForClient,
+          }),
+        );
+
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        ...SSE_HEADERS,
+        "x-request-id": telemetry.requestId,
+        "x-governance-pipeline-version": telemetry.pipelineVersion,
+      },
+    });
+  } catch (error) {
+    telemetry.log("request_failed", "error", {
+      errorType:
+        error instanceof Error && error.name ? error.name : "UnknownError",
+    });
+    console.error(
+      `[governance/chat][${telemetry.requestId}] Erro inesperado:`,
+      error,
+    );
+
+    return NextResponse.json(
+      { error: "Erro inesperado ao processar chat institucional." },
+      { status: 500 },
+    );
+  }
+}

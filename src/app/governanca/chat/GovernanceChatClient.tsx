@@ -44,6 +44,7 @@ import {
 
 import GovernanceHeader from "../components/GovernanceHeader";
 import GovernanceFooter from "../components/GovernanceFooter";
+import { flattenGovernanceResultReferences, parseGovernanceResultSnapshot } from "@/lib/governance/chat/governance-result";
 import {
   getGovernanceFunctionalRoleLabel,
   getGovernanceResponseModeLabel,
@@ -1201,424 +1202,6 @@ async function writeRichAnswerToClipboard(content: string) {
   await navigator.clipboard.writeText(plainText);
 }
 
-function getPlanaltoPeriodPath(year: number) {
-  if (year >= 2023 && year <= 2026) return "_ato2023-2026";
-  if (year >= 2019 && year <= 2022) return "_ato2019-2022";
-  if (year >= 2015 && year <= 2018) return "_ato2015-2018";
-  if (year >= 2011 && year <= 2014) return "_ato2011-2014";
-  if (year >= 2007 && year <= 2010) return "_ato2007-2010";
-  if (year >= 2003 && year <= 2006) return "_ato2003-2006";
-
-  return "";
-}
-
-function isKnownFederalPlanaltoReference(
-  rawNumber: string,
-  year: number,
-  normalizedReference: string,
-) {
-  const isLei = /\bLei(?:\s+Federal)?\b/i.test(normalizedReference);
-  const isLeiComplementar = /Lei\s+Complementar/i.test(normalizedReference);
-  const isDecreto = /\bDecreto\b/i.test(normalizedReference);
-
-  return (
-    (isLei && rawNumber === "14133" && year === 2021) ||
-    (isLei && rawNumber === "12527" && year === 2011) ||
-    (isLei && rawNumber === "13709" && year === 2018) ||
-    (isLeiComplementar && rawNumber === "101" && year === 2000) ||
-    (isDecreto && rawNumber === "12807" && year === 2025)
-  );
-}
-
-function getKnownFederalPlanaltoUrl(
-  rawNumber: string,
-  year: number,
-  normalizedReference: string,
-) {
-  if (!isKnownFederalPlanaltoReference(rawNumber, year, normalizedReference)) {
-    return null;
-  }
-
-  if (/Lei\s+Complementar/i.test(normalizedReference)) {
-    return `https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp${rawNumber}.htm`;
-  }
-
-  const periodPath = getPlanaltoPeriodPath(year);
-
-  if (/\bDecreto\b/i.test(normalizedReference)) {
-    if (periodPath) {
-      return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/decreto/d${rawNumber}.htm`;
-    }
-
-    return `https://www.planalto.gov.br/ccivil_03/decreto/d${rawNumber}.htm`;
-  }
-
-  if (periodPath) {
-    return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/lei/l${rawNumber}.htm`;
-  }
-
-  return `https://www.planalto.gov.br/ccivil_03/leis/l${rawNumber}.htm`;
-}
-
-function buildOfficialLegalUrl(reference: string) {
-  const normalized = reference.replace(/\s+/g, " ").trim();
-
-  if (/Constituição Federal/i.test(normalized)) {
-    return "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm";
-  }
-
-  const numberYear = normalized.match(
-    /(?:n[ºo.]?\s*)?(\d{1,6}(?:[./-]\d{1,6})?)\s*(?:\/|de\s+\d{1,2}\s+de\s+[a-zç]+\s+de\s+)(\d{4})/i,
-  );
-
-  if (!numberYear) {
-    return null;
-  }
-
-  const rawNumber = numberYear[1].replace(/\D/g, "");
-  const year = Number(numberYear[2]);
-  const periodPath = getPlanaltoPeriodPath(year);
-  const isExplicitFederal = /\bFederal\b/i.test(normalized);
-  const isExplicitMunicipal = /\bMunicipal\b/i.test(normalized) || /\bMunicípio\b/i.test(normalized);
-  const isExplicitState = /\bEstadual\b/i.test(normalized) || /\bEstado\b/i.test(normalized);
-  const knownFederalPlanaltoUrl = getKnownFederalPlanaltoUrl(rawNumber, year, normalized);
-
-  if (isExplicitMunicipal || isExplicitState) {
-    return null;
-  }
-
-  if (knownFederalPlanaltoUrl) {
-    return knownFederalPlanaltoUrl;
-  }
-
-  if (/Lei\s+Complementar/i.test(normalized)) {
-    if (!isExplicitFederal) {
-      return null;
-    }
-
-    return `https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp${rawNumber}.htm`;
-  }
-
-  if (/Lei(?:\s+Federal)?/i.test(normalized)) {
-    if (!isExplicitFederal) {
-      return null;
-    }
-
-    if (periodPath) {
-      return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/lei/l${rawNumber}.htm`;
-    }
-
-    return `https://www.planalto.gov.br/ccivil_03/leis/l${rawNumber}.htm`;
-  }
-
-  if (/Decreto/i.test(normalized)) {
-    if (!isExplicitFederal) {
-      return null;
-    }
-
-    if (periodPath) {
-      return `https://www.planalto.gov.br/ccivil_03/${periodPath}/${year}/decreto/d${rawNumber}.htm`;
-    }
-
-    return `https://www.planalto.gov.br/ccivil_03/decreto/d${rawNumber}.htm`;
-  }
-
-  return null;
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function normalizeTextForSearch(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function getSourceUrl(source: GovernanceChatSource | undefined) {
-  return String(
-    source?.url ??
-      source?.href ??
-      source?.source_url ??
-      source?.storage_url ??
-      "",
-  ).trim();
-}
-
-function getInstitutionalSourceByHint(
-  sources: GovernanceChatSource[],
-  hints: string[],
-) {
-  const normalizedHints = hints
-    .map((hint) => normalizeTextForSearch(hint))
-    .filter(Boolean);
-
-  return sources.find((source) => {
-    const title = normalizeTextForSearch(source?.title ?? "");
-    const type = normalizeTextForSearch(source?.type ?? "");
-    const url = getSourceUrl(source);
-
-    return (
-      Boolean(url) &&
-      normalizedHints.some((hint) => title.includes(hint) || type.includes(hint))
-    );
-  });
-}
-
-type ProtectedMarkdownRange = {
-  start: number;
-  end: number;
-};
-
-function collectProtectedMarkdownRanges(content: string): ProtectedMarkdownRange[] {
-  const source = String(content ?? "");
-  const ranges: ProtectedMarkdownRange[] = [];
-
-  const patterns = [
-    // Links Markdown já existentes: [texto](url) ou ![alt](url)
-    /!?\[[^\]\n]+\]\([^\s)]+(?:\s+"[^"]*")?\)/g,
-    // Links HTML já existentes.
-    /<a\b[^>]*>[\s\S]*?<\/a>/gi,
-    // URLs cruas, para evitar substituição dentro de endereços já presentes.
-    /https?:\/\/[^\s)\]]+/gi,
-  ];
-  for (const pattern of patterns) {
-    let match: RegExpExecArray | null;
-
-    while ((match = pattern.exec(source)) !== null) {
-      ranges.push({
-        start: match.index,
-        end: match.index + match[0].length,
-      });
-    }
-  }
-
-  return ranges.sort((a, b) => a.start - b.start || a.end - b.end);
-}
-
-function isOffsetInsideProtectedMarkdownRange(
-  offset: number,
-  length: number,
-  ranges: ProtectedMarkdownRange[],
-) {
-  const end = offset + length;
-
-  return ranges.some((range) => offset >= range.start && end <= range.end);
-}
-
-function linkMarkdownReference(content: string, labelPattern: RegExp, url: string) {
-  if (!url) {
-    return content;
-  }
-
-  const protectedRanges = collectProtectedMarkdownRanges(content);
-
-  return content.replace(labelPattern, (reference, _match, offset) => {
-    if (
-      isOffsetInsideProtectedMarkdownRange(
-        Number(offset),
-        String(reference).length,
-        protectedRanges,
-      )
-    ) {
-      return reference;
-    }
-
-    return `[${reference}](${url})`;
-  });
-}
-
-function replaceExistingMarkdownLinkByText(
-  content: string,
-  textPattern: RegExp,
-  url: string,
-) {
-  if (!url) {
-    return content;
-  }
-
-  return content.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (full, label) => {
-    textPattern.lastIndex = 0;
-
-    if (!textPattern.test(String(label))) {
-      return full;
-    }
-
-    return `[${label}](${url})`;
-  });
-}
-
-function linkifyInstitutionalReferences(
-  content: string,
-  institutionalSources: GovernanceChatSource[],
-) {
-  let output = content;
-  const planoDiretorSource = getInstitutionalSourceByHint(institutionalSources, [
-    "plano diretor",
-    "plano",
-  ]);
-  const leiOrganicaSource = getInstitutionalSourceByHint(institutionalSources, [
-    "lei organica",
-    "orgânica",
-  ]);
-  const codigoTributarioSource = getInstitutionalSourceByHint(institutionalSources, [
-    "codigo tributario",
-    "código tributário",
-    "tributario",
-  ]);
-
-  const planoDiretorUrl = getSourceUrl(planoDiretorSource);
-  const leiOrganicaUrl = getSourceUrl(leiOrganicaSource);
-  const codigoTributarioUrl = getSourceUrl(codigoTributarioSource);
-  const administrativeStructureUrl =
-    getAdministrativeStructureSourceUrl(institutionalSources);
-
-  if (administrativeStructureUrl) {
-    const lc047Pattern =
-      /\b(Lei\s+Complementar\s+n[º°]?\s*0*47\/2024|LC\s+n[º°]?\s*0*47\/2024)\b/gi;
-
-    output = replaceExistingMarkdownLinkByText(
-      output,
-      lc047Pattern,
-      administrativeStructureUrl,
-    );
-    output = linkMarkdownReference(output, lc047Pattern, administrativeStructureUrl);
-  }
-
-  if (planoDiretorUrl) {
-    const planoPattern =
-      /\b(Lei\s+Complementar(?:\s+Municipal)?\s+n[º°]?\s*0*04\/2025|Plano\s+Diretor(?:\s+Municipal)?(?:\s+de\s+Santana\s+do\s+Itararé)?)\b/gi;
-
-    output = replaceExistingMarkdownLinkByText(output, planoPattern, planoDiretorUrl);
-    output = linkMarkdownReference(output, planoPattern, planoDiretorUrl);
-  }
-
-  if (leiOrganicaUrl) {
-    const leiOrganicaPattern =
-      /\b(Lei\s+Orgânica(?:\s+do\s+Município(?:\s+de\s+Santana\s+do\s+Itararé)?)?)\b/gi;
-
-    output = replaceExistingMarkdownLinkByText(output, leiOrganicaPattern, leiOrganicaUrl);
-    output = linkMarkdownReference(output, leiOrganicaPattern, leiOrganicaUrl);
-  }
-
-  if (codigoTributarioUrl) {
-    const codigoPattern =
-      /\b(Código\s+Tributário(?:\s+do\s+Município(?:\s+de\s+Santana\s+do\s+Itararé)?)?|Sistema\s+Tributário\s+do\s+Município)\b/gi;
-
-    output = replaceExistingMarkdownLinkByText(output, codigoPattern, codigoTributarioUrl);
-    output = linkMarkdownReference(output, codigoPattern, codigoTributarioUrl);
-  }
-
-  for (const source of institutionalSources) {
-    const title = String(source?.title ?? "").trim();
-    const url = getSourceUrl(source);
-
-    if (!title || !url || title.length < 4) {
-      continue;
-    }
-
-    const titlePattern = new RegExp(`\\b(${escapeRegExp(title)})\\b`, "gi");
-    output = replaceExistingMarkdownLinkByText(output, titlePattern, url);
-    output = linkMarkdownReference(output, titlePattern, url);
-  }
-
-  return output;
-}
-
-
-function sanitizeUnsupportedPlanaltoMarkdownLinks(content: string) {
-  const paranaCreationLawUrl =
-    "https://www.legislacao.pr.gov.br/legislacao/pesquisarAto.do?action=exibir&codAto=12935&indice=1&totalRegistros=1";
-
-  return String(content ?? "").replace(
-    /\[([^\]]+)\]\((https?:\/\/(?:www\.)?planalto\.gov\.br\/[^)]+)\)/gi,
-    (full, label) => {
-      const normalizedLabel = String(label ?? "");
-
-      if (/4\.?338(?:\/1961)?/i.test(normalizedLabel)) {
-        return `[${label}](${paranaCreationLawUrl})`;
-      }
-
-      const numberYear = normalizedLabel.match(
-        /(?:n[ºo.]?\s*)?(\d{1,6}(?:[./-]\d{1,6})?)\s*(?:\/|de\s+\d{1,2}\s+de\s+[a-zç]+\s+de\s+)(\d{4})/i,
-      );
-      const rawNumber = numberYear?.[1]?.replace(/\D/g, "") ?? "";
-      const year = Number(numberYear?.[2] ?? 0);
-      const isFederal =
-        /\bFederal\b/i.test(normalizedLabel) ||
-        /Constitui[cç][aã]o Federal/i.test(normalizedLabel) ||
-        isKnownFederalPlanaltoReference(rawNumber, year, normalizedLabel);
-
-      if (isFederal) {
-        return full;
-      }
-
-      return String(label ?? "");
-    },
-  );
-}
-
-function getAdministrativeStructureSourceUrl(
-  institutionalSources: GovernanceChatSource[],
-) {
-  const source = institutionalSources.find((item) => {
-    const title = normalizeTextForSearch(item?.title ?? "");
-    const url = getSourceUrl(item);
-
-    return Boolean(url) && (
-      title.includes("estrutura administrativa") ||
-      title.includes("administrativa da prefeitura")
-    );
-  });
-
-  return getSourceUrl(source);
-}
-
-function linkifyLegalReferences(
-  content: string,
-  institutionalSources: GovernanceChatSource[] = [],
-) {
-  const contentWithoutBadPlanaltoLinks =
-    sanitizeUnsupportedPlanaltoMarkdownLinks(content);
-
-  const contentWithInstitutionalLinks = linkifyInstitutionalReferences(
-    contentWithoutBadPlanaltoLinks,
-    institutionalSources,
-  );
-
-  const legalReferencePattern =
-    /\b(Constituição Federal(?: de 1988)?(?:\s*[—–-]\s*art\.?\s*\d+[º°]?)?|Lei(?:\s+Federal|\s+Complementar)?\s+n[º°]?\s*[\d.]+\/\d{4}|Decreto\s+n[º°]?\s*[\d.]+\/\d{4}|Medida Provisória\s+n[º°]?\s*[\d.]+\/\d{4}|Portaria\s+n[º°]?\s*[\d.]+\/\d{4}|Instrução Normativa\s+n[º°]?\s*[\d.]+\/\d{4}|Resolução\s+n[º°]?\s*[\d.]+\/\d{4}|Emenda Constitucional\s+n[º°]?\s*[\d.]+)\b/gi;
-
-  const protectedRanges = collectProtectedMarkdownRanges(contentWithInstitutionalLinks);
-
-  return contentWithInstitutionalLinks.replace(
-    legalReferencePattern,
-    (reference, _match, offset) => {
-      if (
-        isOffsetInsideProtectedMarkdownRange(
-          Number(offset),
-          String(reference).length,
-          protectedRanges,
-        )
-      ) {
-        return reference;
-      }
-
-      const officialUrl = buildOfficialLegalUrl(reference);
-
-      if (!officialUrl) {
-        return reference;
-      }
-
-      return `[${reference}](${officialUrl})`;
-    },
-  );
-}
-
 function splitAssistantInlineSuggestion(content: string): {
   contentWithoutSuggestion: string;
   suggestionText: string | null;
@@ -1804,17 +1387,14 @@ function removeNoWebConsultationNoise(content: string) {
 
 function normalizeAssistantMarkdown(
   content: string,
-  institutionalSources: GovernanceChatSource[] = [],
+  _institutionalSources: GovernanceChatSource[] = [],
 ) {
-  return linkifyLegalReferences(
-    removeNoWebConsultationNoise(
-      improveListNestingAfterColon(content)
-        .replace(/\r\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .replace(/^\s*---+\s*$/gm, "")
-        .trim(),
-    ),
-    institutionalSources,
+  return removeNoWebConsultationNoise(
+    improveListNestingAfterColon(content)
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/^\s*---+\s*$/gm, "")
+      .trim(),
   );
 }
 
@@ -1892,6 +1472,63 @@ function mergeMessages(
   });
 }
 
+
+function getCompactUserPdfMessageContent(content: string) {
+  const rawContent = String(content ?? "").replace(/\r\n/g, "\n").trim();
+  const attachmentMarker = "PDFs selecionados para esta pergunta:";
+  const markerIndex = rawContent.indexOf(attachmentMarker);
+
+  if (markerIndex >= 0) {
+    const beforeMarker = rawContent.slice(0, markerIndex);
+    const afterMarker = rawContent.slice(markerIndex + attachmentMarker.length);
+
+    const actionLine = beforeMarker
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) =>
+        Boolean(line) &&
+        !line.startsWith("Considere os PDFs selecionados") &&
+        !line.startsWith("Não use PDFs anteriores") &&
+        !line.startsWith("Instrução operacional:"),
+      );
+
+    const attachmentLines = afterMarker
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("- "));
+
+    const compactSections = [
+      actionLine ?? "",
+      attachmentLines.length > 0
+        ? [attachmentMarker, ...attachmentLines].join("\n")
+        : "",
+    ].filter(Boolean);
+
+    return compactSections.join("\n\n").trim();
+  }
+
+  return rawContent
+    .split("\n")
+    .filter((line) => {
+      const normalizedLine = line.trim();
+
+      return !(
+        normalizedLine.startsWith("Considere os PDFs selecionados") ||
+        normalizedLine.startsWith("Não use PDFs anteriores") ||
+        normalizedLine.startsWith("Instrução operacional:")
+      );
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function getCompactConversationTitle(title: string | null | undefined) {
+  return String(title ?? "")
+    .replace(/\s+Considere os PDFs selecionados(?:\s+nesta mensagem)?:?.*$/i, "")
+    .trim();
+}
+
 function getConversationPreview(messages: GovernanceMessage[]) {
   // O histórico deve identificar a conversa pela PRIMEIRA pergunta do usuário,
   // não pela última interação.
@@ -1901,7 +1538,9 @@ function getConversationPreview(messages: GovernanceMessage[]) {
     return "";
   }
 
-  const preview = firstUserMessage.content.replace(/\s+/g, " ").trim();
+  const preview = getCompactUserPdfMessageContent(firstUserMessage.content)
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (preview.length <= 54) {
     return preview;
@@ -1925,7 +1564,7 @@ function getConversationDisplayTitle(
   conversationMessages: GovernanceMessage[],
 ) {
   if (!isDefaultConversationTitle(conversation.title)) {
-    return conversation.title;
+    return getCompactConversationTitle(conversation.title);
   }
 
   return getConversationPreview(conversationMessages);
@@ -1950,7 +1589,7 @@ function getConversationSearchText(
 
   const searchableMessages = conversationMessages
     .filter((message) => message.role === "user")
-    .map((message) => message.content)
+    .map((message) => getCompactUserPdfMessageContent(message.content))
     .join(" ");
 
   return normalizeConversationSearchText(
@@ -1980,8 +1619,6 @@ function buildMessageWithAttachments(
     "",
     "PDFs selecionados para esta pergunta:",
     attachmentList,
-    "",
-    "Instrução operacional: considere apenas os PDFs selecionados nesta pergunta. Não use PDFs de mensagens anteriores, salvo se o usuário pedir comparação ou histórico.",
   ].join("\n");
 }
 
@@ -2024,6 +1661,7 @@ export default function GovernanceChatClient({
     initialConversations[0]?.id ?? null,
   );
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
   const stoppedByUserRef = useRef(false);
 
   const [messages, setMessages] =
@@ -2282,6 +1920,17 @@ export default function GovernanceChatClient({
       setMessageError("Digite uma mensagem antes de enviar.");
       return;
     }
+
+    if (activeRequestIdRef.current) {
+      setMessageError(
+        "Aguarde a resposta atual ou interrompa-a antes de enviar outra mensagem.",
+      );
+      return;
+    }
+
+    const clientRequestId = crypto.randomUUID();
+    activeRequestIdRef.current = clientRequestId;
+
     const selectedPdfAttachments =
       options?.attachmentsOverride ??
       (selectedPdfAttachmentIds.length > 0
@@ -2305,7 +1954,6 @@ export default function GovernanceChatClient({
     }));
 
     stoppedByUserRef.current = false;
-    abortControllerRef.current?.abort();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
@@ -2317,6 +1965,7 @@ export default function GovernanceChatClient({
           headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
+            "x-client-request-id": clientRequestId,
           },
           body: JSON.stringify({
             conversationId,
@@ -2324,8 +1973,13 @@ export default function GovernanceChatClient({
             responseMode: responseModeForRequest,
             selectedPdfFileIds: selectedPdfAttachments.map((file) => file.id),
             selectedPdfAttachmentNames: selectedPdfAttachments.map((file) => file.name),
+            clientRequestId,
           }),
         });
+
+        if (activeRequestIdRef.current !== clientRequestId) {
+          return;
+        }
 
         if (!response.ok) {
           const payload = await response.json().catch(() => null);
@@ -2383,6 +2037,10 @@ export default function GovernanceChatClient({
         let buffer = "";
 
         function handleStreamEvent(rawEvent: string) {
+          if (activeRequestIdRef.current !== clientRequestId) {
+            return;
+          }
+
           const lines = rawEvent.split("\n");
           const eventLine = lines.find((line) => line.startsWith("event:"));
           const dataLines = lines.filter((line) => line.startsWith("data:"));
@@ -2410,6 +2068,17 @@ export default function GovernanceChatClient({
 
             if (delta) {
               setStreamingAssistantText((current) => current + delta);
+            }
+
+            return;
+          }
+
+          if (eventName === "replace") {
+            const replacement =
+              typeof data?.content === "string" ? data.content : "";
+
+            if (replacement) {
+              setStreamingAssistantText(replacement);
             }
 
             return;
@@ -2479,6 +2148,11 @@ export default function GovernanceChatClient({
         while (true) {
           const { done, value } = await reader.read();
 
+          if (activeRequestIdRef.current !== clientRequestId) {
+            await reader.cancel().catch(() => undefined);
+            return;
+          }
+
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
@@ -2498,6 +2172,10 @@ export default function GovernanceChatClient({
           handleStreamEvent(buffer);
         }
       } catch (error) {
+        if (activeRequestIdRef.current !== clientRequestId) {
+          return;
+        }
+
         if (error instanceof DOMException && error.name === "AbortError") {
           setMessageError(null);
           return;
@@ -2518,18 +2196,22 @@ export default function GovernanceChatClient({
           abortControllerRef.current = null;
         }
 
-        setPendingAssistantConversationId(null);
-        setPendingUserMessageContent(null);
-        setPendingUserMessageCreatedAt(null);
-        setStreamingAssistantText("");
-        setSelectedResponseMode("objective");
-        setIsResponseModeMenuOpen(false);
+        if (activeRequestIdRef.current === clientRequestId) {
+          activeRequestIdRef.current = null;
+          setPendingAssistantConversationId(null);
+          setPendingUserMessageContent(null);
+          setPendingUserMessageCreatedAt(null);
+          setStreamingAssistantText("");
+          setSelectedResponseMode("objective");
+          setIsResponseModeMenuOpen(false);
+        }
       }
     });
   }
 
   function handleStopMessage() {
     stoppedByUserRef.current = true;
+    activeRequestIdRef.current = null;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
@@ -2761,15 +2443,20 @@ export default function GovernanceChatClient({
     conversation: GovernanceConversation,
     conversationMessages: GovernanceMessage[],
   ) {
-    const title = String(conversation.title ?? "Conversa").trim() || "Conversa";
+    const title =
+      getCompactConversationTitle(conversation.title) || "Conversa";
 
     let questionNumber = 0;
     let answerNumber = 0;
 
     const body = sortConversationMessagesForCopy(conversationMessages)
       .map((message) => {
+        const sourceContent =
+          message.role === "user"
+            ? getCompactUserPdfMessageContent(message.content)
+            : message.content;
         const content = compactConversationCopyText(
-          stripMarkdownForCopy(message.content),
+          stripMarkdownForCopy(sourceContent),
         );
 
         if (!content) {
@@ -2881,6 +2568,13 @@ export default function GovernanceChatClient({
 
 
   function handleSendMessage() {
+    if (activeRequestIdRef.current) {
+      setMessageError(
+        "Aguarde a resposta atual ou interrompa-a antes de enviar outra mensagem.",
+      );
+      return;
+    }
+
     sendContent(messageText);
   }
 
@@ -2964,7 +2658,9 @@ export default function GovernanceChatClient({
           : null;
 
       const questionText = previousQuestion?.content
-        ? normalizeMessageCopyText(previousQuestion.content)
+        ? normalizeMessageCopyText(
+            getCompactUserPdfMessageContent(previousQuestion.content),
+          )
         : "";
 
       const answerText = normalizeMessageCopyText(message.content);
@@ -3255,16 +2951,7 @@ export default function GovernanceChatClient({
       return;
     }
 
-    const selectedPdfNames = selectedPdfAttachments
-      .map((file) => file.name)
-      .join(", ");
-
-    const actionPrompt = [
-      action,
-      "",
-      `Considere os PDFs selecionados nesta mensagem: ${selectedPdfNames}.`,
-      "Não use PDFs anteriores da conversa, salvo se eu pedir comparação ou histórico.",
-    ].join("\n");
+    const actionPrompt = action;
 
     setIsPdfActionsMenuOpen(false);
     sendContent(actionPrompt, {
@@ -3287,27 +2974,27 @@ export default function GovernanceChatClient({
 
   function getMessageReferences(message: GovernanceMessage): GovernanceChatSource[] {
     const metadata = message.metadata ?? {};
-    const references = (metadata as { references?: unknown }).references;
+    const governanceResult = parseGovernanceResultSnapshot(metadata);
 
+    // Mensagens do pipeline limpo são reidratadas exclusivamente pelo snapshot
+    // persistido e validado por um contrato compartilhado com o backend.
+    if (governanceResult) {
+      return flattenGovernanceResultReferences(
+        governanceResult,
+      ) as GovernanceChatSource[];
+    }
+
+    const references = (metadata as { references?: unknown }).references;
     if (Array.isArray(references)) {
       return references as GovernanceChatSource[];
     }
 
+    // Compatibilidade visual somente para mensagens anteriores ao snapshot.
     const sources = getMessageSources(message);
-
     return [
-      ...(sources.institutional ?? []).map((source) => ({
-        ...source,
-        kind: "institutional",
-      })),
-      ...(sources.officialSources ?? []).map((source) => ({
-        ...source,
-        kind: "official",
-      })),
-      ...(sources.officialGazette ?? []).map((source) => ({
-        ...source,
-        kind: "official",
-      })),
+      ...(sources.institutional ?? []).map((source) => ({ ...source, kind: "institutional" })),
+      ...(sources.officialSources ?? []).map((source) => ({ ...source, kind: "consultation" })),
+      ...(sources.officialGazette ?? []).map((source) => ({ ...source, kind: "official" })),
     ];
   }
 
@@ -3341,9 +3028,55 @@ export default function GovernanceChatClient({
     return Array.from(unique.values());
   }
 
+
+  function renderLegalReferences(message: GovernanceMessage) {
+    const legalReferences = normalizeInstitutionalSources(
+      getMessageReferences(message).filter((reference) => reference.kind === "legal"),
+    );
+
+    if (legalReferences.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="mt-5 border-t border-[#dedede] pt-4 text-sm">
+        <p className="mb-2 font-black text-[#0f3a4a]">Base legal</p>
+
+        <ul className="space-y-1.5">
+          {legalReferences.map((source, index) => {
+            const key = `legal-${source.title}-${source.url ?? index}`;
+
+            if (source.url) {
+              return (
+                <li key={key}>
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center gap-2 font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
+                  >
+                    <span aria-hidden="true">✓</span>
+                    <span>{source.title}</span>
+                  </a>
+                </li>
+              );
+            }
+
+            return (
+              <li key={key} className="inline-flex items-center gap-2 font-semibold text-slate-700">
+                <span aria-hidden="true">✓</span>
+                <span>{source.title}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
+  }
+
   function renderInstitutionalSources(message: GovernanceMessage) {
     const consultedReferences = normalizeInstitutionalSources(
-      getMessageReferences(message),
+      getMessageReferences(message).filter((reference) => reference.kind !== "legal" && reference.kind !== "consultation"),
     );
 
     if (consultedReferences.length === 0) {
@@ -3381,6 +3114,54 @@ export default function GovernanceChatClient({
                 key={key}
                 className="inline-flex items-center gap-2 font-semibold text-slate-700"
               >
+                <span aria-hidden="true">✓</span>
+                <span>{source.title}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
+  }
+
+
+  function renderConsultationChannels(message: GovernanceMessage) {
+    const consultationChannels = normalizeInstitutionalSources(
+      getMessageReferences(message).filter((reference) => reference.kind === "consultation"),
+    );
+
+    if (consultationChannels.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="mt-5 border-t border-[#dedede] pt-4 text-sm">
+        <p className="mb-2 font-black text-[#0f3a4a]">
+          Canais oficiais para consulta
+        </p>
+
+        <ul className="space-y-1.5">
+          {consultationChannels.map((source, index) => {
+            const key = `consultation-${source.title}-${source.url ?? index}`;
+
+            if (source.url) {
+              return (
+                <li key={key}>
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center gap-2 font-semibold text-[#0f3a4a] underline underline-offset-2 transition hover:text-[#15586f]"
+                  >
+                    <span aria-hidden="true">✓</span>
+                    <span>{source.title}</span>
+                  </a>
+                </li>
+              );
+            }
+
+            return (
+              <li key={key} className="inline-flex items-center gap-2 font-semibold text-slate-700">
                 <span aria-hidden="true">✓</span>
                 <span>{source.title}</span>
               </li>
@@ -3673,14 +3454,16 @@ export default function GovernanceChatClient({
           />
         )}
 
+        {renderLegalReferences(message)}
         {renderInstitutionalSources(message)}
+        {renderConsultationChannels(message)}
 
         {inlineSuggestions.length > 0 && (
           <button
             type="button"
             onClick={() => handleFillInputSuggestion(inlineSuggestions[0])}
             disabled={isSendingMessage}
-            className="mt-5 w-full rounded-3xl border border-[#dedede] bg-white px-5 py-4 text-left text-xs font-semibold leading-6 text-[#0f3a4a] shadow-sm transition hover:border-[#0f3a4a] hover:bg-[#eef5f7] disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-5 w-full rounded-3xl border border-[#0f3a4a] bg-[#eef5f7] px-5 py-4 text-left text-xs font-semibold leading-6 text-[#0f3a4a] shadow-sm transition duration-200 hover:-translate-y-0.5 hover:bg-[#dfecef] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f3a4a]/30 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-sm"
           >
             {inlineSuggestions[0]}
           </button>
@@ -4107,7 +3890,9 @@ export default function GovernanceChatClient({
                                   renderAssistantContent(message)
                                 ) : (
                                   <div className="whitespace-pre-wrap">
-                                    {message.content}
+                                    {getCompactUserPdfMessageContent(
+                                      message.content,
+                                    )}
                                   </div>
                                 )}
 
@@ -4160,7 +3945,9 @@ export default function GovernanceChatClient({
                                       </div>
                                     )}
 
-                                    {isLastAssistant && governanceSuggestions.length > 0 && (
+                                    {isLastAssistant &&
+                                      !isWaitingForAssistant &&
+                                      governanceSuggestions.length > 0 && (
                                       <div className="mt-4 text-center">
                                         <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
                                           Sugestões de próxima pergunta

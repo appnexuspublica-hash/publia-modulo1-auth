@@ -1,0 +1,143 @@
+// src/lib/governance/chat/references.ts
+
+export type GovernanceChatSource = {
+  id: string;
+  title: string;
+  url: string | null;
+  type: string | null;
+};
+
+export type GovernanceChatSources = {
+  institutional: GovernanceChatSource[];
+  officialGazette: GovernanceChatSource[];
+  officialSources: GovernanceChatSource[];
+  externalSources?: GovernanceChatSource[];
+};
+
+export type GovernanceChatReference = {
+  title: string;
+  url: string | null;
+  kind: "institutional" | "official" | "legal";
+  origin?: "knowledge" | "web";
+};
+
+export function buildGovernanceChatReferences(
+  sources: GovernanceChatSources,
+): GovernanceChatReference[] {
+  const unique = new Map<string, GovernanceChatReference>();
+
+  function addReference(
+    source: GovernanceChatSource,
+    kind: GovernanceChatReference["kind"],
+  ) {
+    const title = String(source?.title ?? "").trim();
+    const url = String(source?.url ?? "").trim() || null;
+
+    if (!title) {
+      return;
+    }
+
+    const key = `${kind}::${title.toLowerCase()}::${url ?? ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, { title, url, kind });
+    }
+  }
+
+  for (const source of sources.institutional ?? []) {
+    addReference(source, "institutional");
+  }
+
+  for (const source of sources.officialSources ?? []) {
+    addReference(source, "official");
+  }
+
+  for (const source of sources.officialGazette ?? []) {
+    addReference(source, "official");
+  }
+
+  for (const source of sources.externalSources ?? []) {
+    const title = String(source?.title ?? "").trim();
+    const url = String(source?.url ?? "").trim() || null;
+
+    if (!title) continue;
+
+    const key = `official::${title.toLowerCase()}::${url ?? ""}`;
+    if (!unique.has(key)) {
+      unique.set(key, {
+        title,
+        url,
+        kind: "official",
+        origin: "web",
+      });
+    }
+  }
+
+  return Array.from(unique.values());
+}
+
+
+export function normalizeGovernanceReferenceKey(reference: GovernanceChatReference) {
+  const title = String(reference.title ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+
+  const normalizedTitle = title
+    .replace(/lei\s*n?[º°]?\s*14\.?133\/?2021/g, "lei 14133 2021")
+    .replace(/lei\s*14\.?133\/?2021/g, "lei 14133 2021")
+    .replace(/decreto\s*(?:federal\s*)?n?[º°]?\s*12\.?807\/?2025/g, "decreto 12807 2025")
+    .replace(/tribunal de contas do estado do parana.*tce\s*pr|tce\s*pr/g, "tce pr");
+
+  return `${reference.kind}::${normalizedTitle}`;
+}
+
+export function mergeGovernanceChatReferences(
+  baseReferences: GovernanceChatReference[],
+  additionalReferences: GovernanceChatReference[],
+) {
+  const merged = new Map<string, GovernanceChatReference>();
+
+  for (const reference of [...baseReferences, ...additionalReferences]) {
+    const title = String(reference.title ?? "").trim();
+    const url = String(reference.url ?? "").trim() || null;
+
+    if (!title) {
+      continue;
+    }
+
+    const normalizedReference: GovernanceChatReference = {
+      title,
+      url,
+      kind: reference.kind,
+      origin: reference.origin,
+    };
+    const key = normalizeGovernanceReferenceKey(normalizedReference);
+    const existing = merged.get(key);
+
+    if (!existing) {
+      merged.set(key, normalizedReference);
+      continue;
+    }
+
+    const existingHasUrl = Boolean(String(existing.url ?? "").trim());
+    const incomingHasUrl = Boolean(url);
+    const incomingIsRicher =
+      incomingHasUrl && !existingHasUrl
+        ? true
+        : title.length > String(existing.title ?? "").trim().length;
+
+    if (incomingIsRicher) {
+      merged.set(key, {
+        title: title.length >= String(existing.title ?? "").trim().length ? title : existing.title,
+        url: incomingHasUrl ? url : existing.url,
+        kind: reference.kind,
+        origin: reference.origin ?? existing.origin,
+      });
+    }
+  }
+
+  return Array.from(merged.values());
+}

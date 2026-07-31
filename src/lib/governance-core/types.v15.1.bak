@@ -1,0 +1,55 @@
+import type { GovernanceChatReference, GovernanceChatSources } from "@/lib/governance/chat/references";
+import type { GovernanceRecoveryResult } from "@/lib/governance/recovery/types";
+
+export type GovernanceV2Intent =
+  | "general_legal"
+  | "institutional_document"
+  | "official_gazette"
+  | "official_directory"
+  | "financial_fact"
+  | "comparison"
+  | "mixed";
+
+export type GovernanceV2Provider = "institutional" | "official_gazette" | "official_sources" | "legal";
+
+export type GovernanceV2QueryPlan = {
+  version: "v2";
+  intent: GovernanceV2Intent;
+  normalizedQuestion: string;
+  requiredProviders: GovernanceV2Provider[];
+  optionalProviders: GovernanceV2Provider[];
+  answerShape: "direct" | "direct_numeric" | "yes_no" | "document_summary" | "comparison" | "directory";
+  entities: {
+    actType: string | null;
+    actNumber: string | null;
+    actYear: number | null;
+    year: number | null;
+    companyTerms: string[];
+    roleTerms: string[];
+    topics: string[];
+  };
+};
+
+export type GovernanceV2Evidence = {
+  evidenceId: string;
+  provider: GovernanceV2Provider;
+  title: string;
+  excerpt: string;
+  url: string | null;
+  documentId: string | null;
+  chunkId: string | null;
+  score: number;
+  exact: boolean;
+  factual: boolean;
+  metadata: Record<string, unknown>;
+};
+
+export type GovernanceV2Result = {
+  queryPlan: GovernanceV2QueryPlan;
+  evidence: GovernanceV2Evidence[];
+  contextText: string;
+  responseSources: GovernanceChatSources;
+  responseReferences: GovernanceChatReference[];
+  recoveryResult: GovernanceRecoveryResult;
+  diagnostics: Record<string, unknown>;
+};

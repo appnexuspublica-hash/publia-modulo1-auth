@@ -13,6 +13,7 @@ const PLANALTO = {
   lgpd: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
   lrf: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
   constituicao: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+  processoAdministrativo: "https://www.planalto.gov.br/ccivil_03/leis/l9784.htm",
 };
 
 export function getGovernanceLegalCatalogForQuery(analysis: GovernanceQueryAnalysis): GovernanceLegalCatalogItem[] {
@@ -122,6 +123,20 @@ export function getCanonicalLegalSourcesFromText(question: string, answer: strin
       id: "lc-101-2000-lrf-arts-18-23",
       title: "Lei Complementar nº 101/2000 (LRF), arts. 18 a 23",
       url: PLANALTO.lrf,
+      type: "legislação federal",
+    });
+  }
+
+  if (
+    /lei\s*n?[º°]?\s*9\.?784\/1999/.test(text) ||
+    /lei\s*9\.?784\/1999/.test(text) ||
+    /lei geral do processo administrativo/.test(text) ||
+    /processo administrativo federal/.test(text)
+  ) {
+    sources.push({
+      id: "lei-9784-1999-processo-administrativo",
+      title: "Lei nº 9.784/1999 — Processo Administrativo Federal",
+      url: PLANALTO.processoAdministrativo,
       type: "legislação federal",
     });
   }

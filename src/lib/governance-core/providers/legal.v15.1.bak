@@ -1,0 +1,94 @@
+import type { GovernanceV2Evidence } from "../types";
+
+function item(params: {
+  id: string;
+  title: string;
+  excerpt: string;
+  url: string;
+  score?: number;
+}): GovernanceV2Evidence {
+  return {
+    evidenceId: `legal:${params.id}`,
+    provider: "legal",
+    title: params.title,
+    excerpt: params.excerpt,
+    url: params.url,
+    documentId: null,
+    chunkId: null,
+    score: params.score ?? 95,
+    exact: true,
+    factual: true,
+    metadata: { kind: "legal_reference" },
+  };
+}
+
+export async function recoverLegalV2(question: string): Promise<GovernanceV2Evidence[]> {
+  const q = question.toLowerCase();
+  const items: GovernanceV2Evidence[] = [];
+
+  if (/constitui|art\.?\s*37|princ[ií]pios constitucionais|legalidade|impessoalidade|moralidade|publicidade|efici[eê]ncia/.test(q)) {
+    items.push(item({
+      id: "constituicao",
+      title: "Constituição Federal de 1988",
+      excerpt: "Art. 37, caput: legalidade, impessoalidade, moralidade, publicidade e eficiência.",
+      url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+      score: 100,
+    }));
+  }
+
+  if (/lei\s*14\.?133|licitac|sem licitar|sem licita[cç][aã]o|dispensa|inexigibilidade|contrata[cç][aã]o direta|fracionamento|dividir a compra|quanto pode (?:ser )?contratado|quanto a prefeitura pode comprar/.test(q)) {
+    items.push(item({
+      id: "lei-14133",
+      title: "Lei nº 14.133/2021 — Lei de Licitações e Contratos Administrativos",
+      excerpt: "Disciplina licitações, contratos e hipóteses de contratação direta; valores de dispensa devem ser conferidos na atualização anual vigente.",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/l14133.htm",
+      score: 100,
+    }));
+  }
+
+  if (/\blai\b|lei de acesso|acesso [aà] informa[cç][aã]o/.test(q)) {
+    items.push(item({
+      id: "lai",
+      title: "Lei nº 12.527/2011 — Lei de Acesso à Informação",
+      excerpt: "Regulamenta o direito de acesso a informações públicas.",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm",
+    }));
+  }
+
+  if (/\blgpd\b|prote[cç][aã]o de dados|dados pessoais/.test(q)) {
+    items.push(item({
+      id: "lgpd",
+      title: "Lei nº 13.709/2018 — Lei Geral de Proteção de Dados Pessoais",
+      excerpt: "Dispõe sobre o tratamento de dados pessoais.",
+      url: "https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm",
+    }));
+  }
+
+  if (/\blrf\b|responsabilidade fiscal|despesa com pessoal/.test(q)) {
+    items.push(item({
+      id: "lrf",
+      title: "Lei Complementar nº 101/2000 — Lei de Responsabilidade Fiscal",
+      excerpt: "Estabelece normas de finanças públicas voltadas à responsabilidade na gestão fiscal.",
+      url: "https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp101.htm",
+    }));
+  }
+
+  if (/\birrf\b|imposto de renda retido|reten[cç][aã]o de ir|pode ficar com o ir/.test(q)) {
+    items.push(item({
+      id: "constituicao-art-158",
+      title: "Constituição Federal de 1988 — art. 158, I",
+      excerpt: "Pertence aos Municípios o produto da arrecadação do imposto de renda incidente na fonte sobre rendimentos pagos por eles, suas autarquias e fundações.",
+      url: "https://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+      score: 100,
+    }));
+    items.push(item({
+      id: "stf-tema-1130",
+      title: "STF — Tema 1.130 da Repercussão Geral",
+      excerpt: "Reconhece a titularidade municipal do IRRF sobre pagamentos realizados pelo Município, suas autarquias e fundações, nos termos da tese fixada.",
+      url: "https://portal.stf.jus.br/jurisprudenciaRepercussao/verAndamentoProcesso.asp?incidente=5923394&numeroProcesso=1293453&classeProcesso=RE&numeroTema=1130",
+      score: 99,
+    }));
+  }
+
+  return items;
+}

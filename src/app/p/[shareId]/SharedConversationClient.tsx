@@ -120,6 +120,51 @@ function LinkIcon() {
   );
 }
 
+function normalizeBaseLegalSeparator(markdown: string) {
+  const lines = String(markdown ?? "").split(/\r?\n/);
+  const baseLegalIndex = lines.findIndex((line) => {
+    const normalizedLine = line
+      .trim()
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/\*\*|__/g, "")
+      .trim();
+
+    return /^Base legal:?$/i.test(normalizedLine);
+  });
+
+  if (baseLegalIndex < 0) return lines.join("\n");
+
+  let cursor = baseLegalIndex - 1;
+  let separatorCount = 0;
+
+  while (cursor >= 0) {
+    const line = lines[cursor].trim();
+
+    if (!line) {
+      cursor -= 1;
+      continue;
+    }
+
+    if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(line)) {
+      separatorCount += 1;
+      cursor -= 1;
+      continue;
+    }
+
+    break;
+  }
+
+  if (separatorCount < 2) return lines.join("\n");
+
+  return [
+    ...lines.slice(0, cursor + 1),
+    "",
+    "---",
+    "",
+    ...lines.slice(baseLegalIndex),
+  ].join("\n");
+}
+
 const markdownClassName = [
   "text-[17px] leading-8 text-slate-900",
   "[&_p]:mb-5 [&_p:last-child]:mb-0",
@@ -406,7 +451,7 @@ export default function SharedConversationClient({ shareId }: { shareId: string 
 
                     <div data-copy-id={selected.assistantMessage.id} className={markdownClassName}>
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {selected.assistantMessage.content}
+                        {normalizeBaseLegalSeparator(selected.assistantMessage.content)}
                       </ReactMarkdown>
                     </div>
                   </article>

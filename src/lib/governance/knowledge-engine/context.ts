@@ -79,9 +79,15 @@ export function buildKnowledgeContextText(params: {
   let usedChars = 0;
 
   for (const item of params.items) {
+    const isDirectoryReference = item.provider === "official_sources";
     const block = [
-      `FONTE: ${item.title}`,
+      isDirectoryReference
+        ? `REFERÊNCIA DE CONSULTA: ${item.title}`
+        : `FONTE: ${item.title}`,
       `ORIGEM: ${item.provider}`,
+      isDirectoryReference
+        ? "PAPEL: diretório de portal oficial; não comprova fatos da resposta"
+        : "",
       item.type ? `TIPO: ${item.type}` : "",
       item.url ? `URL OFICIAL: ${item.url}` : "",
       `SCORE: ${item.score}`,
@@ -107,6 +113,7 @@ export function buildKnowledgeContextText(params: {
         "Use SOMENTE os trechos e fontes abaixo para responder quando a pergunta depender de dado jurídico, institucional, administrativo ou normativo.",
         "Não cite lei, decreto, Constituição, Lei Orgânica, Diário Oficial ou fonte que não esteja listada abaixo.",
         "Não invente links. Quando citar fonte, use apenas a URL OFICIAL informada no respectivo bloco.",
+        "Registros de Fontes Oficiais identificados como REFERÊNCIA DE CONSULTA são apenas diretórios de portais. Não os trate como prova factual nem afirme que o portal foi consultado.",
         "Lei Complementar municipal, Lei Orgânica municipal, Plano de Cargos, Código Tributário municipal, Plano Diretor e Lei de Criação municipal/estadual devem usar somente URLs recuperadas do banco. Nunca gere link do Planalto para essas normas locais.",
         "Quando os trechos forem suficientes, responda de forma completa e objetiva. Não economize a resposta e não mande o usuário clicar na lei para obter o detalhamento que já está no contexto.",
         "Se os trechos não forem suficientes, diga exatamente o que faltou e recomende validação em fonte oficial.",
@@ -117,6 +124,9 @@ export function buildKnowledgeContextText(params: {
             [
               `#${index + 1} — ${item.title}`,
               `Origem: ${item.provider}`,
+              item.provider === "official_sources"
+                ? "Papel: referência de consulta; não é evidência factual"
+                : "",
               item.type ? `Tipo: ${item.type}` : "",
               item.url ? `URL oficial: ${item.url}` : "",
               `Score: ${item.score}`,

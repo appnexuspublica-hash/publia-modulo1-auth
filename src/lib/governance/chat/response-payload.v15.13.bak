@@ -1,0 +1,25 @@
+import type { GovernanceMessage } from "@/types/governance";
+
+import type {
+  GovernanceChatReference,
+  GovernanceChatSources,
+} from "@/lib/governance/chat/references";
+import type { SuggestedNextQuestion } from "@/lib/governance/chat/suggestions";
+
+export function buildGovernancePersistedResponsePayload(params: {
+  userMessage: GovernanceMessage;
+  assistantMessage: GovernanceMessage;
+  conversationTitle: string;
+  suggestions: SuggestedNextQuestion[];
+  sources: GovernanceChatSources;
+  references: GovernanceChatReference[];
+}) {
+  return {
+    userMessage: params.userMessage,
+    assistantMessage: params.assistantMessage,
+    conversationTitle: params.conversationTitle,
+    suggestions: params.suggestions,
+    sources: params.sources,
+    references: params.references,
+  };
+}

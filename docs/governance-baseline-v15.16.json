@@ -1,0 +1,20 @@
+{
+  "version": "15.16",
+  "pipeline": "governance-v15.16-recoverable-idempotency",
+  "scope": [
+    "plano único por requisição",
+    "finalização unificada entre streaming e não streaming",
+    "snapshot canônico para mensagens persistidas e transitórias",
+    "envelope de resposta sem cópias paralelas de fontes e referências",
+    "validação estrutural do snapshot antes da reidratação",
+    "validação antecipada da persistência confiável antes da mensagem do usuário",
+    "separação entre Base legal, evidências e canais de consulta",
+    "recuperação idempotente da resposta concluída sem nova geração"
+  ],
+  "knownLimitations": [
+    "o typecheck completo depende das dependências instaladas no projeto local",
+    "respostas transitórias não são recuperáveis após recarga porque não foram persistidas",
+    "a suíte estrutural não substitui testes funcionais com Supabase e OpenAI ativos",
+    "requisições órfãs sem resposta permanecem em estado de processamento até uma política de expiração específica"
+  ]
+}

@@ -1,0 +1,219 @@
+import type {
+  GovernanceChatSource,
+  GovernanceChatSources,
+} from "@/lib/governance/chat/references";
+
+function isBrokenSupabasePublicStorageUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url);
+
+    return (
+      parsedUrl.hostname.endsWith(".supabase.co") &&
+      parsedUrl.pathname.includes("/storage/v1/object/public/governance-documents/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+const OFFICIAL_GAZETTE_MONTH_NAME_TO_NUMBER: Record<string, string> = {
+  janeiro: "01",
+  fevereiro: "02",
+  marco: "03",
+  março: "03",
+  abril: "04",
+  maio: "05",
+  junho: "06",
+  julho: "07",
+  agosto: "08",
+  setembro: "09",
+  outubro: "10",
+  novembro: "11",
+  dezembro: "12",
+};
+
+function getOfficialGazetteUploadYearMonth(publicationDate?: string | null) {
+  const dateMatch = String(publicationDate ?? "").match(/^(\d{4})-(\d{2})-/);
+
+  if (dateMatch) {
+    return {
+      year: dateMatch[1],
+      month: dateMatch[2],
+    };
+  }
+
+  return null;
+}
+
+function normalizeOfficialGazetteFileName(fileName: string) {
+  return String(fileName ?? "")
+    .trim()
+    .replace(/^\d{10,}-/, "")
+    .replace(/-d4sign\.pdf$/i, "-D4Sign.pdf");
+}
+
+function inferOfficialGazetteUploadYearMonthFromFileName(fileName: string) {
+  const normalized = String(fileName ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const numericDateMatch = normalized.match(/(?:^|[^0-9])(\d{1,2})[-_]?(\d{1,2})[-_]?(\d{4})(?:[^0-9]|$)/);
+
+  if (numericDateMatch) {
+    return {
+      year: numericDateMatch[3],
+      month: numericDateMatch[2].padStart(2, "0"),
+    };
+  }
+
+  for (const [monthName, month] of Object.entries(OFFICIAL_GAZETTE_MONTH_NAME_TO_NUMBER)) {
+    const plainMonthName = monthName
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+    const monthYearMatch = normalized.match(
+      new RegExp(`${plainMonthName}\\D*(20\\d{2})`),
+    );
+
+    if (monthYearMatch) {
+      return {
+        year: monthYearMatch[1],
+        month,
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildOfficialMunicipalGazettePdfUrlFromStorageUrl(
+  url: string,
+  publicationDate?: string | null,
+) {
+  if (!isBrokenSupabasePublicStorageUrl(url)) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    const rawFileName = decodeURIComponent(
+      parsedUrl.pathname.split("/").filter(Boolean).pop() ?? "",
+    );
+    const fileName = normalizeOfficialGazetteFileName(rawFileName);
+
+    if (!fileName || !/\.pdf$/i.test(fileName)) {
+      return "";
+    }
+
+    const uploadYearMonth =
+      getOfficialGazetteUploadYearMonth(publicationDate) ||
+      inferOfficialGazetteUploadYearMonthFromFileName(fileName);
+
+    if (!uploadYearMonth) {
+      return "";
+    }
+
+    /*
+      Correção V4:
+      alguns registros antigos guardaram o PDF como URL pública do Supabase Storage
+      em um bucket que não existe mais/ não está público no ambiente atual.
+
+      Para esses casos, reconstruímos o link oficial municipal do Diário Oficial
+      a partir do nome real do arquivo e da data de publicação já cadastrada no documento.
+    */
+    return `https://santanadoitarare.pr.gov.br/diariooficial/wp-content/uploads/${uploadYearMonth.year}/${uploadYearMonth.month}/${fileName}`;
+  } catch {
+    return "";
+  }
+}
+
+export function normalizeOfficialGazetteUrl(
+  value: string | null | undefined,
+  publicationDate?: string | null,
+) {
+  const url = String(value ?? "").trim();
+
+  if (!/^https?:\/\//i.test(url)) {
+    return "";
+  }
+
+  if (isBrokenSupabasePublicStorageUrl(url)) {
+    return buildOfficialMunicipalGazettePdfUrlFromStorageUrl(url, publicationDate);
+  }
+
+  return url;
+}
+
+export function pickOfficialGazetteUrl(params: {
+  sourcePageUrl?: string | null;
+  publicUrl?: string | null;
+  pdfUrl?: string | null;
+  publicationDate?: string | null;
+}) {
+  const sourcePageUrl = normalizeOfficialGazetteUrl(
+    params.sourcePageUrl,
+    params.publicationDate,
+  );
+  const publicUrl = normalizeOfficialGazetteUrl(params.publicUrl, params.publicationDate);
+  const pdfUrl = normalizeOfficialGazetteUrl(params.pdfUrl, params.publicationDate);
+
+  /*
+    Preferência:
+    1) source_page_url: página oficial da edição, quando cadastrada.
+    2) public_url: URL pública consolidada, quando cadastrada.
+    3) pdf_url: PDF oficial.
+       Se o pdf_url antigo apontar para o Supabase Storage quebrado, ele é convertido
+       para o endereço oficial do Diário Oficial municipal.
+  */
+  return sourcePageUrl || publicUrl || pdfUrl || "";
+}
+
+function normalizeGovernanceSourceUrl(value: string | null | undefined) {
+  const url = String(value ?? "").trim();
+
+  if (!/^https?:\/\//i.test(url)) {
+    return null;
+  }
+
+  if (isBrokenSupabasePublicStorageUrl(url)) {
+    return normalizeOfficialGazetteUrl(url) || null;
+  }
+
+  return url;
+}
+
+function normalizeGeneralGovernanceSourceUrl(value: string | null | undefined) {
+  const url = String(value ?? "").trim();
+
+  if (!/^https?:\/\//i.test(url)) {
+    return null;
+  }
+
+  return url;
+}
+
+export function normalizeGovernanceChatSourcesForResponse(
+  sources: GovernanceChatSources,
+): GovernanceChatSources {
+  const normalizeInstitutionalOrOfficialSource = (
+    source: GovernanceChatSource,
+  ): GovernanceChatSource => ({
+    ...source,
+    url: normalizeGeneralGovernanceSourceUrl(source.url),
+  });
+
+  const normalizeOfficialGazetteSource = (
+    source: GovernanceChatSource,
+  ): GovernanceChatSource => ({
+    ...source,
+    url: normalizeGovernanceSourceUrl(source.url),
+  });
+
+  return {
+    institutional: sources.institutional.map(normalizeInstitutionalOrOfficialSource),
+    officialGazette: sources.officialGazette.map(normalizeOfficialGazetteSource),
+    officialSources: sources.officialSources.map(normalizeInstitutionalOrOfficialSource),
+  };
+}
+

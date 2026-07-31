@@ -1,3 +1,10 @@
+import {
+  fetchOfficialGazetteHtml,
+  isOfficialGazetteUrlAllowedForSource,
+  normalizeOfficialGazetteUrlInput,
+  OfficialGazetteRemoteAccessError,
+} from "@/lib/governance/security/official-gazette-remote-access";
+
 export type DiscoveredOfficialEdition = {
   title: string;
   pdfUrl: string;
@@ -40,12 +47,20 @@ function decodeHtml(value: string) {
     .trim();
 }
 
+function safeDecodeURIComponent(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function buildDiscoveredTitle(label: string, pdfUrl: string) {
   if (label && !/^(acessar|abrir|baixar|download|pdf)$/i.test(label)) {
     return label;
   }
 
-  const fileName = decodeURIComponent(
+  const fileName = safeDecodeURIComponent(
     new URL(pdfUrl).pathname.split("/").pop() || "",
   )
     .replace(/\.pdf$/i, "")
@@ -59,49 +74,73 @@ function buildDiscoveredTitle(label: string, pdfUrl: string) {
 /**
  * Conector genérico para portais que expõem links diretos para PDFs.
  *
- * A responsabilidade deste conector é somente descobrir URLs.
- * Número da edição e data são lidos do conteúdo do próprio PDF pela camada
- * de metadados, evitando regras específicas para um município.
+ * A responsabilidade deste conector é descobrir URLs dentro da fronteira de
+ * confiança da fonte cadastrada. A camada de acesso remoto valida HTTPS, DNS,
+ * IP, porta, redirecionamentos, tamanho e conteúdo antes de ler qualquer dado.
+ * Número da edição e data continuam sendo lidos do conteúdo do próprio PDF.
  */
 export class HtmlOfficialGazetteConnector implements OfficialSourceConnector {
   async discover(sourceUrl: string): Promise<DiscoveredOfficialEdition[]> {
-    const normalizedSourceUrl = new URL(sourceUrl).toString();
+    const normalizedSourceUrl = normalizeOfficialGazetteUrlInput(sourceUrl);
 
     if (/\.pdf(?:$|[?#])/i.test(normalizedSourceUrl)) {
-      return [{
-        title: buildDiscoveredTitle("", normalizedSourceUrl),
-        pdfUrl: normalizedSourceUrl,
-      }];
+      if (
+        !isOfficialGazetteUrlAllowedForSource(
+          normalizedSourceUrl,
+          normalizedSourceUrl,
+        )
+      ) {
+        throw new OfficialGazetteRemoteAccessError(
+          "host_not_allowed",
+          "A fonte cadastrada aponta para um domínio não autorizado.",
+        );
+      }
+
+      return [
+        {
+          title: buildDiscoveredTitle("", normalizedSourceUrl),
+          pdfUrl: normalizedSourceUrl,
+        },
+      ];
     }
 
-    const response = await fetch(normalizedSourceUrl, {
-      cache: "no-store",
-      headers: {
-        "User-Agent": "Publ.IA/6.1 (+sincronizacao-diario-oficial)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Portal oficial respondeu com status ${response.status}.`);
-    }
-
-    const html = await response.text();
+    const { html, finalUrl } =
+      await fetchOfficialGazetteHtml(normalizedSourceUrl);
     const editions = new Map<string, DiscoveredOfficialEdition>();
     const anchorPattern =
       /<a\b[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+    let blockedPdfLinks = 0;
 
     for (const match of html.matchAll(anchorPattern)) {
       const href = decodeHtml(match[2] ?? "");
       if (!href || !/\.pdf(?:$|[?#])/i.test(href)) continue;
 
-      const pdfUrl = new URL(href, normalizedSourceUrl).toString();
+      let pdfUrl: string;
+
+      try {
+        pdfUrl = new URL(href, finalUrl).toString();
+      } catch {
+        continue;
+      }
+
+      if (!isOfficialGazetteUrlAllowedForSource(pdfUrl, normalizedSourceUrl)) {
+        blockedPdfLinks += 1;
+        continue;
+      }
+
       const label = decodeHtml(match[3] ?? "");
 
       editions.set(pdfUrl, {
         title: buildDiscoveredTitle(label, pdfUrl),
         pdfUrl,
       });
+    }
+
+    if (editions.size === 0 && blockedPdfLinks > 0) {
+      throw new OfficialGazetteRemoteAccessError(
+        "host_not_allowed",
+        "O portal publicou PDFs em um domínio externo não autorizado. Cadastre esse domínio na lista segura antes de sincronizar.",
+      );
     }
 
     return [...editions.values()];
