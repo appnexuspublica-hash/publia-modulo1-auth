@@ -744,11 +744,6 @@ export async function POST(request: Request) {
       content,
     });
 
-    const isSelectedPdfSummaryRequest =
-      hasSelectedPdfAttachments &&
-      (governancePlan.answerShape === "document_summary" ||
-        /\b(resumir|resuma|resumo|sintetizar|síntese|sintese)\b/i.test(content));
-
     const pdfContextResult = await telemetry.measure(
       "pdf_context",
       () =>
@@ -764,16 +759,11 @@ export async function POST(request: Request) {
           userId: user.id,
           selectedPdfFileIds,
           question: content,
-          summaryRequested: isSelectedPdfSummaryRequest,
-          summaryModel: OPENAI_MODEL_GOVERNANCE,
-          signal: request.signal,
         }),
       (result) => ({
         selectedFiles: result.selectedPdfFileIds.length,
         contextAvailable: result.pdfContextAvailable,
         warnings: result.pdfContextWarnings.length,
-        summaryMode: result.pdfSummaryMode,
-        summaryCoverageComplete: result.pdfSummaryCoverageComplete,
       }),
     );
 
@@ -871,14 +861,7 @@ export async function POST(request: Request) {
           : governancePlan.answerShape === "document_summary"
             ? asksFullTranscription
               ? "FORMATO OBRIGATÓRIO — Identifique o documento ou ato e transcreva somente o conteúdo efetivamente recuperado."
-              : isSelectedPdfSummaryRequest
-                ? [
-                    "FORMATO OBRIGATÓRIO — RESUMO DE PDF",
-                    "Apresente uma síntese executiva de cada PDF e organize os principais temas em sequência lógica.",
-                    "Inclua estrutura, direitos, deveres, requisitos, prazos, exceções, procedimentos e penalidades quando existirem.",
-                    "Não limite artificialmente o resumo a 8 pontos quando o documento exigir cobertura mais ampla.",
-                  ].join("\n")
-                : "FORMATO OBRIGATÓRIO — Identifique o documento ou ato, apresente uma síntese executiva e no máximo 8 pontos essenciais. Não faça transcrição extensa."
+              : "FORMATO OBRIGATÓRIO — Identifique o documento ou ato, apresente uma síntese executiva e no máximo 8 pontos essenciais. Não faça transcrição extensa."
             : "Comece pela resposta direta e depois apresente apenas a fundamentação necessária.";
 
     const missingInstitutionalInstruction = governancePlan.intent === "institutional_document" && !coreRequiredSatisfied
@@ -944,22 +927,9 @@ export async function POST(request: Request) {
             selectedPdfAttachmentNames.length > 0
               ? `Arquivos: ${selectedPdfAttachmentNames.join(", ")}.`
               : "",
-            isSelectedPdfSummaryRequest
-              ? pdfContextResult.pdfSummaryCoverageComplete
-                ? [
-                    "MODO DE RESUMO HIERÁRQUICO INTEGRAL",
-                    "O contexto abaixo foi produzido a partir do texto extraído completo, processado sequencialmente e consolidado.",
-                    "Não diga que apenas alguns trechos foram acessados e não peça o texto integral novamente.",
-                  ].join("\n")
-                : [
-                    "MODO DE RESUMO HIERÁRQUICO COM COBERTURA PARCIAL",
-                    "Informe somente a limitação concreta descrita nos avisos abaixo; não use observações genéricas.",
-                    ...pdfContextResult.pdfContextWarnings.map((warning) => `- ${warning}`),
-                  ].join("\n")
-              : "",
             pdfContextResult.pdfContextAvailable
               ? pdfContextResult.pdfContextText
-              : "Nenhum conteúdo textual suficiente foi recuperado dos PDFs selecionados.",
+              : "Nenhum trecho textual suficiente foi recuperado dos PDFs selecionados.",
             "Não invente conteúdo ausente dos PDFs.",
           ].filter(Boolean).join("\n\n")
         : "",

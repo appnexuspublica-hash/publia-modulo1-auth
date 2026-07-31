@@ -2,10 +2,8 @@ import type OpenAI from "openai";
 
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import { createWritableSupabaseRouteClient } from "@/lib/governance/chat/infrastructure";
-import { buildGovernancePdfHierarchicalSummary } from "@/lib/governance/chat/pdf-summary";
 
 const MAX_GOVERNANCE_PDF_CONTEXT_CHARS = 9000;
-const MAX_GOVERNANCE_PDF_SUMMARY_CONTEXT_CHARS = 60000;
 const MAX_SELECTED_PDFS_IN_GOVERNANCE_CHAT = 5;
 
 const UUID_RE =
@@ -16,8 +14,6 @@ type GovernancePdfContextResult = {
   pdfContextText: string;
   pdfContextAvailable: boolean;
   pdfContextWarnings: string[];
-  pdfSummaryMode: boolean;
-  pdfSummaryCoverageComplete: boolean;
 };
 
 type GovernancePdfFileRow = {
@@ -42,9 +38,6 @@ type BuildGovernancePdfContextParams = {
   userId: string;
   selectedPdfFileIds: string[];
   question: string;
-  summaryRequested?: boolean;
-  summaryModel?: string;
-  signal?: AbortSignal;
 };
 
 export function clampText(text: string, maxChars: number) {
@@ -230,14 +223,11 @@ export async function buildGovernancePdfContext(
       pdfContextText: "",
       pdfContextAvailable: false,
       pdfContextWarnings: [],
-      pdfSummaryMode: Boolean(params.summaryRequested),
-      pdfSummaryCoverageComplete: true,
     };
   }
 
   const warnings: string[] = [];
   const contextBlocks: string[] = [];
-  let pdfSummaryCoverageComplete = true;
 
   const { data: pdfRows, error: pdfRowsError } = await params.client
     .from("pdf_files")
@@ -262,8 +252,6 @@ export async function buildGovernancePdfContext(
       pdfContextText: "",
       pdfContextAvailable: false,
       pdfContextWarnings: ["Não foi possível validar os PDFs selecionados."],
-      pdfSummaryMode: Boolean(params.summaryRequested),
-      pdfSummaryCoverageComplete: false,
     };
   }
 
@@ -271,12 +259,9 @@ export async function buildGovernancePdfContext(
     ((pdfRows ?? []) as GovernancePdfFileRow[]).map((row) => [String(row.id), row]),
   );
 
-  const maxContextChars = params.summaryRequested
-    ? MAX_GOVERNANCE_PDF_SUMMARY_CONTEXT_CHARS
-    : MAX_GOVERNANCE_PDF_CONTEXT_CHARS;
   const maxCharsPerPdf = Math.max(
     900,
-    Math.floor(maxContextChars / Math.max(1, uniquePdfFileIds.length)),
+    Math.floor(MAX_GOVERNANCE_PDF_CONTEXT_CHARS / Math.max(1, uniquePdfFileIds.length)),
   );
 
   for (const pdfFileId of uniquePdfFileIds) {
@@ -285,63 +270,11 @@ export async function buildGovernancePdfContext(
 
     if (!pdf) {
       warnings.push(`PDF não encontrado ou sem permissão: ${pdfFileId}.`);
-      pdfSummaryCoverageComplete = false;
       continue;
     }
 
     const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
     const vectorStatus = String(pdf.vector_index_status ?? "").toLowerCase();
-
-    if (params.summaryRequested) {
-      const extractedText = normalizePdfText(pdf.extracted_text ?? "");
-
-      if (!params.openai || !params.summaryModel || extractedStatus !== "ready" || !extractedText) {
-        warnings.push(
-          `Não foi possível processar integralmente o PDF "${fileName}" porque o texto extraído não está disponível.`,
-        );
-        pdfSummaryCoverageComplete = false;
-        continue;
-      }
-
-      try {
-        const summaryResult = await buildGovernancePdfHierarchicalSummary({
-          openai: params.openai,
-          model: params.summaryModel,
-          fileName,
-          extractedText,
-          signal: params.signal,
-        });
-
-        warnings.push(...summaryResult.warnings);
-        pdfSummaryCoverageComplete =
-          pdfSummaryCoverageComplete && summaryResult.coverageComplete;
-
-        if (!summaryResult.summaryText) {
-          warnings.push(`Não foi possível consolidar o conteúdo do PDF "${fileName}".`);
-          pdfSummaryCoverageComplete = false;
-          continue;
-        }
-
-        contextBlocks.push(
-          [
-            `PDF: ${fileName}`,
-            `ID: ${pdfFileId}`,
-            `Cobertura: ${summaryResult.coverageComplete ? "integral" : "parcial"}`,
-            "",
-            clampText(summaryResult.summaryText, maxCharsPerPdf),
-          ].join("\n"),
-        );
-      } catch (error) {
-        console.error("[governance/chat] Erro no resumo hierárquico do PDF:", {
-          pdfFileId,
-          error,
-        });
-        warnings.push(`Não foi possível resumir integralmente o PDF "${fileName}".`);
-        pdfSummaryCoverageComplete = false;
-      }
-
-      continue;
-    }
 
     const vectorContext = await buildGovernancePdfContextFromVector({
       client: params.client,
@@ -383,14 +316,12 @@ export async function buildGovernancePdfContext(
 
   const pdfContextText = contextBlocks
     .join("\n\n---\n\n")
-    .slice(0, maxContextChars);
+    .slice(0, MAX_GOVERNANCE_PDF_CONTEXT_CHARS);
 
   return {
     selectedPdfFileIds: uniquePdfFileIds,
     pdfContextText,
     pdfContextAvailable: pdfContextText.trim().length > 0,
     pdfContextWarnings: warnings,
-    pdfSummaryMode: Boolean(params.summaryRequested),
-    pdfSummaryCoverageComplete,
   };
 }
