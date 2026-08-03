@@ -1,4 +1,4 @@
-// src/app/essencial/chat/EssentialChatPageClient.tsx
+// src/app/estrategico/chat/StrategicChatPageClient.tsx
 "use client";
 
 import { copyMessageToClipboard } from "@/lib/copy/copyMessageToClipboard";
@@ -20,7 +20,7 @@ import {
 } from "@/lib/access-client";
 import { getBlockedAccessCta } from "@/lib/access-cta";
 import { getAlertStyles, type AlertTone } from "./utils/alertStyles";
-import { getChatTheme } from "@/app/essencial/chat/theme";
+import { getChatTheme } from "@/app/estrategico/chat/theme";
 
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatEmptyState } from "./components/ChatEmptyState";
@@ -31,11 +31,12 @@ import {
   type SuggestedNextQuestion,
 } from "./components/ChatMessagesList";
 
-type EssentialChatPageClientProps = {
+type StrategicChatPageClientProps = {
   userId: string;
   userLabel: string;
   /**
-   * Endpoint exclusivo do Publ.IA Essencial.
+   * Endpoint usado para envio das mensagens.
+   * Endpoint exclusivo do Publ.IA Estratégico.
    */
   chatApiEndpoint?: string;
 };
@@ -83,17 +84,6 @@ function markdownToPlainText(markdown: string) {
   return text.trim();
 }
 
-function formatAttachedPdfSize(fileSize: number): string {
-  if (!Number.isFinite(fileSize) || fileSize <= 0) return "";
-
-  const sizeInMb = fileSize / (1024 * 1024);
-  if (sizeInMb >= 1) {
-    return `${sizeInMb.toFixed(sizeInMb >= 10 ? 1 : 2)} MB`;
-  }
-
-  return `${Math.max(1, Math.round(fileSize / 1024))} KB`;
-}
-
 function truncatePdfName(name: string, max = 9) {
   const clean = String(name ?? "").trim();
   if (clean.length <= max) return clean;
@@ -125,9 +115,17 @@ function getLegacyStatusLabel(access: FrontendAccessSummary | null) {
 
   switch (status) {
     case "trial_active":
-      return "Trial Essencial";
+      return access?.productTier === "strategic"
+        ? "Trial Estratégico"
+        : access?.productTier === "governance"
+          ? "Governança"
+          : "Trial Essencial";
     case "subscription_active":
-      return "Essencial";
+      return access?.productTier === "strategic"
+        ? "Estratégico"
+        : access?.productTier === "governance"
+          ? "Governança"
+          : "Essencial";
     case "subscription_expired":
       return "Assinatura expirada";
     case "trial_expired":
@@ -140,6 +138,20 @@ function getLegacyStatusLabel(access: FrontendAccessSummary | null) {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const ESSENTIAL_PDF_UPLOAD_MAX_MB = 48;
+const STRATEGIC_PDF_UPLOAD_MAX_MB = 90;
+const GOVERNANCE_PDF_UPLOAD_MAX_MB = 120;
+
+function getPdfUploadMaxMbForTier(productTier: string | null | undefined) {
+  switch (productTier) {
+    case "governance":
+      return GOVERNANCE_PDF_UPLOAD_MAX_MB;
+    case "strategic":
+      return STRATEGIC_PDF_UPLOAD_MAX_MB;
+    case "essential":
+    default:
+      return ESSENTIAL_PDF_UPLOAD_MAX_MB;
+  }
+}
 const OCR_URL = "https://smallpdf.com/pt/pdf-ocr";
 const SIDEBAR_FEEDBACK_DURATION_MS = 5000;
 
@@ -602,11 +614,11 @@ function buildStrategicSuggestions(
   return suggestionsByMode[responseMode] ?? suggestionsByMode.objective;
 }
 
-export default function EssentialChatPageClient({
+export default function StrategicChatPageClient({
   userId,
   userLabel,
-  chatApiEndpoint = "/api/essential/chat",
-}: EssentialChatPageClientProps) {
+  chatApiEndpoint = "/api/strategic/chat",
+}: StrategicChatPageClientProps) {
   const [supabase] = useState(() =>
     createBrowserClient(supabaseUrl, supabaseAnonKey)
   );
@@ -667,7 +679,8 @@ export default function EssentialChatPageClient({
 
   const [access, setAccess] = useState<FrontendAccessSummary | null>(null);
   const [accessLoading, setAccessLoading] = useState(true);
-  const responseMode: ResponseMode = "objective";
+  const [responseMode, setResponseMode] = useState<ResponseMode>("objective");
+  const [isStartingStrategicTrial, setIsStartingStrategicTrial] = useState(false);
   const [sidebarFeedback, setSidebarFeedback] = useState<SidebarFeedbackState>(null);
   const sidebarFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
@@ -806,7 +819,7 @@ export default function EssentialChatPageClient({
         : attachedPdfs;
 
     return candidates.filter((pdf) => isPdfBlockingChat(pdf));
-  }, [attachedPdfs, effectiveSelectedPdfIds]);
+  }, [attachedPdfs, selectedPdfIds]);
 
   const isPdfBlockingSend = isUploadingPdf || pdfsBlockingChat.length > 0;
 
@@ -843,25 +856,31 @@ export default function EssentialChatPageClient({
     return getLegacyStatusLabel(access);
   }, [access]);
 
-  const pdfUploadMaxMb = ESSENTIAL_PDF_UPLOAD_MAX_MB;
-  const isStrategic = false;
-  const theme = useMemo(() => getChatTheme(false), []);
+  const resolvedProductTier = access?.resolvedAccess?.effectiveProductTier ?? null;
+  const currentProductTier = resolvedProductTier ?? access?.productTier ?? null;
+  const pdfUploadMaxMb = useMemo(
+    () => getPdfUploadMaxMbForTier(currentProductTier),
+    [currentProductTier]
+  );
+  const isStrategic =
+    resolvedProductTier === "strategic" || access?.productTier === "strategic";
+  const theme = useMemo(() => getChatTheme(isStrategic), [isStrategic]);
 
   const strategicButtonClassName =
-    "border text-white transition duration-150 hover:brightness-110";
+    "border text-[#0D2B4D] transition duration-150 hover:bg-[#E5E5E5]";
   const strategicDisabledButtonClassName =
     "cursor-not-allowed border text-slate-300 opacity-60";
   const strategicChipClassName =
-    "border text-white transition duration-150 hover:brightness-110";
+    "border text-[#0D2B4D] transition duration-150 hover:bg-[#E5E5E5]";
   const strategicHintButtonClassName =
-    "rounded-full border px-3 py-2 text-[11px] font-semibold text-white transition duration-150 hover:brightness-110";
+    "rounded-full border px-3 py-2 text-[11px] font-semibold text-[#0D2B4D] transition duration-150 hover:bg-[#E5E5E5]";
   const strategicMenuItemClassName =
-    "block w-full px-4 py-2 text-left transition hover:bg-white/10";
+    "block w-full px-4 py-2 text-left transition hover:bg-[#E5E5E5]";
 
   const strategicButtonStyle = useMemo<CSSProperties>(
     () => ({
-      backgroundColor: theme.colors.bg,
-      borderColor: theme.colors.borderStrong,
+      backgroundColor: theme.colors.hover,
+      borderColor: theme.colors.border,
       color: theme.colors.text,
     }),
     [theme]
@@ -878,7 +897,7 @@ export default function EssentialChatPageClient({
 
   const strategicItemActiveStyle = useMemo<CSSProperties>(
     () => ({
-      backgroundColor: theme.colors.bg,
+      backgroundColor: theme.colors.hover,
       borderColor: theme.colors.borderStrong,
       color: theme.colors.text,
     }),
@@ -887,7 +906,7 @@ export default function EssentialChatPageClient({
 
   const strategicItemInactiveStyle = useMemo<CSSProperties>(
     () => ({
-      backgroundColor: theme.colors.bg,
+      backgroundColor: theme.colors.hover,
       borderColor: theme.colors.border,
       color: theme.colors.text,
     }),
@@ -912,13 +931,58 @@ export default function EssentialChatPageClient({
     [theme]
   );
 
-  const strategicResponseModes: ResponseMode[] = [];
-  const showResponseModes = false;
-  const strategicSuggestions: SuggestedNextQuestion[] = [];
+  const strategicResponseModes = useMemo(() => {
+    const raw = Array.isArray(access?.capabilities?.responseModes)
+      ? access?.capabilities?.responseModes
+      : [];
+
+    const normalized = raw
+      .map((item) => String(item ?? "").trim())
+      .filter(isStrategicResponseMode);
+
+    const unique = Array.from(new Set(normalized));
+
+    if (unique.length > 0) {
+      return unique;
+    }
+
+    if (isStrategic) {
+      return STRATEGIC_RESPONSE_MODES;
+    }
+
+    return [] as ResponseMode[];
+  }, [access?.capabilities?.responseModes, isStrategic]);
+
+  const showResponseModes = isStrategic && strategicResponseModes.length > 0;
+
+  const strategicSuggestions = useMemo(() => {
+    if (!isStrategic) return [] as SuggestedNextQuestion[];
+
+    const hasContextualPdfs =
+      attachedPdfs.length > 0 && effectiveSelectedPdfIds.length > 0;
+
+    return buildStrategicSuggestions(responseMode, hasContextualPdfs);
+  }, [
+    isStrategic,
+    responseMode,
+    attachedPdfs.length,
+    effectiveSelectedPdfIds.length,
+  ]);
 
   useEffect(() => {
     loadAccess();
   }, [loadAccess]);
+
+  useEffect(() => {
+    if (!showResponseModes) {
+      setResponseMode("objective");
+      return;
+    }
+
+    if (!strategicResponseModes.includes(responseMode)) {
+      setResponseMode(strategicResponseModes[0]);
+    }
+  }, [showResponseModes, strategicResponseModes, responseMode]);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -1034,7 +1098,7 @@ export default function EssentialChatPageClient({
         .select("id, active_pdf_file_id, pdf_enabled")
         .eq("id", conversationId)
         .eq("user_id", userId)
-        .eq("product_tier", "essential")
+        .eq("product_tier", "strategic")
         .maybeSingle();
 
       if (convError) {
@@ -1127,8 +1191,9 @@ export default function EssentialChatPageClient({
           return validIds;
         }
 
-        // Preserva a seleção explícita do usuário. PDFs recém-enviados são
-        // adicionados à seleção antes da recarga da conversa.
+        // Preserva a escolha explícita do usuário, inclusive quando todos
+        // os PDFs foram desmarcados. Novos PDFs são adicionados à seleção
+        // no fluxo de upload antes desta recarga.
         return filtered;
       });
 
@@ -1205,7 +1270,7 @@ export default function EssentialChatPageClient({
         } as any)
         .eq("id", conversationId)
         .eq("user_id", userId)
-        .eq("product_tier", "essential");
+        .eq("product_tier", "strategic");
 
       if (conversationUpdateError) {
         console.error(
@@ -1278,7 +1343,7 @@ export default function EssentialChatPageClient({
           .from("conversations")
           .select("id, title, created_at, is_shared, share_id, is_favorite")
           .eq("user_id", userId)
-          .eq("product_tier", "essential")
+          .eq("product_tier", "strategic")
           .is("deleted_at", null)
           .order("created_at", { ascending: false });
 
@@ -1386,7 +1451,7 @@ export default function EssentialChatPageClient({
     try {
       const { data, error } = await supabase
         .from("conversations")
-        .insert({ user_id: userId, title: "Nova conversa", product_tier: "essential" })
+        .insert({ user_id: userId, title: "Nova conversa", product_tier: "strategic" })
         .select("id, title, created_at, is_shared, share_id, is_favorite")
         .single();
 
@@ -1485,7 +1550,7 @@ export default function EssentialChatPageClient({
       .delete()
       .eq("id", id)
       .eq("user_id", userId)
-      .eq("product_tier", "essential");
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao excluir conversa:", error.message);
@@ -1532,7 +1597,7 @@ export default function EssentialChatPageClient({
       .update({ is_favorite: nextValue })
       .eq("id", id)
       .eq("user_id", userId)
-      .eq("product_tier", "essential");
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao atualizar favorito da conversa:", error.message);
@@ -1577,7 +1642,7 @@ export default function EssentialChatPageClient({
       .update({ title: cleanTitle })
       .eq("id", id)
       .eq("user_id", userId)
-      .eq("product_tier", "essential");
+      .eq("product_tier", "strategic");
 
     if (error) {
       console.error("Erro ao renomear conversa:", error.message);
@@ -1616,6 +1681,52 @@ export default function EssentialChatPageClient({
     };
   }
 
+  async function handleStartStrategicTrial() {
+    if (isStartingStrategicTrial) return;
+
+    try {
+      setIsStartingStrategicTrial(true);
+      clearSidebarFeedbackTimer();
+      setSidebarFeedback(null);
+
+      const res = await fetch("/api/access/start-strategic-trial", {
+        method: "POST",
+      });
+
+      const data = await res.json().catch(() => null);
+      const errorMessage =
+        String(data?.error ?? "").trim() ||
+        "Não foi possível iniciar o trial Estratégico.";
+
+      if (!res.ok) {
+        showSidebarFeedbackMessage({
+          text: errorMessage,
+          type: "warning",
+        });
+        return;
+      }
+
+      await loadAccess();
+
+      const successMessage = "Trial Estratégico ativado com sucesso por 7 dias.";
+
+      showSidebarFeedbackMessage({
+        text: successMessage,
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Erro inesperado ao iniciar trial Estratégico:", error);
+
+      const errorMessage = "Erro inesperado ao iniciar o trial Estratégico.";
+
+      showSidebarFeedbackMessage({
+        text: errorMessage,
+        type: "error",
+      });
+    } finally {
+      setIsStartingStrategicTrial(false);
+    }
+  }
 
   async function handleSend(messageText: string) {
     const trimmed = messageText.trim();
@@ -1705,7 +1816,7 @@ export default function EssentialChatPageClient({
           .update({ title: newTitle })
           .eq("id", conversationId)
           .eq("user_id", userId)
-          .eq("product_tier", "essential")
+          .eq("product_tier", "strategic")
           .then(({ error }: any) => {
             if (error) console.error("Erro ao atualizar título:", error.message);
           });
@@ -1718,6 +1829,11 @@ export default function EssentialChatPageClient({
       const ac = new AbortController();
       abortRef.current = ac;
 
+      const effectiveClientResponseMode =
+        showResponseModes && strategicResponseModes.includes(responseMode)
+          ? responseMode
+          : null;
+
       const body: Record<string, unknown> = {
         conversationId,
         message: trimmed,
@@ -1725,6 +1841,9 @@ export default function EssentialChatPageClient({
         selectedPdfIds: pdfSelection.selectedPdfIds,
       };
 
+      if (effectiveClientResponseMode) {
+        body.responseMode = effectiveClientResponseMode;
+      }
 
       const res = await fetch(chatApiEndpoint, {
         method: "POST",
@@ -1812,23 +1931,43 @@ export default function EssentialChatPageClient({
               parsed.data?.effectiveResponseMode
             );
 
-            if (serverProductTier === "essential") {
-              setAccess((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      productTier: "essential",
-                      capabilities: {
+            if (
+              serverProductTier === "essential" ||
+              serverProductTier === "strategic" ||
+              serverProductTier === "governance"
+            ) {
+              setAccess((prev) => {
+                if (!prev) return prev;
+
+                const nextCapabilities =
+                  serverProductTier === "strategic"
+                    ? {
+                        ...prev.capabilities,
+                        responseModes:
+                          serverAllowedModes.length > 0
+                            ? serverAllowedModes
+                            : prev.capabilities.responseModes,
+                      }
+                    : {
                         ...prev.capabilities,
                         responseModes: [],
-                      },
-                    }
-                  : prev
-              );
+                      };
+
+                return {
+                  ...prev,
+                  productTier: serverProductTier,
+                  capabilities: nextCapabilities,
+                };
+              });
             }
 
-            void serverAllowedModes;
-            void serverEffectiveMode;
+            if (serverProductTier !== "strategic") {
+              setResponseMode("objective");
+            } else if (serverEffectiveMode) {
+              setResponseMode(serverEffectiveMode);
+            } else if (serverAllowedModes.length > 0) {
+              setResponseMode(serverAllowedModes[0]);
+            }
           }
 
           if (parsed.event === "delta") {
@@ -1862,6 +2001,8 @@ export default function EssentialChatPageClient({
                 )
               );
             }
+
+            setResponseMode("objective");
           }
 
           if (parsed.event === "error") {
@@ -1892,27 +2033,52 @@ export default function EssentialChatPageClient({
               )
             );
 
-            if (apiProductTier === "essential") {
-              setAccess((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      productTier: "essential",
-                      capabilities: {
+            if (
+              apiProductTier === "essential" ||
+              apiProductTier === "strategic" ||
+              apiProductTier === "governance"
+            ) {
+              setAccess((prev) => {
+                if (!prev) return prev;
+
+                const nextCapabilities =
+                  apiProductTier === "strategic"
+                    ? {
+                        ...prev.capabilities,
+                        responseModes:
+                          apiAllowedModes.length > 0
+                            ? apiAllowedModes
+                            : prev.capabilities.responseModes,
+                      }
+                    : {
                         ...prev.capabilities,
                         responseModes: [],
-                      },
-                    }
-                  : prev
-              );
+                      };
+
+                return {
+                  ...prev,
+                  productTier: apiProductTier,
+                  capabilities: nextCapabilities,
+                };
+              });
             }
 
-            void apiAllowedModes;
-
             if (responseModeBlocked) {
-              console.warn(
-                "A API do Essencial rejeitou um modo de resposta não suportado."
-              );
+              if (apiProductTier !== "strategic") {
+                setResponseMode("objective");
+              } else if (apiAllowedModes.length > 0) {
+                setResponseMode(apiAllowedModes[0]);
+              }
+
+              showToast(errorMessage, {
+                type: "warning",
+                persistent: true,
+              });
+
+              abortRef.current?.abort();
+              abortRef.current = null;
+              setIsSending(false);
+              return;
             }
 
             if (accessBlocked && apiAccessStatus) {
@@ -1991,7 +2157,7 @@ export default function EssentialChatPageClient({
   }
 
   function handleSuggestionClick(prompt: string) {
-    return;
+    if (!isStrategic) return;
     if (!prompt.trim()) return;
 
     setDraftMessage(prompt);
@@ -2029,7 +2195,7 @@ export default function EssentialChatPageClient({
       return;
     }
 
-    const selectedSet = new Set(effectiveSelectedPdfIds);
+    const selectedSet = new Set(selectedPdfIds);
     const selectedPdfs = attachedPdfs.filter((pdf) => selectedSet.has(pdf.id));
     const selectedNames = selectedPdfs.map((pdf) => pdf.fileName).filter(Boolean);
     const isMultiple = selectedPdfs.length > 1;
@@ -2275,6 +2441,7 @@ export default function EssentialChatPageClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          product: "strategic",
           conversationId,
           fileName: file.name,
           fileSize: file.size,
@@ -2539,6 +2706,16 @@ export default function EssentialChatPageClient({
     });
   }
 
+  const renderStrategicAttachmentInput = () => (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept="application/pdf"
+      className="hidden"
+      onChange={handlePdfChange}
+    />
+  );
+
   const toastStyles = useMemo(() => {
     if (!toast) {
       return {
@@ -2581,8 +2758,9 @@ export default function EssentialChatPageClient({
     quickMenuStyle?: CSSProperties;
     quickMenuItemStyle?: CSSProperties;
     uploadTextStyle?: CSSProperties;
-    showReprocessInMenu?: boolean;
     maxLabel?: number;
+    attachmentButtonIcon?: boolean;
+    hideAttachmentButton?: boolean;
   }) => {
     const hint = getPdfHint(attachedPdf);
     const showHint =
@@ -2624,70 +2802,74 @@ export default function EssentialChatPageClient({
           </div>
         )}
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/pdf"
-          className="hidden"
-          onChange={handlePdfChange}
-        />
+        <div className="mb-2 flex items-center gap-2">
+          {!options.hideAttachmentButton && (
+          <button
+            type="button"
+            onClick={handlePdfButtonClick}
+            disabled={isBlocked || accessLoading || isUploadingPdf}
+            className={`inline-flex h-10 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+              options.attachmentButtonIcon ? "w-10 px-0" : "px-4"
+            } ${
+              isBlocked || accessLoading || isUploadingPdf
+                ? options.buttonDisabledClassName
+                : options.buttonClassName
+            }`}
+            style={
+              isBlocked || accessLoading || isUploadingPdf
+                ? options.buttonDisabledStyle
+                : options.buttonStyle
+            }
+            aria-label="Anexar PDF"
+            title="Anexar PDF"
+          >
+            {options.attachmentButtonIcon ? (
+              <>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  className="h-[18px] w-[18px]"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                <span className="sr-only">Anexar PDF</span>
+              </>
+            ) : (
+              "ANEXAR PDF"
+            )}
+          </button>
+          )}
 
-        {attachedPdfs.length > 0 && (
-          <div className="mb-2 flex items-center gap-2">
-            <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
-              <div className="flex w-max items-center gap-2 pr-1">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={handlePdfChange}
+          />
+
+          <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
+            <div className="flex w-max items-center gap-2 pr-1">
               {attachedPdfs.map((pdf) => {
+                const isActivePdf = pdf.id === attachedPdf?.id;
                 const isSelectedPdf = selectedPdfIds.includes(pdf.id);
                 const itemBadge = getPdfBadge(pdf);
-                const formattedSize = formatAttachedPdfSize(pdf.fileSize);
 
                 return (
                   <div
                     key={pdf.id}
-                    className={[
-                      "inline-flex h-9 shrink-0 items-center gap-2 rounded-full border px-3 text-[11px] transition",
-                      isSelectedPdf
-                        ? "text-[#0D2B4D]"
-                        : "border-[#dedede] bg-white text-slate-600",
-                    ].join(" ")}
-                    style={isSelectedPdf ? options.quickActionsStyle : undefined}
+                    className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-3 text-[10px] ${
+                      isActivePdf
+                        ? options.itemActiveClassName
+                        : options.itemInactiveClassName
+                    }`}
+                    style={isActivePdf ? options.itemActiveStyle : options.itemInactiveStyle}
                   >
-                    <button
-                      type="button"
-                      onClick={() => toggleSelectedPdf(pdf.id)}
-                      className={[
-                        "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-bold transition",
-                        isSelectedPdf
-                          ? "border-[#0f3a4a] bg-[#0f3a4a] text-white"
-                          : "border-slate-300 bg-white text-transparent hover:border-[#0f3a4a]",
-                      ].join(" ")}
-                      aria-label={
-                        isSelectedPdf
-                          ? `Remover ${pdf.fileName} da seleção`
-                          : `Selecionar ${pdf.fileName}`
-                      }
-                      title={
-                        isSelectedPdf
-                          ? "Remover da seleção do chat"
-                          : "Selecionar para o chat"
-                      }
-                    >
-                      ✓
-                    </button>
-
-                    <svg
-                      aria-hidden="true"
-                      viewBox="0 0 24 24"
-                      className="h-3.5 w-3.5 shrink-0"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                    >
-                      <path d="M6 3h8l4 4v14H6z" />
-                      <path d="M14 3v5h5" />
-                      <path d="M9 12h6M9 16h6" />
-                    </svg>
-
                     <button
                       type="button"
                       onClick={async () => {
@@ -2708,48 +2890,50 @@ export default function EssentialChatPageClient({
 
                         await loadConversationPdfs(conversationId);
                       }}
-                      className="max-w-[190px] truncate font-semibold"
+                      className="max-w-[96px] truncate font-medium"
                       title={pdf.fileName}
                     >
-                      {pdf.fileName}
+                      {truncatePdfName(pdf.fileName, options.maxLabel ?? 9)}
                     </button>
 
-                    {formattedSize && (
-                      <span
-                        className={[
-                          "shrink-0 text-[10px]",
-                          isSelectedPdf ? "text-slate-500" : "text-slate-500",
-                        ].join(" ")}
-                      >
-                        {formattedSize}
-                      </span>
-                    )}
-
-                    {itemBadge && (
-                      <span className="rounded-full bg-black/10 px-2 py-[2px] text-[9px]">
-                        {itemBadge}
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => toggleSelectedPdf(pdf.id)}
+                      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
+                        isSelectedPdf
+                          ? "bg-emerald-600 text-white"
+                          : "border border-slate-400 bg-transparent text-transparent hover:border-slate-500"
+                      }`}
+                      title={
+                        isSelectedPdf
+                          ? "Remover da seleção do chat"
+                          : "Selecionar para o chat"
+                      }
+                    >
+                      {isSelectedPdf ? "✓" : "○"}
+                    </button>
 
                     <button
                       type="button"
                       onClick={() => handleRemovePdf(pdf.id)}
-                      className={[
-                        "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[13px] transition hover:bg-red-50 hover:text-red-600",
-                        isSelectedPdf ? "text-slate-500" : "text-slate-500",
-                      ].join(" ")}
-                      aria-label={`Excluir ${pdf.fileName}`}
+                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white hover:bg-red-600"
                       title="Excluir PDF"
                     >
                       ×
                     </button>
+
+                    {itemBadge && (
+                      <span className="rounded-full bg-black/20 px-2 py-[2px] text-[9px]">
+                        {itemBadge}
+                      </span>
+                    )}
                   </div>
                 );
               })}
-              </div>
             </div>
+          </div>
 
-            {attachedPdfs.length > 0 && (
+          {attachedPdfs.length > 0 && (
             <div ref={quickActionsRef} className="relative shrink-0">
               <button
                 type="button"
@@ -2771,7 +2955,9 @@ export default function EssentialChatPageClient({
                     : options.quickActionsDisabledStyle
                 }
               >
-                RESUMIR PDF(S)
+                {effectiveSelectedPdfIds.length > 1
+                  ? "AÇÕES RÁPIDAS COM PDFs"
+                  : "AÇÕES RÁPIDAS COM PDF"}
               </button>
 
               {showPdfQuickActions && effectiveSelectedPdfIds.length > 0 && (
@@ -2812,23 +2998,11 @@ export default function EssentialChatPageClient({
                   >
                     Identificar irregularidades
                   </button>
-
-                  {options.showReprocessInMenu && (
-                    <button
-                      type="button"
-                      onClick={handleReprocessPdf}
-                      className={options.quickMenuItemClassName}
-                      style={options.quickMenuItemStyle}
-                    >
-                      Reprocessar PDF
-                    </button>
-                  )}
                 </div>
               )}
-              </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
 
         {isUploadingPdf && (
           <div
@@ -2868,7 +3042,7 @@ export default function EssentialChatPageClient({
           ) : loadingMessages && activeConversationId ? (
             <div
               className="flex h-full items-center justify-center text-sm"
-              style={{ color: isStrategic ? theme.colors.text : "#334155" }}
+              style={{ color: isStrategic ? "#F5A623" : "#334155" }}
             >
               Carregando conversa...
             </div>
@@ -2947,9 +3121,14 @@ export default function EssentialChatPageClient({
             )}
 
             {isStrategic
-              ? renderPdfRow({
-                  buttonClassName: strategicButtonClassName,
-                  buttonDisabledClassName: strategicDisabledButtonClassName,
+              ? attachedPdfs.length
+                ? renderPdfRow({
+                  buttonClassName:
+                    "border border-[#dedede] bg-white text-[#0D2B4D] transition hover:border-[#14933D] hover:text-[#14933D]",
+                  buttonDisabledClassName:
+                    "cursor-not-allowed border border-[#dedede] bg-white text-[#5A5A5A] opacity-50",
+                  attachmentButtonIcon: true,
+                  hideAttachmentButton: true,
                   quickActionsClassName: strategicButtonClassName,
                   quickActionsDisabledClassName: strategicDisabledButtonClassName,
                   itemActiveClassName: strategicChipClassName,
@@ -2959,11 +3138,9 @@ export default function EssentialChatPageClient({
                   hintActionClassName: strategicHintButtonClassName,
                   hintDismissClassName: strategicHintButtonClassName,
                   quickMenuClassName:
-                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border py-2 text-xs text-white shadow-lg",
+                    "absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border py-2 text-xs text-[#0D2B4D] shadow-lg",
                   quickMenuItemClassName: strategicMenuItemClassName,
-                  uploadTextClassName: "mb-2 text-[11px] text-white",
-                  buttonStyle: strategicButtonStyle,
-                  buttonDisabledStyle: strategicDisabledButtonStyle,
+                  uploadTextClassName: "mb-2 text-[11px] text-[#5A5A5A]",
                   quickActionsStyle: strategicButtonStyle,
                   quickActionsDisabledStyle: strategicDisabledButtonStyle,
                   itemActiveStyle: strategicItemActiveStyle,
@@ -2976,9 +3153,9 @@ export default function EssentialChatPageClient({
                   uploadTextStyle: {
                     color: theme.colors.text,
                   },
-                  showReprocessInMenu: true,
                   maxLabel: 9,
                 })
+                : null
               : renderPdfRow({
                   buttonClassName:
                     "border border-slate-400 bg-[#dcdcdc] text-slate-700 hover:bg-[#d6d6d6]",
@@ -3010,7 +3187,7 @@ export default function EssentialChatPageClient({
               <div
                 className={`mb-2 rounded-xl border px-3 py-2 text-[12px] ${
                   isStrategic
-                    ? "border-yellow-400/40 bg-yellow-400/10 text-yellow-100"
+                    ? "border-[#F5A623]/40 bg-[#F5A623]/10 text-amber-950"
                     : "border-amber-300 bg-amber-100 text-amber-950"
                 }`}
               >
@@ -3018,30 +3195,65 @@ export default function EssentialChatPageClient({
               </div>
             )}
 
-            <ChatInput
-              onSend={handleSend}
-              isSending={isSending}
-              onStop={handleStop}
-              disabled={isBlocked || accessLoading || isPdfBlockingSend}
-              responseMode={responseMode}
-              showResponseModes={false}
-              availableResponseModes={[]}
-              isStrategic={false}
-              onAttachPdf={handlePdfButtonClick}
-              attachPdfDisabled={isBlocked || accessLoading || isUploadingPdf}
-              isUploadingPdf={isUploadingPdf}
-              pdfLimitLabel={
-                !attachedPdfs.length &&
-                typeof access?.capabilities?.maxPdfsPerConversation === "number"
-                  ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
-                      access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
-                    }`
-                  : null
-              }
-              inputValue={draftMessage}
-              onInputValueChange={setDraftMessage}
-              externalTextareaRef={chatInputTextareaRef}
-            />
+            {isStrategic && !attachedPdfs.length ? (
+              <>
+                {renderStrategicAttachmentInput()}
+                <ChatInput
+                  onSend={handleSend}
+                  isSending={isSending}
+                  onStop={handleStop}
+                  disabled={isBlocked || accessLoading || isPdfBlockingSend}
+                  responseMode={responseMode}
+                  onResponseModeChange={setResponseMode}
+                  showResponseModes={showResponseModes}
+                  availableResponseModes={strategicResponseModes}
+                  isStrategic={isStrategic}
+                  inputValue={draftMessage}
+                  onInputValueChange={setDraftMessage}
+                  externalTextareaRef={chatInputTextareaRef}
+                  onAttachPdf={handlePdfButtonClick}
+                  attachmentDisabled={isBlocked || accessLoading || isUploadingPdf}
+                  helperText={
+                    typeof access?.capabilities?.maxPdfsPerConversation ===
+                    "number"
+                      ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
+                          access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
+                        }`
+                      : undefined
+                  }
+                />
+              </>
+            ) : (
+              <ChatInput
+                onSend={handleSend}
+                isSending={isSending}
+                onStop={handleStop}
+                disabled={isBlocked || accessLoading || isPdfBlockingSend}
+                responseMode={responseMode}
+                onResponseModeChange={setResponseMode}
+                showResponseModes={showResponseModes}
+                availableResponseModes={strategicResponseModes}
+                isStrategic={isStrategic}
+                inputValue={draftMessage}
+                onInputValueChange={setDraftMessage}
+                externalTextareaRef={chatInputTextareaRef}
+                onAttachPdf={isStrategic ? handlePdfButtonClick : undefined}
+                attachmentDisabled={
+                  isStrategic
+                    ? isBlocked || accessLoading || isUploadingPdf
+                    : false
+                }
+                helperText={
+                  !isStrategic &&
+                  !attachedPdfs.length &&
+                  typeof access?.capabilities?.maxPdfsPerConversation === "number"
+                    ? `Limite por conversa: ${access.capabilities.maxPdfsPerConversation} PDF${
+                        access.capabilities.maxPdfsPerConversation === 1 ? "" : "s"
+                      }`
+                    : undefined
+                }
+              />
+            )}
           </div>
         </div>
       </div>
@@ -3052,10 +3264,10 @@ export default function EssentialChatPageClient({
     <div className="h-screen" style={{ backgroundColor: theme.colors.bg }}>
       <div className="flex h-full flex-col md:hidden">
         <header
-          className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 py-3 shadow-sm"
+          className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between border-b px-4 py-3 shadow-sm"
           style={{
             backgroundColor: isStrategic ? theme.colors.bgSecondary : "#f5f5f5",
-            color: isStrategic ? theme.colors.text : "#0f172a",
+            color: isStrategic ? "#0D2B4D" : "#0f172a",
           }}
         >
           <div className="flex items-center gap-2">
@@ -3074,7 +3286,7 @@ export default function EssentialChatPageClient({
               </div>
               <div
                 className="text-[11px] leading-none"
-                style={{ color: isStrategic ? theme.colors.textSoft : "#64748b" }}
+                style={{ color: isStrategic ? "#5A5A5A" : "#64748b" }}
               >
                 {brand.vendorLabel}
               </div>
@@ -3084,7 +3296,7 @@ export default function EssentialChatPageClient({
           <div className="flex items-center gap-4">
             <span
               className="text-[11px]"
-              style={{ color: isStrategic ? theme.colors.textMuted : "#475569" }}
+              style={{ color: isStrategic ? "#5A5A5A" : "#475569" }}
             >
               Usuário: <span className="font-semibold break-all">{userLabel}</span>{" "}
               {statusLabel && (
@@ -3103,22 +3315,22 @@ export default function EssentialChatPageClient({
               onClick={() => setIsMobileSidebarOpen(true)}
               className="flex h-9 w-9 items-center justify-center rounded-full border shadow-sm"
               style={{
-                borderColor: isStrategic ? theme.colors.borderStrong : "#cbd5e1",
-                backgroundColor: isStrategic ? theme.colors.bg : "#ffffff",
+                borderColor: isStrategic ? "rgba(13,43,77,0.20)" : "#cbd5e1",
+                backgroundColor: isStrategic ? "#FFFFFF" : "#ffffff",
               }}
             >
               <span className="flex flex-col gap-[3px]">
                 <span
                   className="block h-[2px] w-4 rounded"
-                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                  style={{ backgroundColor: isStrategic ? "#0D2B4D" : "#334155" }}
                 />
                 <span
                   className="block h-[2px] w-4 rounded"
-                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                  style={{ backgroundColor: isStrategic ? "#0D2B4D" : "#334155" }}
                 />
                 <span
                   className="block h-[2px] w-4 rounded"
-                  style={{ backgroundColor: isStrategic ? theme.colors.text : "#334155" }}
+                  style={{ backgroundColor: isStrategic ? "#0D2B4D" : "#334155" }}
                 />
               </span>
             </button>
@@ -3146,12 +3358,16 @@ export default function EssentialChatPageClient({
               onRenameConversation={(id, nextTitle) =>
                 handleRenameConversation(id, nextTitle)
               }
+              onOpenUpgradeAccess={() => {
+                void handleStartStrategicTrial();
+              }}
               userLabel={userLabel}
               isBlocked={isBlocked}
               blockedMessage={blockedMessage}
               blockedCta={blockedCta}
               access={access}
               accessLoading={accessLoading}
+              upgradeLoading={isStartingStrategicTrial}
               sidebarFeedback={sidebarFeedback}
             />
           </div>
@@ -3182,12 +3398,16 @@ export default function EssentialChatPageClient({
           onRenameConversation={(id, nextTitle) =>
             handleRenameConversation(id, nextTitle)
           }
+          onOpenUpgradeAccess={() => {
+            void handleStartStrategicTrial();
+          }}
           userLabel={userLabel}
           isBlocked={isBlocked}
           blockedMessage={blockedMessage}
           blockedCta={blockedCta}
           access={access}
           accessLoading={accessLoading}
+          upgradeLoading={isStartingStrategicTrial}
           sidebarFeedback={sidebarFeedback}
         />
 

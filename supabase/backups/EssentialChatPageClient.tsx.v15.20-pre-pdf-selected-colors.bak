@@ -2647,10 +2647,9 @@ export default function EssentialChatPageClient({
                     className={[
                       "inline-flex h-9 shrink-0 items-center gap-2 rounded-full border px-3 text-[11px] transition",
                       isSelectedPdf
-                        ? "text-[#0D2B4D]"
+                        ? "border-[#0f3a4a] bg-[#e6f0f3] text-[#0f3a4a]"
                         : "border-[#dedede] bg-white text-slate-600",
                     ].join(" ")}
-                    style={isSelectedPdf ? options.quickActionsStyle : undefined}
                   >
                     <button
                       type="button"
@@ -2715,12 +2714,7 @@ export default function EssentialChatPageClient({
                     </button>
 
                     {formattedSize && (
-                      <span
-                        className={[
-                          "shrink-0 text-[10px]",
-                          isSelectedPdf ? "text-slate-500" : "text-slate-500",
-                        ].join(" ")}
-                      >
+                      <span className="shrink-0 text-[10px] text-slate-500">
                         {formattedSize}
                       </span>
                     )}
@@ -2734,10 +2728,7 @@ export default function EssentialChatPageClient({
                     <button
                       type="button"
                       onClick={() => handleRemovePdf(pdf.id)}
-                      className={[
-                        "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[13px] transition hover:bg-red-50 hover:text-red-600",
-                        isSelectedPdf ? "text-slate-500" : "text-slate-500",
-                      ].join(" ")}
+                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[13px] text-slate-500 transition hover:bg-red-50 hover:text-red-600"
                       aria-label={`Excluir ${pdf.fileName}`}
                       title="Excluir PDF"
                     >

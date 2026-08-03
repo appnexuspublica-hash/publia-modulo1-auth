@@ -15,8 +15,7 @@ function cleanUrl(value: string | null | undefined) {
     for (const key of Array.from(parsed.searchParams.keys())) {
       if (TRACKING_PARAMS.has(key.toLowerCase())) parsed.searchParams.delete(key);
     }
-    // Fragmentos podem representar rotas funcionais de portais SPA
-    // (ex.: Betha Transparência em /#/identificador). Preserve-os na URL clicável.
+    parsed.hash = "";
     return parsed.toString();
   } catch {
     return raw;

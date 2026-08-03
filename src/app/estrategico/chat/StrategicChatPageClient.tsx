@@ -84,6 +84,17 @@ function markdownToPlainText(markdown: string) {
   return text.trim();
 }
 
+function formatAttachedPdfSize(fileSize: number): string {
+  if (!Number.isFinite(fileSize) || fileSize <= 0) return "";
+
+  const sizeInMb = fileSize / (1024 * 1024);
+  if (sizeInMb >= 1) {
+    return `${sizeInMb.toFixed(sizeInMb >= 10 ? 1 : 2)} MB`;
+  }
+
+  return `${Math.max(1, Math.round(fileSize / 1024))} KB`;
+}
+
 function truncatePdfName(name: string, max = 9) {
   const clean = String(name ?? "").trim();
   if (clean.length <= max) return clean;
@@ -2856,20 +2867,57 @@ export default function StrategicChatPageClient({
           <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap pb-1">
             <div className="flex w-max items-center gap-2 pr-1">
               {attachedPdfs.map((pdf) => {
-                const isActivePdf = pdf.id === attachedPdf?.id;
                 const isSelectedPdf = selectedPdfIds.includes(pdf.id);
                 const itemBadge = getPdfBadge(pdf);
+                const formattedSize = formatAttachedPdfSize(pdf.fileSize);
 
                 return (
                   <div
                     key={pdf.id}
-                    className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-3 text-[10px] ${
-                      isActivePdf
-                        ? options.itemActiveClassName
-                        : options.itemInactiveClassName
-                    }`}
-                    style={isActivePdf ? options.itemActiveStyle : options.itemInactiveStyle}
+                    className={[
+                      "inline-flex h-9 shrink-0 items-center gap-2 rounded-full border px-3 text-[11px] transition",
+                      isSelectedPdf
+                        ? "text-[#0D2B4D]"
+                        : "border-[#dedede] bg-white text-slate-600",
+                    ].join(" ")}
+                    style={isSelectedPdf ? options.quickActionsStyle : undefined}
                   >
+                    <button
+                      type="button"
+                      onClick={() => toggleSelectedPdf(pdf.id)}
+                      className={[
+                        "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-bold transition",
+                        isSelectedPdf
+                          ? "border-[#0f3a4a] bg-[#0f3a4a] text-white"
+                          : "border-slate-300 bg-white text-transparent hover:border-[#0f3a4a]",
+                      ].join(" ")}
+                      aria-label={
+                        isSelectedPdf
+                          ? `Remover ${pdf.fileName} da seleção`
+                          : `Selecionar ${pdf.fileName}`
+                      }
+                      title={
+                        isSelectedPdf
+                          ? "Remover da seleção do chat"
+                          : "Selecionar para o chat"
+                      }
+                    >
+                      ✓
+                    </button>
+
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 24 24"
+                      className="h-3.5 w-3.5 shrink-0"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                    >
+                      <path d="M6 3h8l4 4v14H6z" />
+                      <path d="M14 3v5h5" />
+                      <path d="M9 12h6M9 16h6" />
+                    </svg>
+
                     <button
                       type="button"
                       onClick={async () => {
@@ -2890,43 +2938,41 @@ export default function StrategicChatPageClient({
 
                         await loadConversationPdfs(conversationId);
                       }}
-                      className="max-w-[96px] truncate font-medium"
+                      className="max-w-[190px] truncate font-semibold"
                       title={pdf.fileName}
                     >
-                      {truncatePdfName(pdf.fileName, options.maxLabel ?? 9)}
+                      {pdf.fileName}
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => toggleSelectedPdf(pdf.id)}
-                      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
-                        isSelectedPdf
-                          ? "bg-emerald-600 text-white"
-                          : "border border-slate-400 bg-transparent text-transparent hover:border-slate-500"
-                      }`}
-                      title={
-                        isSelectedPdf
-                          ? "Remover da seleção do chat"
-                          : "Selecionar para o chat"
-                      }
-                    >
-                      {isSelectedPdf ? "✓" : "○"}
-                    </button>
+                    {formattedSize && (
+                      <span
+                        className={[
+                          "shrink-0 text-[10px]",
+                          isSelectedPdf ? "text-slate-500" : "text-slate-500",
+                        ].join(" ")}
+                      >
+                        {formattedSize}
+                      </span>
+                    )}
+
+                    {itemBadge && (
+                      <span className="rounded-full bg-black/10 px-2 py-[2px] text-[9px]">
+                        {itemBadge}
+                      </span>
+                    )}
 
                     <button
                       type="button"
                       onClick={() => handleRemovePdf(pdf.id)}
-                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-500 text-white hover:bg-red-600"
+                      className={[
+                        "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[13px] transition hover:bg-red-50 hover:text-red-600",
+                        isSelectedPdf ? "text-slate-500" : "text-slate-500",
+                      ].join(" ")}
+                      aria-label={`Excluir ${pdf.fileName}`}
                       title="Excluir PDF"
                     >
                       ×
                     </button>
-
-                    {itemBadge && (
-                      <span className="rounded-full bg-black/20 px-2 py-[2px] text-[9px]">
-                        {itemBadge}
-                      </span>
-                    )}
                   </div>
                 );
               })}

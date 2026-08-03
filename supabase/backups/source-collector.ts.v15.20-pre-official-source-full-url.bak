@@ -78,7 +78,7 @@ export function collectOfficialWebSources(
     let normalizedUrl = url;
     try {
       const parsed = new URL(url);
-      // Preserve hash routes used by official SPA portals.
+      parsed.hash = "";
       normalizedUrl = parsed.toString();
     } catch {
       return;
@@ -227,7 +227,7 @@ export function collectOfficialWebSourcesFromText(
     let normalizedUrl = url;
     try {
       const parsed = new URL(url);
-      // Preserve hash routes used by official SPA portals.
+      parsed.hash = "";
       normalizedUrl = parsed.toString();
     } catch {
       return;
