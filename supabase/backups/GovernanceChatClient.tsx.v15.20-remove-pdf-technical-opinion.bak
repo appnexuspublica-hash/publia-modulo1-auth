@@ -4095,6 +4095,7 @@ export default function GovernanceChatClient({
                                 "Extrair obrigações dos PDFs",
                                 "Listar riscos encontrados",
                                 "Gerar checklist com base nos PDFs",
+                                "Gerar parecer técnico com base nos PDFs",
                                 "Comparar os PDFs selecionados",
                               ].map((action) => (
                                 <button

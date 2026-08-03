@@ -2,7 +2,7 @@ import type OpenAI from "openai";
 
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import { createWritableSupabaseRouteClient } from "@/lib/governance/chat/infrastructure";
-import { buildGovernancePdfAdaptiveSource } from "@/lib/governance/chat/pdf-summary";
+import { buildGovernancePdfHierarchicalSummary } from "@/lib/governance/chat/pdf-summary";
 
 const MAX_GOVERNANCE_PDF_CONTEXT_CHARS = 9000;
 const MAX_GOVERNANCE_PDF_SUMMARY_CONTEXT_CHARS = 60000;
@@ -103,10 +103,12 @@ async function getGovernancePdfQueryEmbedding(params: {
 
 async function buildGovernancePdfContextFromVector(params: {
   client: ReturnType<typeof createWritableSupabaseRouteClient>;
-  queryEmbedding: number[] | null;
+  openai: OpenAI | null;
+  embeddingModel: string;
   ragTopK: number;
   pdfRow: GovernancePdfFileRow;
   userId: string;
+  question: string;
   maxChars: number;
 }) {
   const vectorReady =
@@ -117,14 +119,20 @@ async function buildGovernancePdfContextFromVector(params: {
     return "";
   }
 
-  if (!params.queryEmbedding) {
+  const queryEmbedding = await getGovernancePdfQueryEmbedding({
+    openai: params.openai,
+    embeddingModel: params.embeddingModel,
+    question: params.question,
+  });
+
+  if (!queryEmbedding) {
     return "";
   }
 
   const { data: matches, error: matchError } = await params.client.rpc(
     "match_pdf_chunks",
     {
-      query_embedding: params.queryEmbedding,
+      query_embedding: queryEmbedding,
       match_pdf_file_id: params.pdfRow.id,
       match_user_id: params.userId,
       match_count: params.ragTopK,
@@ -271,162 +279,106 @@ export async function buildGovernancePdfContext(
     Math.floor(maxContextChars / Math.max(1, uniquePdfFileIds.length)),
   );
 
-  // A pergunta é a mesma para todos os PDFs selecionados. Gerar o embedding
-  // uma única vez evita uma chamada externa repetida por arquivo.
-  const sharedQueryEmbedding = params.summaryRequested
-    ? null
-    : await getGovernancePdfQueryEmbedding({
-        openai: params.openai,
-        embeddingModel: params.embeddingModel,
-        question: params.question,
-      });
+  for (const pdfFileId of uniquePdfFileIds) {
+    const pdf = rowsById.get(pdfFileId);
+    const fileName = String(pdf?.file_name ?? "PDF selecionado");
 
-  if (!params.summaryRequested) {
-    const perPdfResults = await Promise.all(
-      uniquePdfFileIds.map(async (pdfFileId) => {
-        const pdf = rowsById.get(pdfFileId);
-        const fileName = String(pdf?.file_name ?? "PDF selecionado");
+    if (!pdf) {
+      warnings.push(`PDF não encontrado ou sem permissão: ${pdfFileId}.`);
+      pdfSummaryCoverageComplete = false;
+      continue;
+    }
 
-        if (!pdf) {
-          return {
-            block: "",
-            warning: `PDF não encontrado ou sem permissão: ${pdfFileId}.`,
-          };
+    const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
+    const vectorStatus = String(pdf.vector_index_status ?? "").toLowerCase();
+
+    if (params.summaryRequested) {
+      const extractedText = normalizePdfText(pdf.extracted_text ?? "");
+
+      if (!params.openai || !params.summaryModel || extractedStatus !== "ready" || !extractedText) {
+        warnings.push(
+          `Não foi possível processar integralmente o PDF "${fileName}" porque o texto extraído não está disponível.`,
+        );
+        pdfSummaryCoverageComplete = false;
+        continue;
+      }
+
+      try {
+        const summaryResult = await buildGovernancePdfHierarchicalSummary({
+          openai: params.openai,
+          model: params.summaryModel,
+          fileName,
+          extractedText,
+          signal: params.signal,
+        });
+
+        warnings.push(...summaryResult.warnings);
+        pdfSummaryCoverageComplete =
+          pdfSummaryCoverageComplete && summaryResult.coverageComplete;
+
+        if (!summaryResult.summaryText) {
+          warnings.push(`Não foi possível consolidar o conteúdo do PDF "${fileName}".`);
+          pdfSummaryCoverageComplete = false;
+          continue;
         }
 
-        const extractedStatus = String(
-          pdf.extracted_text_status ?? "",
-        ).toLowerCase();
-        const vectorStatus = String(
-          pdf.vector_index_status ?? "",
-        ).toLowerCase();
+        contextBlocks.push(
+          [
+            `PDF: ${fileName}`,
+            `ID: ${pdfFileId}`,
+            `Cobertura: ${summaryResult.coverageComplete ? "integral" : "parcial"}`,
+            "",
+            clampText(summaryResult.summaryText, maxCharsPerPdf),
+          ].join("\n"),
+        );
+      } catch (error) {
+        console.error("[governance/chat] Erro no resumo hierárquico do PDF:", {
+          pdfFileId,
+          error,
+        });
+        warnings.push(`Não foi possível resumir integralmente o PDF "${fileName}".`);
+        pdfSummaryCoverageComplete = false;
+      }
 
-        const vectorContext = await buildGovernancePdfContextFromVector({
-          client: params.client,
-          queryEmbedding: sharedQueryEmbedding,
-          ragTopK: params.ragTopK,
+      continue;
+    }
+
+    const vectorContext = await buildGovernancePdfContextFromVector({
+      client: params.client,
+      openai: params.openai,
+      embeddingModel: params.embeddingModel,
+      ragTopK: params.ragTopK,
+      pdfRow: pdf,
+      userId: params.userId,
+      question: params.question,
+      maxChars: maxCharsPerPdf,
+    });
+
+    const extractedTextContext = vectorContext
+      ? ""
+      : buildGovernancePdfContextFromExtractedText({
           pdfRow: pdf,
-          userId: params.userId,
+          question: params.question,
           maxChars: maxCharsPerPdf,
         });
 
-        const extractedTextContext = vectorContext
-          ? ""
-          : buildGovernancePdfContextFromExtractedText({
-              pdfRow: pdf,
-              question: params.question,
-              maxChars: maxCharsPerPdf,
-            });
+    const contextText = vectorContext || extractedTextContext;
 
-        const contextText = vectorContext || extractedTextContext;
+    if (!contextText) {
+      warnings.push(
+        `Não encontrei trechos disponíveis no PDF "${fileName}". Status de texto: ${extractedStatus || "não informado"}. Status vetorial: ${vectorStatus || "não informado"}.`,
+      );
+      continue;
+    }
 
-        if (!contextText) {
-          return {
-            block: "",
-            warning: `Não encontrei trechos disponíveis no PDF "${fileName}". Status de texto: ${extractedStatus || "não informado"}. Status vetorial: ${vectorStatus || "não informado"}.`,
-          };
-        }
-
-        return {
-          block: [
-            `PDF: ${fileName}`,
-            `ID: ${pdfFileId}`,
-            "",
-            contextText,
-          ].join("\n"),
-          warning: "",
-        };
-      }),
+    contextBlocks.push(
+      [
+        `PDF: ${fileName}`,
+        `ID: ${pdfFileId}`,
+        "",
+        contextText,
+      ].join("\n"),
     );
-
-    for (const result of perPdfResults) {
-      if (result.block) {
-        contextBlocks.push(result.block);
-      }
-
-      if (result.warning) {
-        warnings.push(result.warning);
-      }
-    }
-
-    const pdfContextText = contextBlocks
-      .join("\n\n---\n\n")
-      .slice(0, maxContextChars);
-
-    return {
-      selectedPdfFileIds: uniquePdfFileIds,
-      pdfContextText,
-      pdfContextAvailable: pdfContextText.trim().length > 0,
-      pdfContextWarnings: warnings,
-      pdfSummaryMode: false,
-      pdfSummaryCoverageComplete: true,
-    };
-  }
-
-  const summaryResults = await Promise.all(
-    uniquePdfFileIds.map(async (pdfFileId) => {
-      const pdf = rowsById.get(pdfFileId);
-      const fileName = String(pdf?.file_name ?? "PDF selecionado");
-
-      if (!pdf) {
-        return {
-          block: "",
-          warning: `PDF não encontrado ou sem permissão: ${pdfFileId}.`,
-          coverageComplete: false,
-        };
-      }
-
-      const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
-      const extractedText = normalizePdfText(pdf.extracted_text ?? "");
-
-      if (extractedStatus !== "ready" || !extractedText) {
-        return {
-          block: "",
-          warning: `Não foi possível preparar o PDF "${fileName}" porque o texto extraído não está disponível.`,
-          coverageComplete: false,
-        };
-      }
-
-      const adaptiveSource = buildGovernancePdfAdaptiveSource({
-        extractedText,
-        maxChars: maxCharsPerPdf,
-      });
-
-      if (!adaptiveSource.contextText) {
-        return {
-          block: "",
-          warning: `Não foi possível preparar o conteúdo do PDF "${fileName}".`,
-          coverageComplete: false,
-        };
-      }
-
-      return {
-        block: [
-          `PDF: ${fileName}`,
-          `ID: ${pdfFileId}`,
-          `Estratégia interna: ${adaptiveSource.strategy}`,
-          `Caracteres de origem: ${adaptiveSource.sourceChars}`,
-          `Caracteres enviados ao modelo: ${adaptiveSource.includedChars}`,
-          "",
-          adaptiveSource.contextText,
-        ].join("\n"),
-        warning: "",
-        coverageComplete: true,
-      };
-    }),
-  );
-
-  for (const result of summaryResults) {
-    if (result.block) {
-      contextBlocks.push(result.block);
-    }
-
-    if (result.warning) {
-      warnings.push(result.warning);
-    }
-
-    pdfSummaryCoverageComplete =
-      pdfSummaryCoverageComplete && result.coverageComplete;
   }
 
   const pdfContextText = contextBlocks

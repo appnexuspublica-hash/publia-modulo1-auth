@@ -962,13 +962,12 @@ export async function POST(request: Request) {
             isSelectedPdfSummaryRequest
               ? pdfContextResult.pdfSummaryCoverageComplete
                 ? [
-                    "MODO DE RESUMO ADAPTATIVO RÁPIDO",
-                    "O contexto abaixo foi preparado automaticamente a partir do texto extraído, usando o conteúdo integral quando couber e amostragem distribuída quando o conjunto for grande.",
-                    "Produza uma síntese integrada e objetiva sem expor detalhes da estratégia interna de processamento.",
-                    "Não peça o texto integral novamente quando o conteúdo abaixo estiver disponível.",
+                    "MODO DE RESUMO HIERÁRQUICO INTEGRAL",
+                    "O contexto abaixo foi produzido a partir do texto extraído completo, processado sequencialmente e consolidado.",
+                    "Não diga que apenas alguns trechos foram acessados e não peça o texto integral novamente.",
                   ].join("\n")
                 : [
-                    "MODO DE RESUMO ADAPTATIVO COM CONTEÚDO INDISPONÍVEL",
+                    "MODO DE RESUMO HIERÁRQUICO COM COBERTURA PARCIAL",
                     "Informe somente a limitação concreta descrita nos avisos abaixo; não use observações genéricas.",
                     ...pdfContextResult.pdfContextWarnings.map((warning) => `- ${warning}`),
                   ].join("\n")

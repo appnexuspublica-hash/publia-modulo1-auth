@@ -1681,9 +1681,6 @@ export default function GovernanceChatClient({
   const [selectedPdfAttachmentIds, setSelectedPdfAttachmentIds] = useState<string[]>([]);
   const [isPdfActionsMenuOpen, setIsPdfActionsMenuOpen] = useState(false);
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
-  const [pdfPreparationStatus, setPdfPreparationStatus] = useState(
-    "Preparando PDF para leitura",
-  );
   const [conversationSearch, setConversationSearch] = useState("");
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
@@ -2832,23 +2829,12 @@ export default function GovernanceChatClient({
 
     setMessageError(null);
     setIsPdfActionsMenuOpen(false);
-    setPdfPreparationStatus(
-      pdfs.length > 1
-        ? `Preparando 1 de ${pdfs.length} PDFs`
-        : `Preparando ${pdfs[0]?.name ?? "PDF"} para leitura`,
-    );
     setIsUploadingPdf(true);
 
     try {
       const nextAttachments: LocalPdfAttachment[] = [];
 
-      for (const [fileIndex, file] of pdfs.entries()) {
-        const progressLabel =
-          pdfs.length > 1
-            ? `${fileIndex + 1} de ${pdfs.length}: ${file.name}`
-            : file.name;
-
-        setPdfPreparationStatus(`Enviando ${progressLabel}`);
+      for (const file of pdfs) {
         const formData = new FormData();
         formData.append("product", "governance");
         formData.append("conversationId", selectedConversation.id);
@@ -2898,8 +2884,6 @@ export default function GovernanceChatClient({
           size: fileSize,
         });
 
-        setPdfPreparationStatus(`Extraindo e indexando ${progressLabel}`);
-
         const indexResponse = await fetch("/api/pdf/index", {
           method: "POST",
           headers: {
@@ -2921,17 +2905,12 @@ export default function GovernanceChatClient({
         }
       }
 
-      const allAttachments = [...pdfAttachments, ...nextAttachments];
-
-      setPdfAttachments(allAttachments);
-      // Todo PDF anexado entra selecionado por padrão. Ao adicionar novos arquivos,
-      // os anexos já presentes também permanecem selecionados para a próxima pergunta.
-      setSelectedPdfAttachmentIds(allAttachments.map((file) => file.id));
-      setPdfPreparationStatus(
-        nextAttachments.length > 1
-          ? `${nextAttachments.length} PDFs prontos para leitura`
-          : `${nextAttachments[0]?.name ?? "PDF"} pronto para leitura`,
-      );
+      setPdfAttachments((current) => [...current, ...nextAttachments]);
+      // Ao anexar novos PDFs em uma conversa já em andamento, eles passam a ser
+      // os PDFs selecionados para a próxima pergunta. Os PDFs anteriores continuam
+      // aparecendo na conversa, mas não ficam selecionados automaticamente para
+      // evitar que ações rápidas usem contexto antigo por engano.
+      setSelectedPdfAttachmentIds(nextAttachments.map((file) => file.id));
     } catch (error) {
       const message =
         error instanceof Error
@@ -4095,6 +4074,7 @@ export default function GovernanceChatClient({
                                 "Extrair obrigações dos PDFs",
                                 "Listar riscos encontrados",
                                 "Gerar checklist com base nos PDFs",
+                                "Gerar parecer técnico com base nos PDFs",
                                 "Comparar os PDFs selecionados",
                               ].map((action) => (
                                 <button
@@ -4185,41 +4165,22 @@ export default function GovernanceChatClient({
                         <Paperclip size={18} />
                       </button>
 
-                      {isUploadingPdf ? (
-                        <div
-                          role="status"
-                          aria-live="polite"
-                          className="flex min-h-10 flex-1 items-center gap-2 py-2 text-sm font-medium text-[#0f3a4a]"
-                        >
-                          <Loader2
-                            size={17}
-                            className="shrink-0 animate-spin"
-                            aria-hidden="true"
-                          />
-                          <span className="truncate">{pdfPreparationStatus}</span>
-                          <span
-                            className="inline-flex w-6 justify-start font-bold tracking-[0.18em] text-[#0f3a4a] animate-pulse"
-                            aria-hidden="true"
-                          >
-                            ...
-                          </span>
-                        </div>
-                      ) : (
-                        <textarea
-                          ref={messageInputRef}
-                          value={messageText}
-                          onChange={(event) => setMessageText(event.target.value)}
-                          onKeyDown={handleMessageKeyDown}
-                          disabled={isSendingMessage}
-                          rows={1}
-                          placeholder={
-                            isSendingMessage
+                      <textarea
+                        ref={messageInputRef}
+                        value={messageText}
+                        onChange={(event) => setMessageText(event.target.value)}
+                        onKeyDown={handleMessageKeyDown}
+                        disabled={isSendingMessage || isUploadingPdf}
+                        rows={1}
+                        placeholder={
+                          isUploadingPdf
+                            ? "Preparando PDF para leitura..."
+                            : isSendingMessage
                               ? "A Publ.IA Governança está respondendo..."
                               : "Digite sua mensagem..."
-                          }
-                          className="max-h-28 min-h-10 flex-1 resize-none bg-transparent py-2 outline-none placeholder:text-slate-400"
-                        />
-                      )}
+                        }
+                        className="max-h-28 min-h-10 flex-1 resize-none bg-transparent py-2 outline-none placeholder:text-slate-400"
+                      />
 
                       {isSendingMessage ? (
                         <button

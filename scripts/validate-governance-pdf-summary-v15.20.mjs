@@ -9,12 +9,14 @@ const summary = fs.readFileSync(path.join(root, "src/lib/governance/chat/pdf-sum
 const checks = [
   ["rota detecta resumo de PDFs selecionados", route.includes("isSelectedPdfSummaryRequest")],
   ["rota envia summaryRequested ao contexto", route.includes("summaryRequested: isSelectedPdfSummaryRequest")],
-  ["rota proíbe observação genérica quando cobertura é integral", route.includes("Não diga que apenas alguns trechos foram acessados")],
-  ["contexto ignora busca vetorial no modo resumo", context.includes("if (params.summaryRequested)")],
-  ["contexto usa resumo hierárquico", context.includes("buildGovernancePdfHierarchicalSummary")],
-  ["resumo processa o texto extraído sequencialmente", summary.includes("splitTextForSummary")],
-  ["resumo possui consolidação final", summary.includes("Consolide resumos parciais sequenciais")],
-  ["limitação é emitida apenas quando cobertura é parcial", summary.includes("coverageComplete")],
+  ["rota usa instrução de resumo adaptativo rápido", route.includes("MODO DE RESUMO ADAPTATIVO RÁPIDO")],
+  ["contexto não chama resumo hierárquico antes da resposta", !context.includes("buildGovernancePdfHierarchicalSummary")],
+  ["contexto prepara PDFs em paralelo", context.includes("const summaryResults = await Promise.all")],
+  ["contexto usa fonte adaptativa local", context.includes("buildGovernancePdfAdaptiveSource")],
+  ["resumo usa texto integral quando cabe", summary.includes('strategy: "full_text"')],
+  ["resumo usa amostragem distribuída para conjuntos grandes", summary.includes('strategy: "distributed_sampling"')],
+  ["amostragem preserva linhas estruturais", summary.includes("ADAPTIVE_PRIORITY_LINE_RE")],
+  ["amostragem cobre posições distribuídas do documento", summary.includes("Trecho distribuído")],
 ];
 
 let failed = false;
@@ -24,4 +26,4 @@ for (const [label, ok] of checks) {
 }
 
 if (failed) process.exit(1);
-console.log("\nResumo hierárquico de PDFs: validação estrutural aprovada.");
+console.log("\nResumo adaptativo rápido de PDFs: validação estrutural aprovada.");

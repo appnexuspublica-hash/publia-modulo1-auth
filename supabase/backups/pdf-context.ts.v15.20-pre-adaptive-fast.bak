@@ -2,7 +2,7 @@ import type OpenAI from "openai";
 
 import { chunkText, pickRelevantChunks } from "@/lib/pdf/chunking";
 import { createWritableSupabaseRouteClient } from "@/lib/governance/chat/infrastructure";
-import { buildGovernancePdfAdaptiveSource } from "@/lib/governance/chat/pdf-summary";
+import { buildGovernancePdfHierarchicalSummary } from "@/lib/governance/chat/pdf-summary";
 
 const MAX_GOVERNANCE_PDF_CONTEXT_CHARS = 9000;
 const MAX_GOVERNANCE_PDF_SUMMARY_CONTEXT_CHARS = 60000;
@@ -363,70 +363,104 @@ export async function buildGovernancePdfContext(
     };
   }
 
-  const summaryResults = await Promise.all(
-    uniquePdfFileIds.map(async (pdfFileId) => {
-      const pdf = rowsById.get(pdfFileId);
-      const fileName = String(pdf?.file_name ?? "PDF selecionado");
+  for (const pdfFileId of uniquePdfFileIds) {
+    const pdf = rowsById.get(pdfFileId);
+    const fileName = String(pdf?.file_name ?? "PDF selecionado");
 
-      if (!pdf) {
-        return {
-          block: "",
-          warning: `PDF não encontrado ou sem permissão: ${pdfFileId}.`,
-          coverageComplete: false,
-        };
-      }
+    if (!pdf) {
+      warnings.push(`PDF não encontrado ou sem permissão: ${pdfFileId}.`);
+      pdfSummaryCoverageComplete = false;
+      continue;
+    }
 
-      const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
+    const extractedStatus = String(pdf.extracted_text_status ?? "").toLowerCase();
+    const vectorStatus = String(pdf.vector_index_status ?? "").toLowerCase();
+
+    if (params.summaryRequested) {
       const extractedText = normalizePdfText(pdf.extracted_text ?? "");
 
-      if (extractedStatus !== "ready" || !extractedText) {
-        return {
-          block: "",
-          warning: `Não foi possível preparar o PDF "${fileName}" porque o texto extraído não está disponível.`,
-          coverageComplete: false,
-        };
+      if (!params.openai || !params.summaryModel || extractedStatus !== "ready" || !extractedText) {
+        warnings.push(
+          `Não foi possível processar integralmente o PDF "${fileName}" porque o texto extraído não está disponível.`,
+        );
+        pdfSummaryCoverageComplete = false;
+        continue;
       }
 
-      const adaptiveSource = buildGovernancePdfAdaptiveSource({
-        extractedText,
-        maxChars: maxCharsPerPdf,
-      });
+      try {
+        const summaryResult = await buildGovernancePdfHierarchicalSummary({
+          openai: params.openai,
+          model: params.summaryModel,
+          fileName,
+          extractedText,
+          signal: params.signal,
+        });
 
-      if (!adaptiveSource.contextText) {
-        return {
-          block: "",
-          warning: `Não foi possível preparar o conteúdo do PDF "${fileName}".`,
-          coverageComplete: false,
-        };
+        warnings.push(...summaryResult.warnings);
+        pdfSummaryCoverageComplete =
+          pdfSummaryCoverageComplete && summaryResult.coverageComplete;
+
+        if (!summaryResult.summaryText) {
+          warnings.push(`Não foi possível consolidar o conteúdo do PDF "${fileName}".`);
+          pdfSummaryCoverageComplete = false;
+          continue;
+        }
+
+        contextBlocks.push(
+          [
+            `PDF: ${fileName}`,
+            `ID: ${pdfFileId}`,
+            `Cobertura: ${summaryResult.coverageComplete ? "integral" : "parcial"}`,
+            "",
+            clampText(summaryResult.summaryText, maxCharsPerPdf),
+          ].join("\n"),
+        );
+      } catch (error) {
+        console.error("[governance/chat] Erro no resumo hierárquico do PDF:", {
+          pdfFileId,
+          error,
+        });
+        warnings.push(`Não foi possível resumir integralmente o PDF "${fileName}".`);
+        pdfSummaryCoverageComplete = false;
       }
 
-      return {
-        block: [
-          `PDF: ${fileName}`,
-          `ID: ${pdfFileId}`,
-          `Estratégia interna: ${adaptiveSource.strategy}`,
-          `Caracteres de origem: ${adaptiveSource.sourceChars}`,
-          `Caracteres enviados ao modelo: ${adaptiveSource.includedChars}`,
-          "",
-          adaptiveSource.contextText,
-        ].join("\n"),
-        warning: "",
-        coverageComplete: true,
-      };
-    }),
-  );
-
-  for (const result of summaryResults) {
-    if (result.block) {
-      contextBlocks.push(result.block);
+      continue;
     }
 
-    if (result.warning) {
-      warnings.push(result.warning);
+    const vectorContext = await buildGovernancePdfContextFromVector({
+      client: params.client,
+      queryEmbedding: sharedQueryEmbedding,
+      ragTopK: params.ragTopK,
+      pdfRow: pdf,
+      userId: params.userId,
+      maxChars: maxCharsPerPdf,
+    });
+
+    const extractedTextContext = vectorContext
+      ? ""
+      : buildGovernancePdfContextFromExtractedText({
+          pdfRow: pdf,
+          question: params.question,
+          maxChars: maxCharsPerPdf,
+        });
+
+    const contextText = vectorContext || extractedTextContext;
+
+    if (!contextText) {
+      warnings.push(
+        `Não encontrei trechos disponíveis no PDF "${fileName}". Status de texto: ${extractedStatus || "não informado"}. Status vetorial: ${vectorStatus || "não informado"}.`,
+      );
+      continue;
     }
 
-    pdfSummaryCoverageComplete =
-      pdfSummaryCoverageComplete && result.coverageComplete;
+    contextBlocks.push(
+      [
+        `PDF: ${fileName}`,
+        `ID: ${pdfFileId}`,
+        "",
+        contextText,
+      ].join("\n"),
+    );
   }
 
   const pdfContextText = contextBlocks

@@ -686,7 +686,7 @@ export async function POST(request: Request) {
     const governanceKnowledgePrimary =
       governancePlan.intent === "general_legal" ||
       governancePlan.intent === "general_administrative";
-    const forceWebFirst = governanceKnowledgePrimary && !hasSelectedPdfAttachments;
+    const forceWebFirst = governanceKnowledgePrimary;
     const officialWeb = forceWebFirst
       ? resolveEssentialOfficialWeb(content)
       : null;
@@ -737,21 +737,19 @@ export async function POST(request: Request) {
     const currentQuestionOnly =
       hasSelectedPdfAttachments || hasLegalGuardrails || governanceKnowledgePrimary;
 
-    const isSelectedPdfSummaryRequest =
-      hasSelectedPdfAttachments &&
-      (governancePlan.answerShape === "document_summary" ||
-        /\b(resumir|resuma|resumo|sintetizar|síntese|sintese)\b/i.test(content));
-
-    // Estas etapas não dependem entre si. Executá-las em paralelo reduz o tempo
-    // até o início da resposta, especialmente quando há PDFs selecionados.
-    const conversationTitlePromise = updateConversationTitleFromMessage({
+    const conversationTitle = await updateConversationTitleFromMessage({
       supabase,
       conversation,
       organizationId: context.organization.id,
       content,
     });
 
-    const pdfContextPromise = telemetry.measure(
+    const isSelectedPdfSummaryRequest =
+      hasSelectedPdfAttachments &&
+      (governancePlan.answerShape === "document_summary" ||
+        /\b(resumir|resuma|resumo|sintetizar|síntese|sintese)\b/i.test(content));
+
+    const pdfContextResult = await telemetry.measure(
       "pdf_context",
       () =>
         buildGovernancePdfContext({
@@ -779,16 +777,15 @@ export async function POST(request: Request) {
       }),
     );
 
-    const governanceCorePromise = telemetry.measure(
+    const governanceCoreResult = await telemetry.measure(
       "governance_core_pipeline",
-      () =>
-        orchestrateGovernanceCore({
-          client: supabase,
-          organizationId: context.organization.id,
-          question: content,
-          maxContextChars: 24000,
-          queryPlan: governancePlan,
-        }),
+      () => orchestrateGovernanceCore({
+        client: supabase,
+        organizationId: context.organization.id,
+        question: content,
+        maxContextChars: 24000,
+        queryPlan: governancePlan,
+      }),
       (result) => ({
         intent: result.queryPlan.intent,
         evidenceCount: result.evidence.length,
@@ -796,7 +793,19 @@ export async function POST(request: Request) {
       }),
     );
 
-    const historyPromise = telemetry.measure(
+    const unifiedRecoveryResult = governanceCoreResult.recoveryResult;
+    const responseSources = governanceCoreResult.responseSources;
+    let responseReferences = governanceCoreResult.responseReferences;
+
+    telemetry.mark("evidence_bundle", "success", {
+      pipeline: GOVERNANCE_PIPELINE_VERSION,
+      contextChars: governanceCoreResult.contextText.length,
+      references: responseReferences.length,
+      evidence: governanceCoreResult.evidence.length,
+      degraded: unifiedRecoveryResult.responsePolicy.degraded,
+    });
+
+    const historyResult = await telemetry.measure(
       "conversation_history",
       () =>
         loadGovernanceConversationHistory({
@@ -811,30 +820,6 @@ export async function POST(request: Request) {
         messages: result.ok ? result.history.length : 0,
       }),
     );
-
-    const [
-      conversationTitle,
-      pdfContextResult,
-      governanceCoreResult,
-      historyResult,
-    ] = await Promise.all([
-      conversationTitlePromise,
-      pdfContextPromise,
-      governanceCorePromise,
-      historyPromise,
-    ]);
-
-    const unifiedRecoveryResult = governanceCoreResult.recoveryResult;
-    const responseSources = governanceCoreResult.responseSources;
-    let responseReferences = governanceCoreResult.responseReferences;
-
-    telemetry.mark("evidence_bundle", "success", {
-      pipeline: GOVERNANCE_PIPELINE_VERSION,
-      contextChars: governanceCoreResult.contextText.length,
-      references: responseReferences.length,
-      evidence: governanceCoreResult.evidence.length,
-      degraded: unifiedRecoveryResult.responsePolicy.degraded,
-    });
 
     if (!historyResult.ok) {
       console.error(
@@ -962,13 +947,12 @@ export async function POST(request: Request) {
             isSelectedPdfSummaryRequest
               ? pdfContextResult.pdfSummaryCoverageComplete
                 ? [
-                    "MODO DE RESUMO ADAPTATIVO RÁPIDO",
-                    "O contexto abaixo foi preparado automaticamente a partir do texto extraído, usando o conteúdo integral quando couber e amostragem distribuída quando o conjunto for grande.",
-                    "Produza uma síntese integrada e objetiva sem expor detalhes da estratégia interna de processamento.",
-                    "Não peça o texto integral novamente quando o conteúdo abaixo estiver disponível.",
+                    "MODO DE RESUMO HIERÁRQUICO INTEGRAL",
+                    "O contexto abaixo foi produzido a partir do texto extraído completo, processado sequencialmente e consolidado.",
+                    "Não diga que apenas alguns trechos foram acessados e não peça o texto integral novamente.",
                   ].join("\n")
                 : [
-                    "MODO DE RESUMO ADAPTATIVO COM CONTEÚDO INDISPONÍVEL",
+                    "MODO DE RESUMO HIERÁRQUICO COM COBERTURA PARCIAL",
                     "Informe somente a limitação concreta descrita nos avisos abaixo; não use observações genéricas.",
                     ...pdfContextResult.pdfContextWarnings.map((warning) => `- ${warning}`),
                   ].join("\n")
