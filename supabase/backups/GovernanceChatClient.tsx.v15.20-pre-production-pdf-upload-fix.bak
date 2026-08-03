@@ -2848,76 +2848,15 @@ export default function GovernanceChatClient({
             ? `${fileIndex + 1} de ${pdfs.length}: ${file.name}`
             : file.name;
 
-        setPdfPreparationStatus(`Preparando envio seguro de ${progressLabel}`);
-
-        const prepareResponse = await fetch("/api/upload-pdf", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            mode: "prepare_signed_upload",
-            product: "governance",
-            conversationId: selectedConversation.id,
-            fileName: file.name,
-            fileSize: file.size,
-            mimeType: file.type || "application/pdf",
-          }),
-        });
-
-        const preparePayload = await prepareResponse.json().catch(() => null);
-
-        if (!prepareResponse.ok) {
-          throw new Error(
-            preparePayload?.error ??
-              `Não foi possível preparar o envio do PDF ${file.name}.`,
-          );
-        }
-
-        const storagePath = String(preparePayload?.storagePath ?? "").trim();
-        const uploadToken = String(preparePayload?.token ?? "").trim();
-
-        if (!storagePath || !uploadToken) {
-          throw new Error(
-            `O envio seguro do PDF ${file.name} não retornou os dados necessários.`,
-          );
-        }
-
-        setPdfPreparationStatus(`Enviando ${progressLabel} diretamente ao Storage`);
-
-        const browserSupabase = getBrowserSupabaseClient();
-        const { error: directUploadError } = await browserSupabase.storage
-          .from(PDF_STORAGE_BUCKET)
-          .uploadToSignedUrl(storagePath, uploadToken, file, {
-            contentType: file.type || "application/pdf",
-            upsert: false,
-          });
-
-        if (directUploadError) {
-          console.error(
-            "[governance] Falha no upload direto do PDF:",
-            directUploadError,
-          );
-
-          throw new Error(`Não foi possível enviar o PDF ${file.name}.`);
-        }
-
-        setPdfPreparationStatus(`Registrando ${progressLabel}`);
+        setPdfPreparationStatus(`Enviando ${progressLabel}`);
+        const formData = new FormData();
+        formData.append("product", "governance");
+        formData.append("conversationId", selectedConversation.id);
+        formData.append("file", file, file.name);
 
         const uploadResponse = await fetch("/api/upload-pdf", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            mode: "register",
-            product: "governance",
-            conversationId: selectedConversation.id,
-            fileName: file.name,
-            storagePath,
-            fileSize: file.size,
-            mimeType: file.type || "application/pdf",
-          }),
+          body: formData,
         });
 
         const uploadPayload = await uploadResponse.json().catch(() => null);
@@ -2925,7 +2864,7 @@ export default function GovernanceChatClient({
         if (!uploadResponse.ok) {
           throw new Error(
             uploadPayload?.error ??
-              `O PDF ${file.name} foi enviado, mas não pôde ser registrado.`,
+              `Não foi possível enviar o PDF ${file.name}.`,
           );
         }
 

@@ -50,7 +50,6 @@ type PdfUploadPlanValidation = {
 };
 
 type UploadPdfRequestBody = {
-  mode?: "prepare_signed_upload" | "register" | string;
   product?: "essential" | "strategic" | "governance" | string;
   conversationId?: string;
   fileName?: string;
@@ -474,7 +473,6 @@ export async function POST(request: NextRequest) {
       pendingStorageUploadFile = fileValue;
 
       body = {
-        mode: "legacy_multipart",
         // product="governance" separa a Governança do fluxo comercial
         // compartilhado pelo Publ.IA Essencial/Estratégico.
         product: String(formData.get("product") ?? "").trim(),
@@ -488,7 +486,6 @@ export async function POST(request: NextRequest) {
       body = (await request.json()) as UploadPdfRequestBody;
     }
 
-    const uploadMode = String(body.mode ?? "").trim().toLowerCase();
     const product = String(body.product ?? "").trim().toLowerCase();
     const isGovernanceUpload = product === "governance";
     const productTier: ProductTier = isGovernanceUpload
@@ -499,46 +496,17 @@ export async function POST(request: NextRequest) {
 
     const conversationId = String(body.conversationId ?? "").trim();
     const fileName = String(body.fileName ?? "").trim();
-    let storagePath = String(body.storagePath ?? body.filePath ?? "").trim();
+    const storagePath = String(body.storagePath ?? body.filePath ?? "").trim();
     const fileSizeBytes = Number(body.fileSize ?? body.fileSizeBytes ?? 0);
 
-    if (!conversationId || !fileName || !fileSizeBytes) {
+    if (!conversationId || !fileName || !storagePath || !fileSizeBytes) {
       return NextResponse.json(
         {
           error:
-            "Dados inválidos para preparar o PDF. Envie conversationId, fileName e fileSize/fileSizeBytes.",
+            "Dados inválidos para registrar o PDF. Envie conversationId, fileName, storagePath/filePath e fileSize/fileSizeBytes.",
         },
         { status: 400 }
       );
-    }
-
-    if (uploadMode === "prepare_signed_upload") {
-      const safeFileName = sanitizeStorageFileName(fileName);
-
-      storagePath = [
-        user.id,
-        "governance",
-        conversationId,
-        `${Date.now()}-${crypto.randomUUID()}-${safeFileName}`,
-      ].join("/");
-    }
-
-    if (!storagePath) {
-      return NextResponse.json(
-        { error: "O caminho do PDF no Storage não foi informado." },
-        { status: 400 }
-      );
-    }
-
-    if (isGovernanceUpload) {
-      const expectedStoragePrefix = `${user.id}/governance/${conversationId}/`;
-
-      if (!storagePath.startsWith(expectedStoragePrefix)) {
-        return NextResponse.json(
-          { error: "Caminho de armazenamento inválido para este usuário ou conversa." },
-          { status: 400 }
-        );
-      }
     }
 
     if (isGovernanceUpload) {
@@ -814,39 +782,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (uploadMode === "prepare_signed_upload") {
-      if (!isGovernanceUpload) {
-        return NextResponse.json(
-          { error: "Upload assinado disponível somente no Governança." },
-          { status: 400 }
-        );
-      }
-
-      const { data: signedUpload, error: signedUploadError } =
-        await writeSupabase.storage
-          .from(PDF_STORAGE_BUCKET)
-          .createSignedUploadUrl(storagePath, { upsert: false });
-
-      if (signedUploadError || !signedUpload?.token) {
-        console.error(
-          "Erro ao preparar upload assinado do PDF:",
-          signedUploadError?.message ?? "Token de upload não retornado."
-        );
-
-        return NextResponse.json(
-          { error: "Não foi possível preparar o envio seguro do PDF." },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({
-        uploadMode: "signed",
-        bucket: PDF_STORAGE_BUCKET,
-        storagePath,
-        token: signedUpload.token,
-      });
-    }
-
     if (pendingStorageUploadFile) {
       const uploadBuffer = Buffer.from(await pendingStorageUploadFile.arrayBuffer());
 
@@ -985,7 +920,6 @@ export async function POST(request: NextRequest) {
           ),
         },
         activePdfFileId: insertedPdfId,
-        storagePath,
       },
       { status: 200 }
     );

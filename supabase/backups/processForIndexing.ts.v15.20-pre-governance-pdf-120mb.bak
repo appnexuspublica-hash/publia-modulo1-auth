@@ -16,7 +16,7 @@ const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 200;
 const CHUNK_MAX = 500;
 
-const DEFAULT_PDF_EXTRACT_MAX_MB = Number(process.env.PDF_EXTRACT_MAX_MB ?? 120);
+const PDF_EXTRACT_MAX_MB = Number(process.env.PDF_EXTRACT_MAX_MB ?? 48);
 const EXTRACT_TEXT_HARD_LIMIT = DEFAULT_EXTRACT_TEXT_HARD_LIMIT;
 
 const PDF_STORAGE_BUCKET =
@@ -113,7 +113,6 @@ type ProcessPdfParams = {
   pdfFileId: string;
   isDev?: boolean;
   resetBeforeProcessing?: boolean;
-  maxFileSizeMb?: number;
 };
 
 type ProcessPdfResult = {
@@ -127,20 +126,13 @@ export async function processPdfForIndexing({
   pdfFileId,
   isDev = false,
   resetBeforeProcessing = false,
-  maxFileSizeMb = DEFAULT_PDF_EXTRACT_MAX_MB,
 }: ProcessPdfParams): Promise<ProcessPdfResult> {
   console.log("[processPdfForIndexing] start", {
     userId,
     pdfFileId,
     resetBeforeProcessing,
     isDev,
-    maxFileSizeMb,
   });
-
-  const effectiveMaxFileSizeMb =
-    Number.isFinite(maxFileSizeMb) && maxFileSizeMb > 0
-      ? maxFileSizeMb
-      : DEFAULT_PDF_EXTRACT_MAX_MB;
 
   if (!openai) {
     return {
@@ -254,16 +246,16 @@ export async function processPdfForIndexing({
     };
   }
 
-  const maxBytes = effectiveMaxFileSizeMb * 1024 * 1024;
+  const maxBytes = PDF_EXTRACT_MAX_MB * 1024 * 1024;
 
   console.log("[processPdfForIndexing] size check", {
     fileSize,
     maxBytes,
-    maxMb: effectiveMaxFileSizeMb,
+    maxMb: PDF_EXTRACT_MAX_MB,
   });
 
   if (fileSize > 0 && fileSize > maxBytes) {
-    const msg = getSkippedLargePdfMessage(effectiveMaxFileSizeMb);
+    const msg = getSkippedLargePdfMessage(PDF_EXTRACT_MAX_MB);
 
     await client
       .from("pdf_files")
@@ -320,7 +312,7 @@ export async function processPdfForIndexing({
         hardLimit: EXTRACT_TEXT_HARD_LIMIT,
         fileSizeBytes: fileSize,
         maxBytes,
-        maxMbLabel: effectiveMaxFileSizeMb,
+        maxMbLabel: PDF_EXTRACT_MAX_MB,
         preferOcr: PDF_INDIVIDUAL_PREFER_OCR,
       });
 
